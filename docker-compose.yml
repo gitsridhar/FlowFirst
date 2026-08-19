@@ -14,3 +14,26 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
+  mariadb:
+    image: mariadb:11.4
+    container_name: mariadb_flowfirst
+    ports:
+      - "3306:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpassword
+      MARIADB_DATABASE: flowfirst_db
+      MARIADB_USER: flowuser
+      MARIADB_PASSWORD: flowpassword
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  mariadb_data:

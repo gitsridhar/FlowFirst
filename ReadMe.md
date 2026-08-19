@@ -1,244 +1,235 @@
-# FlowFirst - Multi-Process RabbitMQ Communication Pipeline
+# FlowFirst - Multi-Process RabbitMQ & MariaDB Data Pipeline
 
-This project implements inter-process communication using RabbitMQ and Python (`pika`) across two data flows with data mutation/reflection at intermediate steps.
+This project implements an end-to-end distributed inter-process communication and persistence pipeline using **Python**, **RabbitMQ**, and **MariaDB** across two data flows with intermediate data mutation, reflection, and database storage.
 
 ---
 
-## Architecture & Data Flows
+## System Architecture & Data Flows
 
 ### Flow 1
 1. **Process 1 (`process1.py`)**: Prepares initial data and publishes it to queue `flow1_p1_to_p2`.
-2. **Process 2 (`process2.py`)**: Consumes the message from `flow1_p1_to_p2`, modifies the payload (increments counter and appends to history log), and **reflects** it back to queue `flow1_p2_to_p3`.
-3. **Process 3 (`process3.py`)**: Consumes from `flow1_p2_to_p3` and logs the full audit trail.
+2. **Process 2 (`process2.py`)**: Consumes message from `flow1_p1_to_p2`, modifies payload (`counter += 10`), and **reflects** it to queue `flow1_p2_to_p3`.
+3. **Process 3 (`process3.py`)**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment log, and forwards it to queue `flow1_p3_to_p4`.
+4. **Process 4 (`process4.py`)**: Consumes from `flow1_p3_to_p4` and persists the entire record and audit trail into **MariaDB** table `processed_messages`.
 
 ```
-+---------------+      flow1_p1_to_p2      +---------------+      flow1_p2_to_p3      +---------------+
-|   Process 1   | -----------------------> |   Process 2   | -----------------------> |   Process 3   |
-|  (Generator)  |                          |  (Reflector)  |                          |  (End Sink)   |
-+---------------+                          +---------------+                          +---------------+
++---------------+    flow1_p1_to_p2    +---------------+    flow1_p2_to_p3    +---------------+    flow1_p3_to_p4    +---------------+    SQL INSERT    +-------------+
+|   Process 1   | -------------------> |   Process 2   | -------------------> |   Process 3   | -------------------> |   Process 4   | ---------------> |   MariaDB   |
+|  (Generator)  |                      |  (Reflector)  |                      |  (Forwarder)  |                      |  (Persister)  |                  | (flowfirst) |
++---------------+                      +---------------+                      +---------------+                      +---------------+                  +-------------+
 ```
 
 ---
 
 ### Flow 2
-1. **Process 1 (`process1.py`)**: Prepares metric payload and publishes it to queue `flow2_p1_to_p2`.
-2. **Process 2 (`process2.py`)**: Consumes message, examines value threshold, applies transformation, and publishes it to queue `flow2_p2_to_p3`.
-3. **Process 3 (`process3.py`)**: Picks up message from `flow2_p2_to_p3`, enriches it with verification status, and **reflects** it to queue `flow2_p3_reflected`.
+1. **Process 1 (`process1.py`)**: Prepares metric payload and publishes to queue `flow2_p1_to_p2`.
+2. **Process 2 (`process2.py`)**: Consumes message, examines value threshold, applies a 15% scaling factor, and forwards to `flow2_p2_to_p3`.
+3. **Process 3 (`process3.py`)**: Picks up message from `flow2_p2_to_p3`, enriches it with verification status (`verified_by: process3`), and **reflects** it to queue `flow2_p3_reflected`.
+4. **Process 4 (`process4.py`)**: Consumes from `flow2_p3_reflected` and stores the final record and complete lifecycle history into **MariaDB**.
 
 ```
-+---------------+      flow2_p1_to_p2      +---------------+      flow2_p2_to_p3      +---------------+
-|   Process 1   | -----------------------> |   Process 2   | -----------------------> |   Process 3   |
-|  (Generator)  |                          |   (Examiner)  |                          |  (Reflector)  |
-+---------------+                          +---------------+                          +---------------+
-                                                                                              |
-                                                                                              v
-                                                                                    flow2_p3_reflected
++---------------+    flow2_p1_to_p2    +---------------+    flow2_p2_to_p3    +---------------+
+|   Process 1   | -------------------> |   Process 2   | -------------------> |   Process 3   |
+|  (Generator)  |                      |   (Examiner)  |                      |  (Reflector)  |
++---------------+                      +---------------+                      +---------------+
+                                                                                      |
+                                                                             flow2_p3_reflected
+                                                                                      |
+                                                                                      v
++-------------+         SQL INSERT            +---------------+
+|   MariaDB   | <---------------------------- |   Process 4   |
+| (flowfirst) |                               |  (Persister)  |
++-------------+                               +---------------+
 ```
 
 ---
 
-## Installation on RHEL 9.6 (Red Hat Enterprise Linux 9.6)
+## MariaDB Database & Table Schema
 
-You can choose either **Docker / Docker Compose** (Option A) or **Direct Native Installation via DNF/RPM** (Option B).
+The database table definition (included in [`init_db.sql`](init_db.sql:1)):
 
----
+```sql
+CREATE DATABASE IF NOT EXISTS flowfirst_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-### Option A: Install Docker & Docker Compose on RHEL 9.6 (Recommended)
+USE flowfirst_db;
 
-1. **Remove any conflicting legacy packages:**
-   ```bash
-   sudo dnf remove -y podman buildah
-   ```
-
-2. **Set up the official Docker CE repository:**
-   ```bash
-   sudo dnf install -y dnf-plugins-core
-   sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
-   ```
-
-3. **Install Docker Engine, CLI, and Docker Compose plugin:**
-   ```bash
-   sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-   ```
-
-4. **Start and enable Docker service:**
-   ```bash
-   sudo systemctl enable --now docker
-   ```
-
-5. **(Optional) Allow current user to run Docker without `sudo`:**
-   ```bash
-   sudo usermod -aG docker $USER
-   newgrp docker
-   ```
-
-6. **Configure firewall (firewalld) if accessing from another machine:**
-   ```bash
-   sudo firewall-cmd --permanent --add-port=5672/tcp
-   sudo firewall-cmd --permanent --add-port=15672/tcp
-   sudo firewall-cmd --reload
-   ```
-
-7. **Start RabbitMQ using Docker Compose:**
-   ```bash
-   docker compose up -d
-   ```
-   *Dashboard will be available at `http://<RHEL_IP>:15672` (Username: `guest`, Password: `guest`).*
+CREATE TABLE IF NOT EXISTS processed_messages (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    message_id VARCHAR(64) NOT NULL UNIQUE,
+    flow_id INT NOT NULL,
+    item_id INT NOT NULL,
+    initial_data VARCHAR(255),
+    counter_value INT NULL,
+    metric_value DECIMAL(10, 2) NULL,
+    examined_status VARCHAR(50) NULL,
+    verified_by VARCHAR(50) NULL,
+    history_trail JSON NOT NULL,
+    raw_payload JSON NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_flow_item (flow_id, item_id),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
 
 ---
 
-### Option B: Native RabbitMQ Installation on RHEL 9.6 (Direct RPM / DNF)
+## Infrastructure Setup
 
-RabbitMQ on RHEL 9.6 requires Erlang/OTP 26+ (provided via the official Team RabbitMQ Cloudsmith repositories).
+### Option 1: Using Docker Compose (Recommended)
+Docker Compose spins up both RabbitMQ (with Management UI) and MariaDB 11.4 with automated schema initialization:
 
-1. **Import Erlang and RabbitMQ GPG signing keys:**
-   ```bash
-   sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key'
-   sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key'
-   ```
-
-2. **Add Erlang and RabbitMQ repository definitions for RHEL 9:**
-   ```bash
-   sudo tee /etc/yum.repos.d/rabbitmq.repo << 'EOF'
-   [rabbitmq-erlang]
-   name=rabbitmq-erlang
-   baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/rpm/el/9/$basearch
-   repo_gpgcheck=1
-   enabled=1
-   gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key
-   gpgcheck=0
-   sslverify=1
-   sslcacert=/etc/pki/tls/certs/ca-bundle.crt
-   metadata_expire=300
-
-   [rabbitmq-server]
-   name=rabbitmq-server
-   baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/rpm/el/9/noarch
-   repo_gpgcheck=1
-   enabled=1
-   gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key
-   gpgcheck=0
-   sslverify=1
-   sslcacert=/etc/pki/tls/certs/ca-bundle.crt
-   metadata_expire=300
-   EOF
-   ```
-
-3. **Install Erlang and RabbitMQ Server:**
-   ```bash
-   sudo dnf update -y
-   sudo dnf install -y erlang rabbitmq-server
-   ```
-
-4. **Enable the Management Plugin & Start RabbitMQ:**
-   ```bash
-   # Enable web UI plugin
-   sudo rabbitmq-plugins enable rabbitmq_management
-
-   # Enable and start systemd service
-   sudo systemctl enable --now rabbitmq-server
-   ```
-
-5. **Configure admin user (by default, `guest` can only connect from localhost):**
-   ```bash
-   sudo rabbitmqctl add_user admin YourSecurePassword123
-   sudo rabbitmqctl set_user_tags admin administrator
-   sudo rabbitmqctl set_permissions -p / admin ".*" ".*" ".*"
-   ```
-
-6. **Open ports in `firewalld` (RHEL 9 default firewall):**
-   ```bash
-   sudo firewall-cmd --permanent --add-port=5672/tcp   # AMQP
-   sudo firewall-cmd --permanent --add-port=15672/tcp  # Management UI
-   sudo firewall-cmd --reload
-   ```
-
----
-
-## Other Operating Systems (macOS / Ubuntu / Windows)
-
-<details>
-<summary>Click to expand</summary>
-
-### macOS (Homebrew)
 ```bash
-brew install rabbitmq
-brew services start rabbitmq
+docker compose up -d
+```
+- **RabbitMQ AMQP:** `localhost:5672`
+- **RabbitMQ Dashboard:** `http://localhost:15672` (User: `guest` / Pass: `guest`)
+- **MariaDB Server:** `localhost:3306` (User: `flowuser` / Pass: `flowpassword` / DB: `flowfirst_db`)
+
+---
+
+### Option 2: Installation on RHEL 9.6 (Red Hat Enterprise Linux 9.6)
+
+#### A. Install Docker & Docker Compose on RHEL 9.6
+```bash
+# 1. Remove conflicting packages
+sudo dnf remove -y podman buildah
+
+# 2. Add Docker repository
+sudo dnf install -y dnf-plugins-core
+sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+
+# 3. Install Docker and Compose plugin
+sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# 4. Start Docker daemon
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+
+# 5. Open firewall ports
+sudo firewall-cmd --permanent --add-port={5672/tcp,15672/tcp,3306/tcp}
+sudo firewall-cmd --reload
+
+# 6. Start services
+docker compose up -d
 ```
 
-### Ubuntu / Debian
+#### B. Native Installation on RHEL 9.6 (RPM / DNF)
+
+##### 1. Install & Configure MariaDB on RHEL 9.6:
 ```bash
-sudo apt update
-sudo apt install -y rabbitmq-server
+# Install MariaDB server
+sudo dnf install -y mariadb-server mariadb
+
+# Enable and start MariaDB service
+sudo systemctl enable --now mariadb
+
+# Secure installation (optional for production)
+sudo mariadb-secure-installation
+
+# Create user, database, and schema
+sudo mariadb -u root << 'EOF'
+CREATE DATABASE IF NOT EXISTS flowfirst_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'flowuser'@'%' IDENTIFIED BY 'flowpassword';
+CREATE USER IF NOT EXISTS 'flowuser'@'localhost' IDENTIFIED BY 'flowpassword';
+GRANT ALL PRIVILEGES ON flowfirst_db.* TO 'flowuser'@'%';
+GRANT ALL PRIVILEGES ON flowfirst_db.* TO 'flowuser'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+
+# Run initialization script
+sudo mariadb -u flowuser -pflowpassword flowfirst_db < init_db.sql
+```
+
+##### 2. Install & Configure RabbitMQ on RHEL 9.6:
+```bash
+# Import GPG keys
+sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key'
+sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key'
+
+# Add yum repo definitions
+sudo tee /etc/yum.repos.d/rabbitmq.repo << 'EOF'
+[rabbitmq-erlang]
+name=rabbitmq-erlang
+baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/rpm/el/9/$basearch
+repo_gpgcheck=1
+enabled=1
+gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key
+gpgcheck=0
+sslverify=1
+sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+metadata_expire=300
+
+[rabbitmq-server]
+name=rabbitmq-server
+baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/rpm/el/9/noarch
+repo_gpgcheck=1
+enabled=1
+gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key
+gpgcheck=0
+sslverify=1
+sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+metadata_expire=300
+EOF
+
+# Install packages & start service
+sudo dnf update -y
+sudo dnf install -y erlang rabbitmq-server
+sudo rabbitmq-plugins enable rabbitmq_management
 sudo systemctl enable --now rabbitmq-server
-```
 
-### Windows (Chocolatey)
-```powershell
-choco install rabbitmq
+# Open firewall ports
+sudo firewall-cmd --permanent --add-port=5672/tcp
+sudo firewall-cmd --permanent --add-port=15672/tcp
+sudo firewall-cmd --permanent --add-port=3306/tcp
+sudo firewall-cmd --reload
 ```
-
-</details>
 
 ---
 
-## Python Virtual Environment Setup
+## Python Virtual Environment & Dependencies
 
-1. **Create a virtual environment:**
+1. **Create and activate virtual environment:**
    ```bash
    python3 -m venv .venv
+   source .venv/bin/activate
    ```
 
-2. **Activate the virtual environment:**
-   - **macOS / Linux:**
-     ```bash
-     source .venv/bin/activate
-     ```
-   - **Windows (PowerShell):**
-     ```powershell
-     .venv\Scripts\Activate.ps1
-     ```
-   - **Windows (cmd.exe):**
-     ```cmd
-     .venv\Scripts\activate.bat
-     ```
-
-3. **Install dependencies:**
+2. **Install Python packages:**
    ```bash
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
 
+3. **Configure Environment Variables (Optional):**
+   ```bash
+   cp .env.example .env
+   ```
+
 ---
 
-## Configuration
+## Running the 4-Process Pipeline
 
-Default environment parameters connect to `localhost:5672` with default credentials (`guest`/`guest`).
+Open **4 separate terminal windows** (with `.venv` activated in each) and run the processes in downstream-to-upstream order:
 
-Optionally copy `.env.example` to `.env` to customize settings:
+### Terminal 1: Process 4 (MariaDB Persister & Sink)
 ```bash
-cp .env.example .env
+source .venv/bin/activate
+python process4.py
 ```
 
----
-
-## Running the Processes
-
-Open **3 separate terminal windows**, activate the virtual environment in each, and run the processes in the following order:
-
-### Terminal 1: Start Process 3 (Sink & Flow-2 Reflector)
+### Terminal 2: Process 3 (Reflector & Forwarder)
 ```bash
 source .venv/bin/activate
 python process3.py
 ```
 
-### Terminal 2: Start Process 2 (Processor & Flow-1 Reflector)
+### Terminal 3: Process 2 (Examiner & Reflector)
 ```bash
 source .venv/bin/activate
 python process2.py
 ```
 
-### Terminal 3: Start Process 1 (Producer)
+### Terminal 4: Process 1 (Producer / Data Generator)
 ```bash
 source .venv/bin/activate
 python process1.py
@@ -246,7 +237,14 @@ python process1.py
 
 ---
 
-## Verification
-- Observe logs in Terminal 2 showing Process 2 modifying and reflecting Flow 1 messages, and examining Flow 2 messages.
-- Observe logs in Terminal 3 showing Process 3 consuming Flow 1 messages and reflecting Flow 2 messages.
-- Check RabbitMQ Management console at `http://localhost:15672` to inspect queue activity and message delivery rates.
+## Inspecting Database Records
+
+Query the MariaDB database to verify stored messages and audit trails:
+
+```bash
+# Using Docker:
+docker exec -it mariadb_flowfirst mariadb -u flowuser -pflowpassword -e "USE flowfirst_db; SELECT id, message_id, flow_id, item_id, counter_value, metric_value, examined_status, verified_by, created_at FROM processed_messages;"
+
+# Or using local client:
+mariadb -h localhost -P 3306 -u flowuser -pflowpassword flowfirst_db -e "SELECT * FROM processed_messages\G;"
+```

@@ -6,45 +6,121 @@ This project implements an end-to-end distributed inter-process communication an
 
 ## System Architecture & Data Flows
 
-### Flow 1
-1. **Process 1 (`process1.py`)**: Prepares initial data and publishes it to queue `flow1_p1_to_p2`.
-2. **Process 2 (`process2.py`)**: Consumes message from `flow1_p1_to_p2`, modifies payload (`counter += 10`), and **reflects** it to queue `flow1_p2_to_p3`.
-3. **Process 3 (`process3.py`)**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment log, and forwards it to queue `flow1_p3_to_p4`.
-4. **Process 4 (`process4.py`)**: Consumes from `flow1_p3_to_p4` and persists the entire record and audit trail into **MariaDB** table `processed_messages`.
+### High-Level Topology Diagram
 
-```
-+---------------+    flow1_p1_to_p2    +---------------+    flow1_p2_to_p3    +---------------+    flow1_p3_to_p4    +---------------+    SQL INSERT    +-------------+
-|   Process 1   | -------------------> |   Process 2   | -------------------> |   Process 3   | -------------------> |   Process 4   | ---------------> |   MariaDB   |
-|  (Generator)  |                      |  (Reflector)  |                      |  (Forwarder)  |                      |  (Persister)  |                  | (flowfirst) |
-+---------------+                      +---------------+                      +---------------+                      +---------------+                  +-------------+
+```mermaid
+graph TD
+    subgraph Flow 1 [Flow 1: Reflection at Process 2]
+        P1_1[Process 1: Generator] -->|flow1_p1_to_p2| P2_1[Process 2: Modifies & Reflects]
+        P2_1 -->|flow1_p2_to_p3| P3_1[Process 3: Receives & Forwards]
+        P3_1 -->|flow1_p3_to_p4| P4_1[Process 4: DB Persister]
+        P4_1 -->|SQL INSERT| DB1[(MariaDB: processed_messages)]
+    end
+
+    subgraph Flow 2 [Flow 2: Examination at Process 2 & Reflection at Process 3]
+        P1_2[Process 1: Generator] -->|flow2_p1_to_p2| P2_2[Process 2: Examines & Scales]
+        P2_2 -->|flow2_p2_to_p3| P3_2[Process 3: Seals & Reflects]
+        P3_2 -->|flow2_p3_reflected| P4_2[Process 4: DB Persister]
+        P4_2 -->|SQL INSERT| DB2[(MariaDB: processed_messages)]
+    end
+
+    style P1_1 fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    style P2_1 fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    style P3_1 fill:#ede7f6,stroke:#7e57c2,stroke-width:2px
+    style P4_1 fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    style DB1 fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+
+    style P1_2 fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    style P2_2 fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    style P3_2 fill:#ede7f6,stroke:#7e57c2,stroke-width:2px
+    style P4_2 fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    style DB2 fill:#fce4ec,stroke:#c2185b,stroke-width:2px
 ```
 
 ---
 
-### Flow 2
-1. **Process 1 (`process1.py`)**: Prepares metric payload and publishes to queue `flow2_p1_to_p2`.
-2. **Process 2 (`process2.py`)**: Consumes message, examines value threshold, applies a 15% scaling factor, and forwards to `flow2_p2_to_p3`.
-3. **Process 3 (`process3.py`)**: Picks up message from `flow2_p2_to_p3`, enriches it with verification status (`verified_by: process3`), and **reflects** it to queue `flow2_p3_reflected`.
-4. **Process 4 (`process4.py`)**: Consumes from `flow2_p3_reflected` and stores the final record and complete lifecycle history into **MariaDB**.
+### Sequence Diagram: Flow 1 vs Flow 2 Message Lifecycles
 
+```mermaid
+sequenceDiagram
+    autonumber
+    actor P1 as Process 1 (Generator)
+    participant Q1_12 as Queue: flow1_p1_to_p2
+    participant P2 as Process 2 (Examiner/Reflector)
+    participant Q1_23 as Queue: flow1_p2_to_p3
+    participant P3 as Process 3 (Reflector/Forwarder)
+    participant Q1_34 as Queue: flow1_p3_to_p4
+    participant P4 as Process 4 (Persister)
+    participant DB as MariaDB (flowfirst_db)
+
+    Note over P1, DB: === FLOW 1 LIFECYCLE ===
+    P1->>Q1_12: Publish initial payload (counter=101)
+    Q1_12->>P2: Consume message
+    Note over P2: Modify data: counter += 10, add history log
+    P2->>Q1_23: Reflect modified message
+    Q1_23->>P3: Consume reflected message
+    Note over P3: Attach forward audit tag
+    P3->>Q1_34: Forward message
+    Q1_34->>P4: Consume message
+    P4->>DB: INSERT / UPDATE into processed_messages
+
+    participant Q2_12 as Queue: flow2_p1_to_p2
+    participant Q2_23 as Queue: flow2_p2_to_p3
+    participant Q2_3R as Queue: flow2_p3_reflected
+
+    Note over P1, DB: === FLOW 2 LIFECYCLE ===
+    P1->>Q2_12: Publish raw metrics (value=26.5)
+    Q2_12->>P2: Consume message
+    Note over P2: Examine threshold & scale value * 1.15
+    P2->>Q2_23: Forward examined payload
+    Q2_23->>P3: Consume examined message
+    Note over P3: Add verification seal (verified_by=process3)
+    P3->>Q2_3R: Reflect modified payload back to queue
+    Q2_3R->>P4: Consume reflected message
+    P4->>DB: INSERT / UPDATE into processed_messages
 ```
-+---------------+    flow2_p1_to_p2    +---------------+    flow2_p2_to_p3    +---------------+
-|   Process 1   | -------------------> |   Process 2   | -------------------> |   Process 3   |
-|  (Generator)  |                      |   (Examiner)  |                      |  (Reflector)  |
-+---------------+                      +---------------+                      +---------------+
-                                                                                      |
-                                                                             flow2_p3_reflected
-                                                                                      |
-                                                                                      v
-+-------------+         SQL INSERT            +---------------+
-|   MariaDB   | <---------------------------- |   Process 4   |
-| (flowfirst) |                               |  (Persister)  |
-+-------------+                               +---------------+
-```
+
+---
+
+### Detailed Step Descriptions
+
+#### Flow 1
+1. **Process 1 ([`process1.py`](process1.py:1))**: Prepares initial data and publishes it to queue `flow1_p1_to_p2`.
+2. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message from `flow1_p1_to_p2`, modifies payload (`counter += 10`), and **reflects** it to queue `flow1_p2_to_p3`.
+3. **Process 3 ([`process3.py`](process3.py:1))**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment log, and forwards it to queue `flow1_p3_to_p4`.
+4. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow1_p3_to_p4` and persists the entire record and audit trail into **MariaDB** table `processed_messages`.
+
+---
+
+#### Flow 2
+1. **Process 1 ([`process1.py`](process1.py:1))**: Prepares metric payload and publishes to queue `flow2_p1_to_p2`.
+2. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, examines value threshold, applies a 15% scaling factor, and forwards to `flow2_p2_to_p3`.
+3. **Process 3 ([`process3.py`](process3.py:1))**: Picks up message from `flow2_p2_to_p3`, enriches it with verification status (`verified_by: process3`), and **reflects** it to queue `flow2_p3_reflected`.
+4. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow2_p3_reflected` and stores the final record and complete lifecycle history into **MariaDB**.
 
 ---
 
 ## MariaDB Database & Table Schema
+
+### Entity Relationship Diagram
+
+```mermaid
+erDiagram
+    PROCESSED_MESSAGES {
+        bigint id PK "Auto Increment"
+        varchar(64) message_id UK "Unique UUID"
+        int flow_id "Flow identifier (1 or 2)"
+        int item_id "Sequence number"
+        varchar(255) initial_data "Origin payload"
+        int counter_value "Flow 1 reflected counter"
+        decimal(10_2) metric_value "Flow 2 examined & scaled metric"
+        varchar(50) examined_status "HIGH / NORMAL"
+        varchar(50) verified_by "process3 verification mark"
+        json history_trail "Full audit log with timestamps"
+        json raw_payload "Complete final payload object"
+        timestamp created_at "Record creation time"
+    }
+```
 
 The database table definition (included in [`init_db.sql`](init_db.sql:1)):
 

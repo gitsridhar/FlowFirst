@@ -1,115 +1,127 @@
 # FlowFirst - Multi-Process RabbitMQ & MariaDB Data Pipeline
+## Cluster-Aware 3-Node Architecture with Virtual IP (VIP), HAProxy, and Pacemaker
 
-This project implements an end-to-end distributed inter-process communication and persistence pipeline using **Python**, **RabbitMQ**, and **MariaDB** across two data flows with intermediate data mutation, reflection, and database storage.
+This project implements an end-to-end, enterprise-grade distributed inter-process communication and persistence pipeline across **3 network nodes**. It incorporates **Virtual IP (VIP) failover** managed by **Pacemaker/Corosync**, **HAProxy round-robin load balancing**, an **HTTP REST API** for external `curl` invocations, **RabbitMQ message queuing**, and **MariaDB database persistence**.
 
 ---
 
-## System Architecture & Data Flows
+## Multi-Node Cluster Architecture & Network Topology
 
-### High-Level Topology Diagram
+### Minimum Hardware/Network Requirements
+- **Node 1 (`node1`)**: `192.168.1.101` (RHEL 9.6)
+- **Node 2 (`node2`)**: `192.168.1.102` (RHEL 9.6)
+- **Node 3 (`node3`)**: `192.168.1.103` (RHEL 9.6)
+- **Virtual IP (VIP)**: `192.168.1.100` (Managed by Pacemaker `IPaddr2` resource agent)
 
 ```mermaid
 graph TD
-    Client[curl / HTTP Client] -->|POST /api/flow1<br/>POST /api/flow2<br/>POST /api/batch| P1[Process 1: REST API Producer<br/>Port: 8080]
+    Client["Client / curl Commands<br/>(Target: http://192.168.1.100:8080)"] -->|Virtual IP 192.168.1.100:8080| VIP["Pacemaker Virtual IP (VIP)<br/>192.168.1.100"]
 
-    subgraph Flow 1 [Flow 1: Reflection at Process 2]
-        P1 -->|flow1_p1_to_p2| P2_1[Process 2: Modifies & Reflects]
-        P2_1 -->|flow1_p2_to_p3| P3_1[Process 3: Receives & Forwards]
-        P3_1 -->|flow1_p3_to_p4| P4_1[Process 4: DB Persister]
-        P4_1 -->|SQL INSERT| DB1[(MariaDB: processed_messages)]
-    end
+    subgraph Cluster ["Pacemaker Multi-Node High Availability Cluster"]
+        VIP --> HAProxy["HAProxy Load Balancer<br/>(Round-Robin on :8080)"]
 
-    subgraph Flow 2 [Flow 2: Examination at Process 2 & Reflection at Process 3]
-        P1 -->|flow2_p1_to_p2| P2_2[Process 2: Examines & Scales]
-        P2_2 -->|flow2_p2_to_p3| P3_2[Process 3: Seals & Reflects]
-        P3_2 -->|flow2_p3_reflected| P4_2[Process 4: DB Persister]
-        P4_2 -->|SQL INSERT| DB2[(MariaDB: processed_messages)]
+        subgraph Node1 ["Node 1 (192.168.1.101)"]
+            P1_N1["Process 1: REST API (:8080)"]
+            P2_N1["Process 2: Examiner / Reflector"]
+            P3_N1["Process 3: Reflector / Forwarder"]
+            P4_N1["Process 4: DB Persister"]
+            RMQ_N1[("RabbitMQ Node 1")]
+            DB_N1[("MariaDB Node 1")]
+        end
+
+        subgraph Node2 ["Node 2 (192.168.1.102)"]
+            P1_N2["Process 1: REST API (:8080)"]
+            P2_N2["Process 2: Examiner / Reflector"]
+            P3_N2["Process 3: Reflector / Forwarder"]
+            P4_N2["Process 4: DB Persister"]
+            RMQ_N2[("RabbitMQ Node 2")]
+            DB_N2[("MariaDB Node 2")]
+        end
+
+        subgraph Node3 ["Node 3 (192.168.1.103)"]
+            P1_N3["Process 1: REST API (:8080)"]
+            P2_N3["Process 2: Examiner / Reflector"]
+            P3_N3["Process 3: Reflector / Forwarder"]
+            P4_N3["Process 4: DB Persister"]
+            RMQ_N3[("RabbitMQ Node 3")]
+            DB_N3[("MariaDB Node 3")]
+        end
+
+        HAProxy -->|Round-Robin 1| P1_N1
+        HAProxy -->|Round-Robin 2| P1_N2
+        HAProxy -->|Round-Robin 3| P1_N3
     end
 
     style Client fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px
-    style P1 fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
-    style P2_1 fill:#fff3e0,stroke:#f57c00,stroke-width:2px
-    style P3_1 fill:#ede7f6,stroke:#7e57c2,stroke-width:2px
-    style P4_1 fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
-    style DB1 fill:#fce4ec,stroke:#c2185b,stroke-width:2px
-
-    style P2_2 fill:#fff3e0,stroke:#f57c00,stroke-width:2px
-    style P3_2 fill:#ede7f6,stroke:#7e57c2,stroke-width:2px
-    style P4_2 fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
-    style DB2 fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    style VIP fill:#ffecb3,stroke:#ff8f00,stroke-width:3px
+    style HAProxy fill:#e0f2f1,stroke:#00897b,stroke-width:2px
+    style Node1 fill:#f9fbe7,stroke:#9e9d24,stroke-width:2px
+    style Node2 fill:#f9fbe7,stroke:#9e9d24,stroke-width:2px
+    style Node3 fill:#f9fbe7,stroke:#9e9d24,stroke-width:2px
 ```
 
 ---
 
-### Sequence Diagram: Flow 1 vs Flow 2 Message Lifecycles
+## End-to-End Sequence & Data Flow
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client as HTTP Client (curl)
-    participant P1 as Process 1 (REST API on :8080)
-    participant Q1_12 as Queue: flow1_p1_to_p2
-    participant P2 as Process 2 (Examiner/Reflector)
-    participant Q1_23 as Queue: flow1_p2_to_p3
-    participant P3 as Process 3 (Reflector/Forwarder)
-    participant Q1_34 as Queue: flow1_p3_to_p4
-    participant P4 as Process 4 (Persister)
-    participant DB as MariaDB (flowfirst_db)
+    participant VIP as Virtual IP (192.168.1.100)
+    participant HAP as HAProxy Load Balancer
+    participant P1 as Process 1 (Node 1/2/3 REST API)
+    participant Q12 as RabbitMQ (flow_p1_to_p2)
+    participant P2 as Process 2 (Examiner / Reflector)
+    participant Q23 as RabbitMQ (flow_p2_to_p3)
+    participant P3 as Process 3 (Reflector / Forwarder)
+    participant Q34 as RabbitMQ (flow_p3_to_p4 / Reflected)
+    participant P4 as Process 4 (DB Persister)
+    participant DB as MariaDB (processed_messages)
 
-    Note over Client, DB: === FLOW 1 LIFECYCLE ===
-    Client->>P1: POST /api/flow1 (JSON payload)
-    P1->>Q1_12: Publish message (counter=101)
-    P1-->>Client: HTTP 200 OK (JSON response with message_id)
-    Q1_12->>P2: Consume message
-    Note over P2: Modify data: counter += 10, add history log
-    P2->>Q1_23: Reflect modified message
-    Q1_23->>P3: Consume reflected message
-    Note over P3: Attach forward audit tag
-    P3->>Q1_34: Forward message
-    Q1_34->>P4: Consume message
-    P4->>DB: INSERT / UPDATE into processed_messages
+    Note over Client, DB: === CLIENT INVOKES VIA VIRTUAL IP (ROUND-ROBIN DISPATCH) ===
+    Client->>VIP: POST http://192.168.1.100:8080/api/flow1
+    VIP->>HAP: Forward request to HAProxy (:8080)
+    HAP->>P1: Route to Node 1/2/3 via Round-Robin
+    P1->>Q12: Publish message to queue flow1_p1_to_p2
+    P1-->>Client: HTTP 200 OK (includes handling node & message_id)
 
-    participant Q2_12 as Queue: flow2_p1_to_p2
-    participant Q2_23 as Queue: flow2_p2_to_p3
-    participant Q2_3R as Queue: flow2_p3_reflected
-
-    Note over Client, DB: === FLOW 2 LIFECYCLE ===
-    Client->>P1: POST /api/flow2 (JSON payload)
-    P1->>Q2_12: Publish raw metrics (value=26.5)
-    P1-->>Client: HTTP 200 OK (JSON response with message_id)
-    Q2_12->>P2: Consume message
-    Note over P2: Examine threshold & scale value * 1.15
-    P2->>Q2_23: Forward examined payload
-    Q2_23->>P3: Consume examined message
-    Note over P3: Add verification seal (verified_by=process3)
-    P3->>Q2_3R: Reflect modified payload back to queue
-    Q2_3R->>P4: Consume reflected message
-    P4->>DB: INSERT / UPDATE into processed_messages
+    Note over Q12, DB: === ASYNCHRONOUS PIPELINE EXECUTION ===
+    Q12->>P2: Consume Flow 1 message
+    Note over P2: Modify data: counter += 10, append history audit
+    P2->>Q23: Reflect modified message to flow1_p2_to_p3
+    Q23->>P3: Consume reflected message
+    Note over P3: Attach forward audit stage
+    P3->>Q34: Forward to flow1_p3_to_p4
+    Q34->>P4: Consume message
+    P4->>DB: INSERT / UPDATE record in MariaDB processed_messages
 ```
 
 ---
 
-### Detailed Step Descriptions
+## Step-by-Step Data Flows
 
-#### Flow 1
-1. **Process 1 ([`process1.py`](process1.py:1))**: Receives HTTP POST request (`/api/flow1`), creates payload, and publishes it to queue `flow1_p1_to_p2`.
-2. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message from `flow1_p1_to_p2`, modifies payload (`counter += 10`), and **reflects** it to queue `flow1_p2_to_p3`.
-3. **Process 3 ([`process3.py`](process3.py:1))**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment log, and forwards it to queue `flow1_p3_to_p4`.
-4. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow1_p3_to_p4` and persists the entire record and audit trail into **MariaDB** table `processed_messages`.
-
----
-
-#### Flow 2
-1. **Process 1 ([`process1.py`](process1.py:1))**: Receives HTTP POST request (`/api/flow2`), creates metric payload, and publishes to queue `flow2_p1_to_p2`.
-2. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, examines value threshold, applies a 15% scaling factor, and forwards to `flow2_p2_to_p3`.
-3. **Process 3 ([`process3.py`](process3.py:1))**: Picks up message from `flow2_p2_to_p3`, enriches it with verification status (`verified_by: process3`), and **reflects** it to queue `flow2_p3_reflected`.
-4. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow2_p3_reflected` and stores the final record and complete lifecycle history into **MariaDB**.
+### Flow 1: Intermediate Reflection at Process 2 & DB Persistence
+1. **Client (`curl`)**: Sends `POST /api/flow1` to the Virtual IP `http://192.168.1.100:8080`.
+2. **HAProxy**: Delivers request to `Process 1` on one of the active cluster nodes (Round-Robin).
+3. **Process 1 ([`process1.py`](process1.py:1))**: Generates payload with UUID, publishes to `flow1_p1_to_p2`.
+4. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, modifies counter (`+10`), logs audit entry, and **reflects** it to `flow1_p2_to_p3`.
+5. **Process 3 ([`process3.py`](process3.py:1))**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment timestamp, and forwards to `flow1_p3_to_p4`.
+6. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow1_p3_to_p4` and stores the payload in **MariaDB** table `processed_messages`.
 
 ---
 
-## MariaDB Database & Table Schema
+### Flow 2: Threshold Examination at Process 2 & Reflection at Process 3
+1. **Client (`curl`)**: Sends `POST /api/flow2` to `http://192.168.1.100:8080`.
+2. **HAProxy**: Delivers request to `Process 1` on one of the active cluster nodes (Round-Robin).
+3. **Process 1 ([`process1.py`](process1.py:1))**: Generates metric payload, publishes to `flow2_p1_to_p2`.
+4. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, evaluates threshold status (`HIGH`/`NORMAL`), applies 15% scaling factor, and forwards to `flow2_p2_to_p3`.
+5. **Process 3 ([`process3.py`](process3.py:1))**: Consumes from `flow2_p2_to_p3`, seals with verification signature (`verified_by: process3`), and **reflects** to `flow2_p3_reflected`.
+6. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow2_p3_reflected` and persists full history into **MariaDB**.
 
-### Entity Relationship Diagram
+---
+
+## Database Entity Relationship Diagram
 
 ```mermaid
 erDiagram
@@ -129,11 +141,9 @@ erDiagram
     }
 ```
 
-The database table definition (included in [`init_db.sql`](init_db.sql:1)):
-
+Database table schema (from [`init_db.sql`](init_db.sql:1)):
 ```sql
 CREATE DATABASE IF NOT EXISTS flowfirst_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
 USE flowfirst_db;
 
 CREATE TABLE IF NOT EXISTS processed_messages (
@@ -156,286 +166,234 @@ CREATE TABLE IF NOT EXISTS processed_messages (
 
 ---
 
-## Infrastructure Setup
+## Multi-Node Cluster Installation (RHEL 9.6)
 
-### Option 1: Using Docker Compose (Recommended)
-Docker Compose spins up both RabbitMQ (with Management UI) and MariaDB 11.4 with automated schema initialization:
+Perform the following steps on **all 3 nodes** (`node1`, `node2`, `node3`):
 
+### 1. Prerequisites & Packages Installation on All 3 Nodes
 ```bash
-docker compose up -d
-```
-- **RabbitMQ AMQP:** `localhost:5672`
-- **RabbitMQ Dashboard:** `http://localhost:15672` (User: `guest` / Pass: `guest`)
-- **MariaDB Server:** `localhost:3306` (User: `flowuser` / Pass: `flowpassword` / DB: `flowfirst_db`)
+# Update repositories and install cluster tools, HAProxy, RabbitMQ, and MariaDB
+sudo dnf install -y pcs pacemaker corosync fence-agents-all haproxy mariadb-server mariadb python3 python3-pip
 
----
+# Start and enable pcsd
+sudo systemctl enable --now pcsd
+echo "hacluster:hacluster123" | sudo chpasswd
 
-### Option 2: Installation on RHEL 9.6 (Red Hat Enterprise Linux 9.6)
-
-#### A. Install Docker & Docker Compose on RHEL 9.6
-```bash
-# 1. Remove conflicting packages
-sudo dnf remove -y podman buildah
-
-# 2. Add Docker repository
-sudo dnf install -y dnf-plugins-core
-sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
-
-# 3. Install Docker and Compose plugin
-sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-# 4. Start Docker daemon
-sudo systemctl enable --now docker
-sudo usermod -aG docker $USER
-
-# 5. Open firewall ports
-sudo firewall-cmd --permanent --add-port={5672/tcp,15672/tcp,3306/tcp}
+# Configure firewall for VIP, HAProxy, Pacemaker, RabbitMQ, and MariaDB
+sudo firewall-cmd --permanent --add-service=high-availability
+sudo firewall-cmd --permanent --add-port={8080/tcp,9000/tcp,5672/tcp,15672/tcp,3306/tcp}
 sudo firewall-cmd --reload
 
-# 6. Start services
+# Allow HAProxy non-local IP binding (required for Virtual IP binding)
+sudo sysctl -w net.ipv4.ip_nonlocal_bind=1
+echo "net.ipv4.ip_nonlocal_bind=1" | sudo tee /etc/sysctl.d/99-haproxy-nonlocalbind.conf
+```
+
+### 2. Configure Python Virtual Environment on All 3 Nodes
+```bash
+git clone <repo-url> /opt/flowfirst
+cd /opt/flowfirst
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+### 3. Deploy HAProxy Configuration on All 3 Nodes
+```bash
+# Arguments: <Node1_IP> <Node2_IP> <Node3_IP> <Virtual_IP>
+sudo ./haproxy/setup_haproxy.sh 192.168.1.101 192.168.1.102 192.168.1.103 192.168.1.100
+```
+
+### 4. Install Systemd Services on All 3 Nodes
+```bash
+sudo ./systemd/install_services.sh /opt/flowfirst
+# Disable systemd direct boot so Pacemaker controls them
+sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4
+```
+
+---
+
+## Pacemaker 3-Node Cluster Initialization
+
+Run the following commands **only on Node 1 (`node1`)**:
+
+### 1. Create and Start the Corosync Cluster
+```bash
+sudo ./pacemaker/setup_multinode_cluster.sh flowfirst_cluster \
+    node1 192.168.1.101 \
+    node2 192.168.1.102 \
+    node3 192.168.1.103
+```
+
+### 2. Configure Virtual IP, HAProxy, and Cloned Process Resources
+```bash
+# Arguments: <Virtual_IP> <Network_Interface> <CIDR_Netmask>
+sudo ./pacemaker/configure_multinode_resources.sh 192.168.1.100 eth0 24
+```
+
+### 3. Verify Pacemaker Cluster Status
+```bash
+sudo pcs status
+```
+*Expected Status Output:*
+```text
+Cluster name: flowfirst_cluster
+Cluster Summary:
+  * Stack: corosync
+  * Current DC: node1 (version 2.1.6) - partition with quorum
+  * 3 nodes configured
+  * 6 resource instances configured
+
+Node List:
+  * Online: [ node1 node2 node3 ]
+
+Full List of Resources:
+  * Resource Group: vip-haproxy-group:
+    * flowfirst-vip	(ocf:heartbeat:IPaddr2):	Started node1
+    * haproxy-res	(systemd:haproxy):	        Started node1
+  * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res]:
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res]:
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res]:
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res]:
+    * Started: [ node1 node2 node3 ]
+```
+
+---
+
+## Testing & Usage Scenarios
+
+### Scenario 1: Invoke REST API via Virtual IP using `curl`
+
+Send requests directly to the **Virtual IP (`192.168.1.100`)**. HAProxy will balance the requests across `node1`, `node2`, and `node3` in a round-robin manner:
+
+#### A. Health Check via Virtual IP
+```bash
+curl -s http://192.168.1.100:8080/health | jq .
+```
+*Notice `node` in the response alternates between `node1`, `node2`, and `node3`.*
+
+#### B. Trigger Flow 1 via Virtual IP
+```bash
+curl -X POST http://192.168.1.100:8080/api/flow1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "item_id": 101,
+    "counter": 200,
+    "initial_data": "Multi-node VIP test payload"
+  }' | jq .
+```
+
+#### C. Trigger Flow 2 via Virtual IP
+```bash
+curl -X POST http://192.168.1.100:8080/api/flow2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "item_id": 202,
+    "value": 31.8,
+    "initial_data": "High temperature alert"
+  }' | jq .
+```
+
+#### D. Trigger Batch Test (Verify Round-Robin Distribution)
+```bash
+for i in {1..6}; do
+  curl -s -X POST http://192.168.1.100:8080/api/flow1 -d "{\"item_id\": $i}" | jq -r '.handled_by_node'
+done
+```
+*Output will demonstrate round-robin distribution:*
+```text
+node1
+node2
+node3
+node1
+node2
+node3
+```
+
+---
+
+### Scenario 2: Node Failure & Virtual IP (VIP) Failover
+
+1. **Simulate failure on Node 1 (Standby node1):**
+   ```bash
+   sudo pcs node standby node1
+   ```
+2. **Observe Pacemaker migrating the Virtual IP and HAProxy to Node 2:**
+   ```bash
+   sudo pcs status
+   ```
+   *Result:* `vip-haproxy-group` immediately starts on `node2`.
+3. **Execute `curl` requests without downtime:**
+   ```bash
+   curl -s http://192.168.1.100:8080/health | jq .
+   ```
+   *Requests continue to be fulfilled seamlessly via `node2` and `node3`.*
+4. **Bring Node 1 back online:**
+   ```bash
+   sudo pcs node unstandby node1
+   ```
+
+---
+
+### Scenario 3: Process Failure & Automatic Recovery
+
+1. **Simulate a crash of Process 2 on Node 2:**
+   ```bash
+   sudo pkill -9 -f "process2.py"
+   ```
+2. **Pacemaker detects failure during `op monitor` cycle:**
+   - Pacemaker automatically detects process termination.
+   - Restarts `flowfirst-p2-res` within seconds.
+   - Logs the event to `corosync` / `pacemaker` journals.
+3. **Check status & clean failcounts:**
+   ```bash
+   sudo pcs status
+   sudo pcs resource cleanup flowfirst-p2-res-clone
+   ```
+
+---
+
+### Scenario 4: HAProxy Live Statistics Dashboard
+
+View real-time connection counters, backend server health, and round-robin traffic distribution:
+- **URL:** `http://192.168.1.100:9000`
+- **Username:** `admin`
+- **Password:** `admin123`
+
+---
+
+### Scenario 5: Querying MariaDB Database Across the Cluster
+
+Verify that messages processed across all nodes are stored in the database:
+
+```bash
+mariadb -h 192.168.1.100 -P 3306 -u flowuser -pflowpassword flowfirst_db -e \
+  "SELECT id, message_id, flow_id, item_id, counter_value, metric_value, examined_status, verified_by, created_at FROM processed_messages ORDER BY id DESC LIMIT 10;"
+```
+
+---
+
+## Local Single-Node / Development Mode (Docker Compose)
+
+For local testing without multi-node hardware:
+
+```bash
+# Start RabbitMQ and MariaDB containers
 docker compose up -d
-```
 
-#### B. Native Installation on RHEL 9.6 (RPM / DNF)
-
-##### 1. Install & Configure MariaDB on RHEL 9.6:
-```bash
-# Install MariaDB server
-sudo dnf install -y mariadb-server mariadb
-
-# Enable and start MariaDB service
-sudo systemctl enable --now mariadb
-
-# Secure installation (optional for production)
-sudo mariadb-secure-installation
-
-# Create user, database, and schema
-sudo mariadb -u root << 'EOF'
-CREATE DATABASE IF NOT EXISTS flowfirst_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS 'flowuser'@'%' IDENTIFIED BY 'flowpassword';
-CREATE USER IF NOT EXISTS 'flowuser'@'localhost' IDENTIFIED BY 'flowpassword';
-GRANT ALL PRIVILEGES ON flowfirst_db.* TO 'flowuser'@'%';
-GRANT ALL PRIVILEGES ON flowfirst_db.* TO 'flowuser'@'localhost';
-FLUSH PRIVILEGES;
-EOF
-
-# Run initialization script
-sudo mariadb -u flowuser -pflowpassword flowfirst_db < init_db.sql
-```
-
-##### 2. Install & Configure RabbitMQ on RHEL 9.6:
-```bash
-# Import GPG keys
-sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key'
-sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key'
-
-# Add yum repo definitions
-sudo tee /etc/yum.repos.d/rabbitmq.repo << 'EOF'
-[rabbitmq-erlang]
-name=rabbitmq-erlang
-baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/rpm/el/9/$basearch
-repo_gpgcheck=1
-enabled=1
-gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key
-gpgcheck=0
-sslverify=1
-sslcacert=/etc/pki/tls/certs/ca-bundle.crt
-metadata_expire=300
-
-[rabbitmq-server]
-name=rabbitmq-server
-baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/rpm/el/9/noarch
-repo_gpgcheck=1
-enabled=1
-gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key
-gpgcheck=0
-sslverify=1
-sslcacert=/etc/pki/tls/certs/ca-bundle.crt
-metadata_expire=300
-EOF
-
-# Install packages & start service
-sudo dnf update -y
-sudo dnf install -y erlang rabbitmq-server
-sudo rabbitmq-plugins enable rabbitmq_management
-sudo systemctl enable --now rabbitmq-server
-
-# Open firewall ports
-sudo firewall-cmd --permanent --add-port=5672/tcp
-sudo firewall-cmd --permanent --add-port=15672/tcp
-sudo firewall-cmd --permanent --add-port=3306/tcp
-sudo firewall-cmd --reload
-```
-
----
-
-## Python Virtual Environment & Dependencies
-
-1. **Create and activate virtual environment:**
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-
-2. **Install Python packages:**
-   ```bash
-   pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
-
-3. **Configure Environment Variables (Optional):**
-   ```bash
-   cp .env.example .env
-   ```
-
----
-
-## Running as Linux Systemd Services (Production)
-
-Each process is wrapped as a native Linux `systemd` service with automatic restarts, sandboxing, journal logging, and a unified target manager.
-
-### Systemd Unit Files in [`systemd/`](systemd):
-- [`systemd/flowfirst-process1.service`](systemd/flowfirst-process1.service:1): Process 1 (REST API Producer on `:8080`)
-- [`systemd/flowfirst-process2.service`](systemd/flowfirst-process2.service:1): Process 2 (Examiner & Reflector)
-- [`systemd/flowfirst-process3.service`](systemd/flowfirst-process3.service:1): Process 3 (Reflector & Forwarder)
-- [`systemd/flowfirst-process4.service`](systemd/flowfirst-process4.service:1): Process 4 (MariaDB Persister & Sink)
-- [`systemd/flowfirst.target`](systemd/flowfirst.target:1): Target unit to manage all 4 services together
-
-### 1. Install & Deploy Services
-Run the installer script (pass your workspace or deployment directory, default is `/opt/flowfirst` or current directory):
-```bash
-sudo ./systemd/install_services.sh $(pwd)
-```
-
-### 2. Service Management Commands
-
-- **Start all 4 processes together:**
-  ```bash
-  sudo systemctl start flowfirst.target
-  ```
-
-- **Check status of all processes:**
-  ```bash
-  sudo systemctl status 'flowfirst-*'
-  ```
-
-- **Stop all 4 processes:**
-  ```bash
-  sudo systemctl stop flowfirst.target
-  ```
-
-- **Restart a specific process (e.g. Process 2):**
-  ```bash
-  sudo systemctl restart flowfirst-process2.service
-  ```
-
-- **Enable auto-start on system boot:**
-  ```bash
-  sudo systemctl enable flowfirst.target
-  ```
-
-- **View Live Logs via `journalctl`:**
-  ```bash
-  # Follow logs for all FlowFirst processes:
-  sudo journalctl -u 'flowfirst-*' -f
-
-  # Follow logs for Process 4 (DB Persister):
-  sudo journalctl -u flowfirst-process4.service -f
-  ```
-
----
-
-## Running Manually in Foreground (Development)
-
-Open **4 separate terminal windows** (with `.venv` activated in each) and run the processes in downstream-to-upstream order:
-
-### Terminal 1: Process 4 (MariaDB Persister & Sink)
-```bash
+# Run processes in background or foreground
 source .venv/bin/activate
-python process4.py
-```
+python process4.py &
+python process3.py &
+python process2.py &
+python process1.py &
 
-### Terminal 2: Process 3 (Reflector & Forwarder)
-```bash
-source .venv/bin/activate
-python process3.py
-```
-
-### Terminal 3: Process 2 (Examiner & Reflector)
-```bash
-source .venv/bin/activate
-python process2.py
-```
-
-### Terminal 4: Process 1 (REST API Producer)
-```bash
-source .venv/bin/activate
-python process1.py
-```
-*(Process 1 starts the HTTP REST server on `http://localhost:8080`)*
-
----
-
-## REST API Usage with `curl`
-
-Once Process 1 is running, you can trigger individual flows or batches of messages using `curl`:
-
-### 1. Health Check
-```bash
-curl -s http://localhost:8080/health | jq .
-```
-
-### 2. Trigger Flow 1 (Default Payload)
-Publishes to `flow1_p1_to_p2` -> Process 2 (+10) -> Process 3 -> Process 4 -> MariaDB:
-```bash
+# Send curl requests
 curl -X POST http://localhost:8080/api/flow1
-```
-
-### 3. Trigger Flow 1 (Custom Parameters)
-```bash
-curl -X POST http://localhost:8080/api/flow1 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "item_id": 42,
-    "counter": 500,
-    "initial_data": "Custom Flow 1 payload from curl"
-  }' | jq .
-```
-
-### 4. Trigger Flow 2 (Default Payload)
-Publishes to `flow2_p1_to_p2` -> Process 2 (examines & scales *1.15) -> Process 3 (seals) -> Process 4 -> MariaDB:
-```bash
 curl -X POST http://localhost:8080/api/flow2
-```
-
-### 5. Trigger Flow 2 (Custom Parameters)
-```bash
-curl -X POST http://localhost:8080/api/flow2 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "item_id": 99,
-    "value": 34.5,
-    "initial_data": "High temperature sensor alert"
-  }' | jq .
-```
-
-### 6. Trigger Batch Flow (Multiple Messages)
-```bash
-curl -X POST http://localhost:8080/api/batch \
-  -H "Content-Type: application/json" \
-  -d '{"count": 5}' | jq .
-```
-
----
-
-## Inspecting Database Records
-
-Query the MariaDB database to verify stored messages and audit trails:
-
-```bash
-# Using Docker:
-docker exec -it mariadb_flowfirst mariadb -u flowuser -pflowpassword -e "USE flowfirst_db; SELECT id, message_id, flow_id, item_id, counter_value, metric_value, examined_status, verified_by, created_at FROM processed_messages;"
-
-# Or using local client:
-mariadb -h localhost -P 3306 -u flowuser -pflowpassword flowfirst_db -e "SELECT * FROM processed_messages\G;"
 ```

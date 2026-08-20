@@ -1,0 +1,87 @@
+#---------------------------------------------------------------------
+# Global settings
+#---------------------------------------------------------------------
+global
+    log         127.0.0.1 local2 info
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    daemon
+    stats socket /var/lib/haproxy/stats mode 660 level admin expose-fd listeners
+
+#---------------------------------------------------------------------
+# Common defaults
+#---------------------------------------------------------------------
+defaults
+    mode                    http
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option                  http-server-close
+    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    retries                 3
+    timeout http-request    10s
+    timeout queue           1m
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+    timeout http-keep-alive 10s
+    timeout check           10s
+    maxconn                 3000
+
+#---------------------------------------------------------------------
+# HAProxy Statistics Dashboard
+#---------------------------------------------------------------------
+listen stats
+    bind 0.0.0.0:9000
+    mode http
+    stats enable
+    stats uri /
+    stats refresh 5s
+    stats auth admin:admin123
+    stats show-node
+
+#---------------------------------------------------------------------
+# Frontend: Process 1 REST API (Binds to Virtual IP / All Interfaces)
+#---------------------------------------------------------------------
+frontend flowfirst_api_front
+    bind *:8080
+    mode http
+    option httplog
+    default_backend flowfirst_api_back
+
+#---------------------------------------------------------------------
+# Backend: Round-Robin Load Balancing across 3 Cluster Nodes
+#---------------------------------------------------------------------
+backend flowfirst_api_back
+    mode http
+    balance roundrobin
+    option httpchk GET /health
+    http-check expect status 200
+    default-server inter 3s fall 2 rise 2
+
+    # Cluster Node Physical IPs (configured via install script or environment)
+    server node1 192.168.1.101:8080 check
+    server node2 192.168.1.102:8080 check
+    server node3 192.168.1.103:8080 check
+
+#---------------------------------------------------------------------
+# Optional: Load balancing for RabbitMQ AMQP (Port 5672)
+#---------------------------------------------------------------------
+frontend rabbitmq_amqp_front
+    bind *:5672
+    mode tcp
+    option tcplog
+    default_backend rabbitmq_amqp_back
+
+backend rabbitmq_amqp_back
+    mode tcp
+    balance roundrobin
+    timeout client-fin 50s
+    timeout server-fin 50s
+    server node1 192.168.1.101:5672 check inter 5s fall 2 rise 2
+    server node2 192.168.1.102:5672 check inter 5s fall 2 rise 2
+    server node3 192.168.1.103:5672 check inter 5s fall 2 rise 2

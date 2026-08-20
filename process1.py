@@ -6,6 +6,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import pika
 from config import (
+    NODE_NAME,
     API_HOST,
     API_PORT,
     get_connection,
@@ -153,6 +154,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 {
                     "status": "healthy",
                     "service": "Process 1 REST API Producer",
+                    "node": NODE_NAME,
                     "endpoints": {
                         "GET /health": "Health check",
                         "POST /api/flow1": "Publish message to Flow 1 (Queue: flow1_p1_to_p2)",
@@ -204,6 +206,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     {
                         "status": "success",
                         "flow": 1,
+                        "handled_by_node": NODE_NAME,
                         "target_queue": QUEUE_FLOW1_P1_TO_P2,
                         "message": "Message successfully published to Flow 1 queue",
                         "payload": published,
@@ -225,6 +228,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     {
                         "status": "success",
                         "flow": 2,
+                        "handled_by_node": NODE_NAME,
                         "target_queue": QUEUE_FLOW2_P1_TO_P2,
                         "message": "Message successfully published to Flow 2 queue",
                         "payload": published,
@@ -246,6 +250,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     200,
                     {
                         "status": "success",
+                        "handled_by_node": NODE_NAME,
                         "message": f"Published {count} messages to both Flow 1 and Flow 2 queues",
                         "flow1_messages": flow1_results,
                         "flow2_messages": flow2_results,

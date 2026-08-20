@@ -1,20 +1,25 @@
 import os
+import socket
 import pika
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Host identifier for multi-node cluster awareness
+NODE_NAME = os.getenv("NODE_NAME", socket.gethostname())
+
 # Process 1 REST API Settings
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", 8080))
 
-# RabbitMQ Connection Settings
+# RabbitMQ Connection Settings (Can point to local node, VIP, or cluster hosts)
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
 RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", 5672))
 RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
 RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "guest")
+RABBITMQ_HOSTS = os.getenv("RABBITMQ_HOSTS", "").strip()
 
-# MariaDB Connection Settings
+# MariaDB Connection Settings (Can point to local node, VIP, or Galera Cluster)
 MARIADB_HOST = os.getenv("MARIADB_HOST", "localhost")
 MARIADB_PORT = int(os.getenv("MARIADB_PORT", 3306))
 MARIADB_USER = os.getenv("MARIADB_USER", "flowuser")
@@ -44,8 +49,24 @@ ALL_QUEUES = [
 
 
 def get_connection():
-    """Create and return a blocking connection to RabbitMQ."""
+    """Create and return a blocking connection to RabbitMQ with multi-node failover support."""
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
+
+    # If comma-separated hosts are supplied, try them in order or pick active VIP
+    if RABBITMQ_HOSTS:
+        hosts = [h.strip() for h in RABBITMQ_HOSTS.split(",") if h.strip()]
+        params = [
+            pika.ConnectionParameters(
+                host=h.split(":")[0],
+                port=int(h.split(":")[1]) if ":" in h else RABBITMQ_PORT,
+                credentials=credentials,
+                heartbeat=60,
+                blocked_connection_timeout=300,
+            )
+            for h in hosts
+        ]
+        return pika.BlockingConnection(params)
+
     parameters = pika.ConnectionParameters(
         host=RABBITMQ_HOST,
         port=RABBITMQ_PORT,

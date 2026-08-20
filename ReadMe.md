@@ -170,10 +170,78 @@ CREATE TABLE IF NOT EXISTS processed_messages (
 
 Perform the following steps on **all 3 nodes** (`node1`, `node2`, `node3`):
 
-### 1. Prerequisites & Packages Installation on All 3 Nodes
+### 1. Install & Configure RabbitMQ on All 3 Nodes (RHEL 9.6)
+
+On RHEL 9.6, RabbitMQ and Erlang are installed from the official Cloudsmith repositories:
+
 ```bash
-# Update repositories and install cluster tools, HAProxy, RabbitMQ, and MariaDB
+# Option A: Run the automated installer script
+sudo ./scripts/install_rabbitmq_rhel9.sh
+
+# Option B: Run commands step-by-step
+# 1. Import GPG keys
+sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key'
+sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key'
+
+# 2. Add RabbitMQ & Erlang repository definitions for RHEL 9
+sudo tee /etc/yum.repos.d/rabbitmq.repo << 'EOF'
+[rabbitmq-erlang]
+name=rabbitmq-erlang
+baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/rpm/el/9/$basearch
+repo_gpgcheck=1
+enabled=1
+gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key
+gpgcheck=0
+sslverify=1
+sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+metadata_expire=300
+
+[rabbitmq-server]
+name=rabbitmq-server
+baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/rpm/el/9/noarch
+repo_gpgcheck=1
+enabled=1
+gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key
+gpgcheck=0
+sslverify=1
+sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+metadata_expire=300
+EOF
+
+# 3. Install Erlang and RabbitMQ
+sudo dnf update -y
+sudo dnf install -y erlang rabbitmq-server
+
+# 4. Enable management web UI plugin and start RabbitMQ service
+sudo rabbitmq-plugins enable rabbitmq_management
+sudo systemctl enable --now rabbitmq-server
+
+# 5. Create user permissions
+sudo rabbitmqctl add_user flowuser flowpassword || true
+sudo rabbitmqctl set_user_tags flowuser administrator || true
+sudo rabbitmqctl set_permissions -p / flowuser ".*" ".*" ".*" || true
+```
+
+---
+
+### 2. Install Pacemaker, HAProxy & MariaDB on All 3 Nodes
+```bash
+# Install cluster packages, load balancer, MariaDB, and Python
 sudo dnf install -y pcs pacemaker corosync fence-agents-all haproxy mariadb-server mariadb python3 python3-pip
+
+# Start and enable MariaDB
+sudo systemctl enable --now mariadb
+
+# Initialize MariaDB schema
+sudo mariadb -u root << 'EOF'
+CREATE DATABASE IF NOT EXISTS flowfirst_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'flowuser'@'%' IDENTIFIED BY 'flowpassword';
+CREATE USER IF NOT EXISTS 'flowuser'@'localhost' IDENTIFIED BY 'flowpassword';
+GRANT ALL PRIVILEGES ON flowfirst_db.* TO 'flowuser'@'%';
+GRANT ALL PRIVILEGES ON flowfirst_db.* TO 'flowuser'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+sudo mariadb -u flowuser -pflowpassword flowfirst_db < init_db.sql
 
 # Start and enable pcsd
 sudo systemctl enable --now pcsd
@@ -189,7 +257,7 @@ sudo sysctl -w net.ipv4.ip_nonlocal_bind=1
 echo "net.ipv4.ip_nonlocal_bind=1" | sudo tee /etc/sysctl.d/99-haproxy-nonlocalbind.conf
 ```
 
-### 2. Configure Python Virtual Environment on All 3 Nodes
+### 3. Configure Python Virtual Environment on All 3 Nodes
 ```bash
 git clone <repo-url> /opt/flowfirst
 cd /opt/flowfirst
@@ -200,13 +268,13 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-### 3. Deploy HAProxy Configuration on All 3 Nodes
+### 4. Deploy HAProxy Configuration on All 3 Nodes
 ```bash
 # Arguments: <Node1_IP> <Node2_IP> <Node3_IP> <Virtual_IP>
 sudo ./haproxy/setup_haproxy.sh 192.168.1.101 192.168.1.102 192.168.1.103 192.168.1.100
 ```
 
-### 4. Install Systemd Services on All 3 Nodes
+### 5. Install Systemd Services on All 3 Nodes
 ```bash
 sudo ./systemd/install_services.sh /opt/flowfirst
 # Disable systemd direct boot so Pacemaker controls them

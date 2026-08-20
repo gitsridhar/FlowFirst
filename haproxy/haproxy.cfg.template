@@ -69,6 +69,26 @@ backend flowfirst_api_back
     server node3 192.168.1.103:8080 check
 
 #---------------------------------------------------------------------
+# Load balancing & Failover for MariaDB Galera Cluster (Port 3306)
+#---------------------------------------------------------------------
+frontend mariadb_galera_front
+    bind *:3306
+    mode tcp
+    option tcplog
+    default_backend mariadb_galera_back
+
+backend mariadb_galera_back
+    mode tcp
+    balance roundrobin
+    option tcp-check
+    # Health check for MySQL / MariaDB service
+    tcp-check connect port 3306
+    default-server inter 3s fall 2 rise 2
+    server node1 192.168.1.101:3306 check
+    server node2 192.168.1.102:3306 check
+    server node3 192.168.1.103:3306 check
+
+#---------------------------------------------------------------------
 # Optional: Load balancing for RabbitMQ AMQP (Port 5672)
 #---------------------------------------------------------------------
 frontend rabbitmq_amqp_front

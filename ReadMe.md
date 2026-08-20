@@ -10,27 +10,29 @@ This project implements an end-to-end distributed inter-process communication an
 
 ```mermaid
 graph TD
+    Client[curl / HTTP Client] -->|POST /api/flow1<br/>POST /api/flow2<br/>POST /api/batch| P1[Process 1: REST API Producer<br/>Port: 8080]
+
     subgraph Flow 1 [Flow 1: Reflection at Process 2]
-        P1_1[Process 1: Generator] -->|flow1_p1_to_p2| P2_1[Process 2: Modifies & Reflects]
+        P1 -->|flow1_p1_to_p2| P2_1[Process 2: Modifies & Reflects]
         P2_1 -->|flow1_p2_to_p3| P3_1[Process 3: Receives & Forwards]
         P3_1 -->|flow1_p3_to_p4| P4_1[Process 4: DB Persister]
         P4_1 -->|SQL INSERT| DB1[(MariaDB: processed_messages)]
     end
 
     subgraph Flow 2 [Flow 2: Examination at Process 2 & Reflection at Process 3]
-        P1_2[Process 1: Generator] -->|flow2_p1_to_p2| P2_2[Process 2: Examines & Scales]
+        P1 -->|flow2_p1_to_p2| P2_2[Process 2: Examines & Scales]
         P2_2 -->|flow2_p2_to_p3| P3_2[Process 3: Seals & Reflects]
         P3_2 -->|flow2_p3_reflected| P4_2[Process 4: DB Persister]
         P4_2 -->|SQL INSERT| DB2[(MariaDB: processed_messages)]
     end
 
-    style P1_1 fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    style Client fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px
+    style P1 fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     style P2_1 fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     style P3_1 fill:#ede7f6,stroke:#7e57c2,stroke-width:2px
     style P4_1 fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
     style DB1 fill:#fce4ec,stroke:#c2185b,stroke-width:2px
 
-    style P1_2 fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     style P2_2 fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     style P3_2 fill:#ede7f6,stroke:#7e57c2,stroke-width:2px
     style P4_2 fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
@@ -44,7 +46,8 @@ graph TD
 ```mermaid
 sequenceDiagram
     autonumber
-    actor P1 as Process 1 (Generator)
+    actor Client as HTTP Client (curl)
+    participant P1 as Process 1 (REST API on :8080)
     participant Q1_12 as Queue: flow1_p1_to_p2
     participant P2 as Process 2 (Examiner/Reflector)
     participant Q1_23 as Queue: flow1_p2_to_p3
@@ -53,8 +56,10 @@ sequenceDiagram
     participant P4 as Process 4 (Persister)
     participant DB as MariaDB (flowfirst_db)
 
-    Note over P1, DB: === FLOW 1 LIFECYCLE ===
-    P1->>Q1_12: Publish initial payload (counter=101)
+    Note over Client, DB: === FLOW 1 LIFECYCLE ===
+    Client->>P1: POST /api/flow1 (JSON payload)
+    P1->>Q1_12: Publish message (counter=101)
+    P1-->>Client: HTTP 200 OK (JSON response with message_id)
     Q1_12->>P2: Consume message
     Note over P2: Modify data: counter += 10, add history log
     P2->>Q1_23: Reflect modified message
@@ -68,8 +73,10 @@ sequenceDiagram
     participant Q2_23 as Queue: flow2_p2_to_p3
     participant Q2_3R as Queue: flow2_p3_reflected
 
-    Note over P1, DB: === FLOW 2 LIFECYCLE ===
+    Note over Client, DB: === FLOW 2 LIFECYCLE ===
+    Client->>P1: POST /api/flow2 (JSON payload)
     P1->>Q2_12: Publish raw metrics (value=26.5)
+    P1-->>Client: HTTP 200 OK (JSON response with message_id)
     Q2_12->>P2: Consume message
     Note over P2: Examine threshold & scale value * 1.15
     P2->>Q2_23: Forward examined payload
@@ -85,7 +92,7 @@ sequenceDiagram
 ### Detailed Step Descriptions
 
 #### Flow 1
-1. **Process 1 ([`process1.py`](process1.py:1))**: Prepares initial data and publishes it to queue `flow1_p1_to_p2`.
+1. **Process 1 ([`process1.py`](process1.py:1))**: Receives HTTP POST request (`/api/flow1`), creates payload, and publishes it to queue `flow1_p1_to_p2`.
 2. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message from `flow1_p1_to_p2`, modifies payload (`counter += 10`), and **reflects** it to queue `flow1_p2_to_p3`.
 3. **Process 3 ([`process3.py`](process3.py:1))**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment log, and forwards it to queue `flow1_p3_to_p4`.
 4. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow1_p3_to_p4` and persists the entire record and audit trail into **MariaDB** table `processed_messages`.
@@ -93,7 +100,7 @@ sequenceDiagram
 ---
 
 #### Flow 2
-1. **Process 1 ([`process1.py`](process1.py:1))**: Prepares metric payload and publishes to queue `flow2_p1_to_p2`.
+1. **Process 1 ([`process1.py`](process1.py:1))**: Receives HTTP POST request (`/api/flow2`), creates metric payload, and publishes to queue `flow2_p1_to_p2`.
 2. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, examines value threshold, applies a 15% scaling factor, and forwards to `flow2_p2_to_p3`.
 3. **Process 3 ([`process3.py`](process3.py:1))**: Picks up message from `flow2_p2_to_p3`, enriches it with verification status (`verified_by: process3`), and **reflects** it to queue `flow2_p3_reflected`.
 4. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow2_p3_reflected` and stores the final record and complete lifecycle history into **MariaDB**.
@@ -288,7 +295,7 @@ sudo firewall-cmd --reload
 Each process is wrapped as a native Linux `systemd` service with automatic restarts, sandboxing, journal logging, and a unified target manager.
 
 ### Systemd Unit Files in [`systemd/`](systemd):
-- [`systemd/flowfirst-process1.service`](systemd/flowfirst-process1.service:1): Process 1 (Data Generator)
+- [`systemd/flowfirst-process1.service`](systemd/flowfirst-process1.service:1): Process 1 (REST API Producer on `:8080`)
 - [`systemd/flowfirst-process2.service`](systemd/flowfirst-process2.service:1): Process 2 (Examiner & Reflector)
 - [`systemd/flowfirst-process3.service`](systemd/flowfirst-process3.service:1): Process 3 (Reflector & Forwarder)
 - [`systemd/flowfirst-process4.service`](systemd/flowfirst-process4.service:1): Process 4 (MariaDB Persister & Sink)
@@ -360,10 +367,63 @@ source .venv/bin/activate
 python process2.py
 ```
 
-### Terminal 4: Process 1 (Producer / Data Generator)
+### Terminal 4: Process 1 (REST API Producer)
 ```bash
 source .venv/bin/activate
 python process1.py
+```
+*(Process 1 starts the HTTP REST server on `http://localhost:8080`)*
+
+---
+
+## REST API Usage with `curl`
+
+Once Process 1 is running, you can trigger individual flows or batches of messages using `curl`:
+
+### 1. Health Check
+```bash
+curl -s http://localhost:8080/health | jq .
+```
+
+### 2. Trigger Flow 1 (Default Payload)
+Publishes to `flow1_p1_to_p2` -> Process 2 (+10) -> Process 3 -> Process 4 -> MariaDB:
+```bash
+curl -X POST http://localhost:8080/api/flow1
+```
+
+### 3. Trigger Flow 1 (Custom Parameters)
+```bash
+curl -X POST http://localhost:8080/api/flow1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "item_id": 42,
+    "counter": 500,
+    "initial_data": "Custom Flow 1 payload from curl"
+  }' | jq .
+```
+
+### 4. Trigger Flow 2 (Default Payload)
+Publishes to `flow2_p1_to_p2` -> Process 2 (examines & scales *1.15) -> Process 3 (seals) -> Process 4 -> MariaDB:
+```bash
+curl -X POST http://localhost:8080/api/flow2
+```
+
+### 5. Trigger Flow 2 (Custom Parameters)
+```bash
+curl -X POST http://localhost:8080/api/flow2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "item_id": 99,
+    "value": 34.5,
+    "initial_data": "High temperature sensor alert"
+  }' | jq .
+```
+
+### 6. Trigger Batch Flow (Multiple Messages)
+```bash
+curl -X POST http://localhost:8080/api/batch \
+  -H "Content-Type: application/json" \
+  -d '{"count": 5}' | jq .
 ```
 
 ---

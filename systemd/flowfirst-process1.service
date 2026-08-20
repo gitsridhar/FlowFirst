@@ -1,5 +1,5 @@
 [Unit]
-Description=FlowFirst Process 1 - Data Generator & Producer
+Description=FlowFirst Process 1 - REST API Producer
 After=network.target rabbitmq-server.service mariadb.service docker.service
 Wants=rabbitmq-server.service
 
@@ -10,8 +10,8 @@ Group=flowuser
 WorkingDirectory=/opt/flowfirst
 EnvironmentFile=-/opt/flowfirst/.env
 ExecStart=/opt/flowfirst/.venv/bin/python /opt/flowfirst/process1.py
-Restart=on-failure
-RestartSec=5s
+Restart=always
+RestartSec=3s
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=flowfirst-p1

@@ -1,0 +1,25 @@
+[Unit]
+Description=FlowFirst Process 1 - Data Generator & Producer
+After=network.target rabbitmq-server.service mariadb.service docker.service
+Wants=rabbitmq-server.service
+
+[Service]
+Type=simple
+User=flowuser
+Group=flowuser
+WorkingDirectory=/opt/flowfirst
+EnvironmentFile=-/opt/flowfirst/.env
+ExecStart=/opt/flowfirst/.venv/bin/python /opt/flowfirst/process1.py
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flowfirst-p1
+
+# Security Sandbox options
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

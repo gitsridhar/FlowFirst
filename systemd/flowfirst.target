@@ -1,0 +1,7 @@
+[Unit]
+Description=FlowFirst Pipeline - Target managing all 4 services
+Wants=flowfirst-process4.service flowfirst-process3.service flowfirst-process2.service flowfirst-process1.service
+After=flowfirst-process4.service flowfirst-process3.service flowfirst-process2.service flowfirst-process1.service
+
+[Install]
+WantedBy=multi-user.target

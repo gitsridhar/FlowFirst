@@ -1,0 +1,25 @@
+[Unit]
+Description=FlowFirst Process 4 - MariaDB Persister & Sink
+After=network.target rabbitmq-server.service mariadb.service docker.service
+Wants=rabbitmq-server.service mariadb.service
+
+[Service]
+Type=simple
+User=flowuser
+Group=flowuser
+WorkingDirectory=/opt/flowfirst
+EnvironmentFile=-/opt/flowfirst/.env
+ExecStart=/opt/flowfirst/.venv/bin/python /opt/flowfirst/process4.py
+Restart=always
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flowfirst-p4
+
+# Security Sandbox options
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

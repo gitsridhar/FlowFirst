@@ -283,7 +283,62 @@ sudo firewall-cmd --reload
 
 ---
 
-## Running the 4-Process Pipeline
+## Running as Linux Systemd Services (Production)
+
+Each process is wrapped as a native Linux `systemd` service with automatic restarts, sandboxing, journal logging, and a unified target manager.
+
+### Systemd Unit Files in [`systemd/`](systemd):
+- [`systemd/flowfirst-process1.service`](systemd/flowfirst-process1.service:1): Process 1 (Data Generator)
+- [`systemd/flowfirst-process2.service`](systemd/flowfirst-process2.service:1): Process 2 (Examiner & Reflector)
+- [`systemd/flowfirst-process3.service`](systemd/flowfirst-process3.service:1): Process 3 (Reflector & Forwarder)
+- [`systemd/flowfirst-process4.service`](systemd/flowfirst-process4.service:1): Process 4 (MariaDB Persister & Sink)
+- [`systemd/flowfirst.target`](systemd/flowfirst.target:1): Target unit to manage all 4 services together
+
+### 1. Install & Deploy Services
+Run the installer script (pass your workspace or deployment directory, default is `/opt/flowfirst` or current directory):
+```bash
+sudo ./systemd/install_services.sh $(pwd)
+```
+
+### 2. Service Management Commands
+
+- **Start all 4 processes together:**
+  ```bash
+  sudo systemctl start flowfirst.target
+  ```
+
+- **Check status of all processes:**
+  ```bash
+  sudo systemctl status 'flowfirst-*'
+  ```
+
+- **Stop all 4 processes:**
+  ```bash
+  sudo systemctl stop flowfirst.target
+  ```
+
+- **Restart a specific process (e.g. Process 2):**
+  ```bash
+  sudo systemctl restart flowfirst-process2.service
+  ```
+
+- **Enable auto-start on system boot:**
+  ```bash
+  sudo systemctl enable flowfirst.target
+  ```
+
+- **View Live Logs via `journalctl`:**
+  ```bash
+  # Follow logs for all FlowFirst processes:
+  sudo journalctl -u 'flowfirst-*' -f
+
+  # Follow logs for Process 4 (DB Persister):
+  sudo journalctl -u flowfirst-process4.service -f
+  ```
+
+---
+
+## Running Manually in Foreground (Development)
 
 Open **4 separate terminal windows** (with `.venv` activated in each) and run the processes in downstream-to-upstream order:
 

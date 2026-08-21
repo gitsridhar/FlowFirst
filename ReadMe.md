@@ -176,10 +176,41 @@ erDiagram
 
 ## Complete Multi-Node Installation & Setup (RHEL 9.6)
 
-### Phase 1: Setup MariaDB Galera Cluster on All 3 Nodes
+---
+
+### Phase 1: Repository Clone & Base Prerequisites on All 3 Nodes
+
+First, clone the repository onto **all 3 nodes** so that all setup scripts, SQL definitions, configuration templates, and Python sources are available locally.
+
+```bash
+# 1. Install base utilities and Python
+sudo dnf install -y git python3 python3-pip
+
+# 2. Clone repository to /opt/flowfirst and navigate to directory
+sudo git clone <repo-url> /opt/flowfirst
+sudo chown -R $USER:$USER /opt/flowfirst
+cd /opt/flowfirst
+
+# 3. Create and configure Python virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 4. Initialize environment configuration
+cp .env.example .env
+# (Edit NODE_NAME in .env to match the current node: node1, node2, or node3)
+```
+
+---
+
+### Phase 2: Setup MariaDB Galera Cluster on All 3 Nodes
+
+Run from `/opt/flowfirst`:
 
 #### 1. On Node 1 (`192.168.1.101`):
 ```bash
+cd /opt/flowfirst
 # Configure Galera node settings
 sudo ./mariadb-galera/setup_galera_node.sh node1 192.168.1.101 192.168.1.101 192.168.1.102 192.168.1.103
 
@@ -189,6 +220,7 @@ sudo ./mariadb-galera/bootstrap_galera.sh
 
 #### 2. On Node 2 (`192.168.1.102`):
 ```bash
+cd /opt/flowfirst
 # Configure Galera node settings
 sudo ./mariadb-galera/setup_galera_node.sh node2 192.168.1.102 192.168.1.101 192.168.1.102 192.168.1.103
 
@@ -198,6 +230,7 @@ sudo systemctl enable --now mariadb
 
 #### 3. On Node 3 (`192.168.1.103`):
 ```bash
+cd /opt/flowfirst
 # Configure Galera node settings
 sudo ./mariadb-galera/setup_galera_node.sh node3 192.168.1.103 192.168.1.101 192.168.1.102 192.168.1.103
 
@@ -207,6 +240,7 @@ sudo systemctl enable --now mariadb
 
 #### 4. Verify Galera Cluster Health on Any Node:
 ```bash
+cd /opt/flowfirst
 ./mariadb-galera/check_galera_status.sh
 ```
 *Expected Output:*
@@ -220,44 +254,40 @@ wsrep_local_state_comment: Synced
 
 ---
 
-### Phase 2: Install RabbitMQ on All 3 Nodes
+### Phase 3: Install RabbitMQ on All 3 Nodes
 ```bash
+cd /opt/flowfirst
 sudo ./scripts/install_rabbitmq_rhel9.sh
 ```
 
 ---
 
-### Phase 3: Setup HAProxy on All 3 Nodes
+### Phase 4: Setup HAProxy on All 3 Nodes
 ```bash
+cd /opt/flowfirst
 # Deploys HAProxy balancing for REST API (:8080) and Galera MariaDB (:3306)
 sudo ./haproxy/setup_haproxy.sh 192.168.1.101 192.168.1.102 192.168.1.103 192.168.1.100
 ```
 
 ---
 
-### Phase 4: Configure Python Environment & Systemd Services on All 3 Nodes
+### Phase 5: Install Systemd Services on All 3 Nodes
 ```bash
-# Setup Python Virtual Environment
-git clone <repo-url> /opt/flowfirst
 cd /opt/flowfirst
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
-
 # Install Systemd Units
 sudo ./systemd/install_services.sh /opt/flowfirst
 
-# Disable standard systemd boot so Pacemaker manages lifecycle
+# Disable standard systemd boot so Pacemaker manages service lifecycles
 sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4
 ```
 
 ---
 
-### Phase 5: Pacemaker Cluster & VIP Initialization (Run on Node 1 Only)
+### Phase 6: Pacemaker Cluster & VIP Initialization (Run on Node 1 Only)
 
 ```bash
+cd /opt/flowfirst
+
 # 1. Initialize Corosync 3-node cluster
 sudo ./pacemaker/setup_multinode_cluster.sh flowfirst_cluster \
     node1 192.168.1.101 \

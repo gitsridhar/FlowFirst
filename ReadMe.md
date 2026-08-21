@@ -351,25 +351,171 @@ node3
 
 ---
 
-### Scenario 2: Synchronous Multi-Master Galera Replication Verification
+### Scenario 2: End-to-End Flow Execution & Database Content Examination
+
+This scenario executes Flow 1 and Flow 2 through the REST API, follows the messages through RabbitMQ and intermediate modifications, and inspects the resulting table rows and JSON audit trails stored in MariaDB Galera.
+
+#### Automated Execution:
+```bash
+# Run the automated test & inspect script
+./scripts/test_flows_and_inspect_db.sh
+```
+
+#### Manual Step-by-Step Walkthrough:
+
+##### Step 1: Trigger Flow 1 (Initial Counter: 500)
+```bash
+curl -s -X POST http://${FLOWFIRST_VIP:-192.168.1.100}:8080/api/flow1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "item_id": 101,
+    "counter": 500,
+    "initial_data": "E2E inspection test payload for Flow 1"
+  }' | jq .
+```
+
+##### Step 2: Trigger Flow 2 (Initial Metric: 35.00)
+```bash
+curl -s -X POST http://${FLOWFIRST_VIP:-192.168.1.100}:8080/api/flow2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "item_id": 202,
+    "value": 35.00,
+    "initial_data": "E2E high temperature alert for Flow 2"
+  }' | jq .
+```
+
+##### Step 3: Inspect Summary Table in MariaDB
+```bash
+mariadb -h ${FLOWFIRST_VIP:-192.168.1.100} -u flowuser -pflowpassword flowfirst_db --table -e "
+SELECT
+    id,
+    flow_id,
+    item_id,
+    counter_value,
+    metric_value,
+    examined_status,
+    verified_by,
+    created_at
+FROM processed_messages
+ORDER BY id DESC
+LIMIT 5;
+"
+```
+*Expected Output:*
+```text
++----+---------+---------+---------------+--------------+-----------------+-------------+---------------------+
+| id | flow_id | item_id | counter_value | metric_value | examined_status | verified_by | created_at          |
++----+---------+---------+---------------+--------------+-----------------+-------------+---------------------+
+| 12 |       2 |     202 |          NULL |        40.25 | HIGH            | process3    | 2025-08-20 10:15:22 |
+| 11 |       1 |     101 |           510 |         NULL | NULL            | NULL        | 2025-08-20 10:15:20 |
++----+---------+---------+---------------+--------------+-----------------+-------------+---------------------+
+```
+
+##### Step 4: Inspect Flow 1 Audit Trail & Transformation History
+```bash
+mariadb -h ${FLOWFIRST_VIP:-192.168.1.100} -u flowuser -pflowpassword flowfirst_db -e "
+SELECT
+    message_id,
+    initial_data,
+    counter_value,
+    JSON_PRETTY(history_trail) AS audit_trail
+FROM processed_messages
+WHERE flow_id = 1
+ORDER BY id DESC LIMIT 1\G
+"
+```
+*Sample JSON History Output:*
+```json
+[
+  {
+    "stage": "process1_created",
+    "timestamp": "2025-08-20 10:15:20",
+    "status": "prepared",
+    "source": "rest_api"
+  },
+  {
+    "stage": "process2_reflected",
+    "timestamp": "2025-08-20 10:15:21",
+    "modification": "Added +10 to counter and flagged reflected"
+  },
+  {
+    "stage": "process3_received_and_forwarded",
+    "timestamp": "2025-08-20 10:15:21",
+    "status": "forwarded_to_process4"
+  },
+  {
+    "stage": "process4_saved_to_mariadb",
+    "timestamp": "2025-08-20 10:15:22",
+    "database_action": "INSERT/UPDATE processed_messages"
+  }
+]
+```
+
+##### Step 5: Inspect Flow 2 Audit Trail (Threshold Examination & Scaling)
+```bash
+mariadb -h ${FLOWFIRST_VIP:-192.168.1.100} -u flowuser -pflowpassword flowfirst_db -e "
+SELECT
+    message_id,
+    initial_data,
+    metric_value,
+    examined_status,
+    verified_by,
+    JSON_PRETTY(history_trail) AS audit_trail
+FROM processed_messages
+WHERE flow_id = 2
+ORDER BY id DESC LIMIT 1\G
+"
+```
+*Sample JSON History Output:*
+```json
+[
+  {
+    "stage": "process1_created",
+    "timestamp": "2025-08-20 10:15:22",
+    "status": "prepared",
+    "source": "rest_api"
+  },
+  {
+    "stage": "process2_examined_and_forwarded",
+    "timestamp": "2025-08-20 10:15:22",
+    "status_assigned": "HIGH",
+    "modification": "Applied 15% scaling factor and assigned status"
+  },
+  {
+    "stage": "process3_reflected",
+    "timestamp": "2025-08-20 10:15:23",
+    "modification": "Added verification seal and marked completed"
+  },
+  {
+    "stage": "process4_saved_to_mariadb",
+    "timestamp": "2025-08-20 10:15:23",
+    "database_action": "INSERT/UPDATE processed_messages"
+  }
+]
+```
+
+---
+
+### Scenario 3: Synchronous Multi-Master Galera Replication Verification
 
 Query **Node 1**, **Node 2**, and **Node 3** directly to confirm that writes from any node are immediately synchronized across all nodes:
 
 ```bash
 # Check on Node 1:
-mariadb -h 192.168.1.101 -u flowuser -pflowpassword flowfirst_db -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
+mariadb -h ${NODE1_IP:-192.168.1.101} -u flowuser -pflowpassword flowfirst_db -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 
 # Check on Node 2:
-mariadb -h 192.168.1.102 -u flowuser -pflowpassword flowfirst_db -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
+mariadb -h ${NODE2_IP:-192.168.1.102} -u flowuser -pflowpassword flowfirst_db -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 
 # Check on Node 3:
-mariadb -h 192.168.1.103 -u flowuser -pflowpassword flowfirst_db -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
+mariadb -h ${NODE3_IP:-192.168.1.103} -u flowuser -pflowpassword flowfirst_db -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 ```
 *All three databases return identical records in real time.*
 
 ---
 
-### Scenario 3: Galera Node Outage & Automatic Quorum Resynchronization
+### Scenario 4: Galera Node Outage & Automatic Quorum Resynchronization
 
 1. **Simulate failure of Galera Node 3:**
    ```bash
@@ -392,7 +538,7 @@ mariadb -h 192.168.1.103 -u flowuser -pflowpassword flowfirst_db -e "SELECT id, 
 
 ---
 
-### Scenario 4: Node Failure & Virtual IP (VIP) Failover
+### Scenario 5: Node Failure & Virtual IP (VIP) Failover
 
 1. **Put Node 1 into standby mode:**
    ```bash
@@ -414,7 +560,7 @@ mariadb -h 192.168.1.103 -u flowuser -pflowpassword flowfirst_db -e "SELECT id, 
 
 ---
 
-### Scenario 5: HAProxy Real-Time Statistics Dashboard
+### Scenario 6: HAProxy Real-Time Statistics Dashboard
 
 Access the live stats dashboard to view real-time frontend and backend health metrics for both the REST API and MariaDB Galera cluster:
 - **URL:** `http://192.168.1.100:9000`

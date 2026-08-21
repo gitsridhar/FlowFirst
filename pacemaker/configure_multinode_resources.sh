@@ -3,11 +3,23 @@ set -euo pipefail
 
 # ==============================================================================
 # FlowFirst - Configure Multi-Node Pacemaker Resources (VIP, HAProxy, & Pipelines)
+# Automatically loads configuration from .env if present
 # ==============================================================================
 
-VIP="${1:-192.168.1.100}"
-VIP_NIC="${2:-eth0}"
-VIP_CIDR_NETMASK="${3:-24}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Source environment variables if .env exists
+if [ -f "${ROOT_DIR}/.env" ]; then
+    # shellcheck disable=SC1091
+    set -a
+    source "${ROOT_DIR}/.env"
+    set +a
+fi
+
+VIP="${1:-${FLOWFIRST_VIP:-192.168.1.100}}"
+VIP_NIC="${2:-${VIP_NIC:-eth0}}"
+VIP_CIDR_NETMASK="${3:-${VIP_CIDR_NETMASK:-24}}"
 
 echo "=================================================================="
 echo " Configuring Multi-Node Pacemaker Resources"
@@ -18,7 +30,7 @@ echo "=================================================================="
 
 # 1. Clean up prior resources if present
 echo "[1/5] Removing existing cluster resources..."
-for res in vip-haproxy-group flowfirst-vip haproxy-clone haproxy-res flowfirst-p1-clone flowfirst-p2-clone flowfirst-p3-clone flowfirst-p4-clone; do
+for res in vip-haproxy-group flowfirst-vip haproxy-clone haproxy-res flowfirst-p1-res-clone flowfirst-p2-res-clone flowfirst-p3-res-clone flowfirst-p4-res-clone flowfirst-p1-res flowfirst-p2-res flowfirst-p3-res flowfirst-p4-res; do
     if sudo pcs resource status "${res}" >/dev/null 2>&1; then
         echo "  Deleting resource ${res}..."
         sudo pcs resource delete "${res}" --force || true
@@ -33,7 +45,7 @@ sudo pcs resource create flowfirst-vip ocf:heartbeat:IPaddr2 \
     nic="${VIP_NIC}" \
     op monitor interval=10s timeout=20s
 
-# 3. Configure HAProxy as a Pacemaker Cluster Resource (active on the VIP node or cloned)
+# 3. Configure HAProxy as a Pacemaker Cluster Resource
 echo "[3/5] Creating HAProxy cluster resource..."
 sudo pcs resource create haproxy-res systemd:haproxy \
     op monitor interval=15s timeout=20s \

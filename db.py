@@ -8,6 +8,7 @@ from config import (
     MARIADB_USER,
     MARIADB_PASSWORD,
     MARIADB_DB,
+    MARIADB_HOSTS,
 )
 
 
@@ -16,12 +17,17 @@ def get_db_connection(max_retries: int = 3, retry_delay: float = 1.0):
     Create and return a connection to MariaDB Galera Cluster.
     Supports retry with backoff for cluster node transitions.
     """
-    # Build list of potential connection targets (primary host / VIP or local)
-    hosts_to_try = [MARIADB_HOST]
-    if "192.168.1.100" in MARIADB_HOST:
-        hosts_to_try.extend(["192.168.1.101", "192.168.1.102", "192.168.1.103"])
-    elif MARIADB_HOST not in ("localhost", "127.0.0.1"):
-        hosts_to_try.append("localhost")
+    # Build list of potential connection targets from environment
+    hosts_to_try = []
+    if MARIADB_HOST:
+        hosts_to_try.append(MARIADB_HOST)
+    if MARIADB_HOSTS:
+        for h in MARIADB_HOSTS.split(","):
+            cleaned = h.strip()
+            if cleaned and cleaned not in hosts_to_try:
+                hosts_to_try.append(cleaned)
+    if not hosts_to_try:
+        hosts_to_try = ["localhost"]
 
     last_error = None
     for attempt in range(max_retries):

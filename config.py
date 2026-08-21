@@ -25,6 +25,7 @@ MARIADB_PORT = int(os.getenv("MARIADB_PORT", 3306))
 MARIADB_USER = os.getenv("MARIADB_USER", "flowuser")
 MARIADB_PASSWORD = os.getenv("MARIADB_PASSWORD", "flowpassword")
 MARIADB_DB = os.getenv("MARIADB_DB", "flowfirst_db")
+MARIADB_HOSTS = os.getenv("MARIADB_HOSTS", "").strip()
 
 # Flow 1 Queues
 # Flow 1: P1 -> [flow1_p1_to_p2] -> P2 -> (reflects modified) -> [flow1_p2_to_p3] -> P3 -> [flow1_p3_to_p4] -> P4 (persists to MariaDB)

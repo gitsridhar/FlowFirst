@@ -3,17 +3,27 @@ set -euo pipefail
 
 # ==============================================================================
 # FlowFirst - Multi-Node Pacemaker Cluster Setup Script (3 Nodes)
+# Automatically loads configuration from .env if present
 # ==============================================================================
 
-CLUSTER_NAME="${1:-flowfirst_cluster}"
-NODE1_NAME="${2:-node1}"
-NODE1_IP="${3:-192.168.1.101}"
-NODE2_NAME="${4:-node2}"
-NODE2_IP="${5:-192.168.1.102}"
-NODE3_NAME="${6:-node3}"
-NODE3_IP="${7:-192.168.1.103}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-WORKING_DIR="$(pwd)"
+# Source environment variables if .env exists
+if [ -f "${ROOT_DIR}/.env" ]; then
+    # shellcheck disable=SC1091
+    set -a
+    source "${ROOT_DIR}/.env"
+    set +a
+fi
+
+CLUSTER_NAME="${1:-${CLUSTER_NAME:-flowfirst_cluster}}"
+NODE1_NAME="${2:-${NODE1_NAME:-node1}}"
+NODE1_IP="${3:-${NODE1_IP:-192.168.1.101}}"
+NODE2_NAME="${4:-${NODE2_NAME:-node2}}"
+NODE2_IP="${5:-${NODE2_IP:-192.168.1.102}}"
+NODE3_NAME="${6:-${NODE3_NAME:-node3}}"
+NODE3_IP="${7:-${NODE3_IP:-192.168.1.103}}"
 
 echo "=================================================================="
 echo " Setting up 3-Node Pacemaker High Availability Cluster"
@@ -58,8 +68,7 @@ sudo pcs cluster enable --all
 
 # 6. Cluster Quorum and STONITH settings
 echo "[6/6] Configuring cluster properties for multi-node operation..."
-# In production with fencing hardware, configure STONITH fence agents.
-# For demo/software HA:
+# For demo/software HA (disable STONITH):
 sudo pcs property set stonith-enabled=false
 
 echo ""

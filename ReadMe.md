@@ -206,33 +206,33 @@ cp .env.example .env
 
 ### Phase 2: Setup MariaDB Galera Cluster on All 3 Nodes
 
-Run from `/opt/flowfirst`:
+All scripts automatically read parameters from `/opt/flowfirst/.env`.
 
-#### 1. On Node 1 (`192.168.1.101`):
+#### 1. On Node 1:
 ```bash
 cd /opt/flowfirst
-# Configure Galera node settings
-sudo ./mariadb-galera/setup_galera_node.sh node1 192.168.1.101 192.168.1.101 192.168.1.102 192.168.1.103
+# Configure Galera node settings (reads from .env)
+sudo ./mariadb-galera/setup_galera_node.sh
 
 # Bootstrap primary cluster node
 sudo ./mariadb-galera/bootstrap_galera.sh
 ```
 
-#### 2. On Node 2 (`192.168.1.102`):
+#### 2. On Node 2:
 ```bash
 cd /opt/flowfirst
-# Configure Galera node settings
-sudo ./mariadb-galera/setup_galera_node.sh node2 192.168.1.102 192.168.1.101 192.168.1.102 192.168.1.103
+# Configure Galera node settings (reads from .env)
+sudo ./mariadb-galera/setup_galera_node.sh
 
 # Join Galera cluster
 sudo systemctl enable --now mariadb
 ```
 
-#### 3. On Node 3 (`192.168.1.103`):
+#### 3. On Node 3:
 ```bash
 cd /opt/flowfirst
-# Configure Galera node settings
-sudo ./mariadb-galera/setup_galera_node.sh node3 192.168.1.103 192.168.1.101 192.168.1.102 192.168.1.103
+# Configure Galera node settings (reads from .env)
+sudo ./mariadb-galera/setup_galera_node.sh
 
 # Join Galera cluster
 sudo systemctl enable --now mariadb
@@ -265,8 +265,8 @@ sudo ./scripts/install_rabbitmq_rhel9.sh
 ### Phase 4: Setup HAProxy on All 3 Nodes
 ```bash
 cd /opt/flowfirst
-# Deploys HAProxy balancing for REST API (:8080) and Galera MariaDB (:3306)
-sudo ./haproxy/setup_haproxy.sh 192.168.1.101 192.168.1.102 192.168.1.103 192.168.1.100
+# Automatically generates /etc/haproxy/haproxy.cfg using IPs and ports from .env
+sudo ./haproxy/setup_haproxy.sh
 ```
 
 ---
@@ -288,14 +288,11 @@ sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 
 ```bash
 cd /opt/flowfirst
 
-# 1. Initialize Corosync 3-node cluster
-sudo ./pacemaker/setup_multinode_cluster.sh flowfirst_cluster \
-    node1 192.168.1.101 \
-    node2 192.168.1.102 \
-    node3 192.168.1.103
+# 1. Initialize Corosync 3-node cluster using cluster definitions from .env
+sudo ./pacemaker/setup_multinode_cluster.sh
 
-# 2. Deploy Virtual IP (VIP), HAProxy group, and Cloned Pipeline Resources
-sudo ./pacemaker/configure_multinode_resources.sh 192.168.1.100 eth0 24
+# 2. Deploy Virtual IP (VIP), HAProxy group, and Cloned Pipeline Resources using VIP from .env
+sudo ./pacemaker/configure_multinode_resources.sh
 
 # 3. Check Pacemaker Status
 sudo pcs status

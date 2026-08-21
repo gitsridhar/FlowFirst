@@ -36,19 +36,19 @@ defaults
 # HAProxy Statistics Dashboard
 #---------------------------------------------------------------------
 listen stats
-    bind 0.0.0.0:9000
+    bind 0.0.0.0:__HAPROXY_STATS_PORT__
     mode http
     stats enable
     stats uri /
     stats refresh 5s
-    stats auth admin:admin123
+    stats auth __HAPROXY_STATS_USER__:__HAPROXY_STATS_PASS__
     stats show-node
 
 #---------------------------------------------------------------------
 # Frontend: Process 1 REST API (Binds to Virtual IP / All Interfaces)
 #---------------------------------------------------------------------
 frontend flowfirst_api_front
-    bind *:8080
+    bind *:__API_PORT__
     mode http
     option httplog
     default_backend flowfirst_api_back
@@ -63,16 +63,16 @@ backend flowfirst_api_back
     http-check expect status 200
     default-server inter 3s fall 2 rise 2
 
-    # Cluster Node Physical IPs (configured via install script or environment)
-    server node1 192.168.1.101:8080 check
-    server node2 192.168.1.102:8080 check
-    server node3 192.168.1.103:8080 check
+    # Cluster Node Physical IPs (populated from .env)
+    server __NODE1_NAME__ __NODE1_IP__:__API_PORT__ check
+    server __NODE2_NAME__ __NODE2_IP__:__API_PORT__ check
+    server __NODE3_NAME__ __NODE3_IP__:__API_PORT__ check
 
 #---------------------------------------------------------------------
 # Load balancing & Failover for MariaDB Galera Cluster (Port 3306)
 #---------------------------------------------------------------------
 frontend mariadb_galera_front
-    bind *:3306
+    bind *:__MARIADB_PORT__
     mode tcp
     option tcplog
     default_backend mariadb_galera_back
@@ -81,18 +81,17 @@ backend mariadb_galera_back
     mode tcp
     balance roundrobin
     option tcp-check
-    # Health check for MySQL / MariaDB service
-    tcp-check connect port 3306
+    tcp-check connect port __MARIADB_PORT__
     default-server inter 3s fall 2 rise 2
-    server node1 192.168.1.101:3306 check
-    server node2 192.168.1.102:3306 check
-    server node3 192.168.1.103:3306 check
+    server __NODE1_NAME__ __NODE1_IP__:__MARIADB_PORT__ check
+    server __NODE2_NAME__ __NODE2_IP__:__MARIADB_PORT__ check
+    server __NODE3_NAME__ __NODE3_IP__:__MARIADB_PORT__ check
 
 #---------------------------------------------------------------------
-# Optional: Load balancing for RabbitMQ AMQP (Port 5672)
+# Load balancing for RabbitMQ AMQP (Port 5672)
 #---------------------------------------------------------------------
 frontend rabbitmq_amqp_front
-    bind *:5672
+    bind *:__RABBITMQ_PORT__
     mode tcp
     option tcplog
     default_backend rabbitmq_amqp_back
@@ -102,6 +101,6 @@ backend rabbitmq_amqp_back
     balance roundrobin
     timeout client-fin 50s
     timeout server-fin 50s
-    server node1 192.168.1.101:5672 check inter 5s fall 2 rise 2
-    server node2 192.168.1.102:5672 check inter 5s fall 2 rise 2
-    server node3 192.168.1.103:5672 check inter 5s fall 2 rise 2
+    server __NODE1_NAME__ __NODE1_IP__:__RABBITMQ_PORT__ check inter 5s fall 2 rise 2
+    server __NODE2_NAME__ __NODE2_IP__:__RABBITMQ_PORT__ check inter 5s fall 2 rise 2
+    server __NODE3_NAME__ __NODE3_IP__:__RABBITMQ_PORT__ check inter 5s fall 2 rise 2

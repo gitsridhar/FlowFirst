@@ -1414,39 +1414,6 @@ flow2_reflected_queue    0         3
 
 ---
 
-## Updated Cluster Operations Quick Reference
-
-| Goal | Command |
-|---|---|
-| Full one-shot cluster status | `sudo crm_mon -1Ar` |
-| Live continuous monitor | `sudo crm_mon -Ar` |
-| Clear all failed-action history | `sudo crm_resource -C` |
-| Clear failures for one resource | `sudo crm_resource -r <resource-id> -C` |
-| Locate where a resource runs | `sudo crm_resource --resource <id> --locate` |
-| Force resource to a node | `sudo crm_resource --resource <id> --move --node <node>` |
-| Remove forced constraint | `sudo crm_resource --resource <id> --clear` |
-| Disable a resource cluster-wide | `sudo pcs resource disable <resource-id>` |
-| Enable a resource cluster-wide | `sudo pcs resource enable <resource-id>` |
-| Ban a resource from one node | `sudo pcs resource ban <resource-id> <nodename>` |
-| Clear ban on a resource | `sudo pcs resource clear <resource-id> <nodename>` |
-| Put a node into standby | `sudo pcs node standby <nodename>` |
-| Restore a node from standby | `sudo pcs node unstandby <nodename>` |
-| Refresh resource state | `sudo pcs resource refresh <resource-id>` |
-| List all constraints | `sudo pcs constraint list --full` |
-| Show Corosync ring status | `sudo corosync-cfgtool -s` |
-| Show quorum status | `sudo corosync-quorumtool -l` |
-| Verify cluster config syntax | `sudo crm_verify -L -V` |
-| Show CIB (cluster config XML) | `sudo pcs cluster cib` |
-| Start cluster on a node | `sudo pcs cluster start` |
-| Stop cluster on a node | `sudo pcs cluster stop` |
-| Bootstrap Galera primary | `sudo galera_new_cluster` |
-| Check Galera cluster size | `SHOW STATUS LIKE 'wsrep_cluster_size';` |
-| Check Galera sync state | `SHOW STATUS LIKE 'wsrep_local_state_comment';` |
-| Check RabbitMQ cluster status | `sudo rabbitmqctl cluster_status` |
-| List RabbitMQ queue depths | `sudo rabbitmqctl list_queues name messages consumers` |
-
----
-
 ## Network Glitch Simulation Scenarios
 
 These scenarios use Linux traffic-control (`tc netem`) and `iptables` to inject realistic network faults between cluster nodes — packet loss, latency spikes, bandwidth throttling, and hard network partitions — and verify the cluster's response using `pcs`, `crm_mon`, Corosync, Galera, and RabbitMQ commands. A helper script [`scripts/simulate_network_glitch.sh`](scripts/simulate_network_glitch.sh) is provided to automate injection and cleanup.
@@ -2209,7 +2176,743 @@ mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
 
 ---
 
-## Updated Cluster Operations Quick Reference
+## Network Round-Trip Verification with `tcpdump`
+
+These scenarios capture live packets on the cluster interfaces while executing real pipeline use-cases, then analyse the captures to confirm that **every network protocol completes its full handshake and round-trip** — AMQP, Corosync, Galera wsrep, MariaDB, and REST/HTTP over HAProxy.
+
+> **Prerequisites on every node:**
+> ```bash
+> sudo dnf install -y tcpdump wireshark-cli   # wireshark-cli provides tshark
+> ```
+
+A helper script [`scripts/tcpdump_flows.sh`](scripts/tcpdump_flows.sh) automates capture startup, use-case execution, and round-trip analysis for all protocols.
+
+---
+
+### tcpdump Protocol & Port Reference
+
+| Protocol | Transport | Port(s) | What to look for |
+|---|---|---|---|
+| AMQP (RabbitMQ) | TCP | 5672 | `SYN→SYN-ACK→ACK` connect; `AMQP0-9-1` frame headers; `Basic.Publish`, `Basic.Deliver`, `Basic.Ack` |
+| RabbitMQ cluster bus | TCP | 25672 | Erlang distribution handshake; `send_challenge` / `send_challenge_reply` |
+| Corosync heartbeat | UDP | 5405 | Periodic token-ring messages; `TOTEM` token and join messages |
+| Galera wsrep replication | TCP | 4567 (tcp+udp) | `SYN→SYN-ACK→ACK`; wsrep writesets; `ist.send_sync` |
+| Galera IST | TCP | 4568 | IST donor→joiner stream |
+| Galera SST (xtrabackup) | TCP | 4444 | SST donor stream |
+| MariaDB client | TCP | 3306 | MySQL greeting packet; `COM_QUERY`; result set; `EOF` packet |
+| REST API / HAProxy | TCP | 8080 | `HTTP/1.1 POST` request; `200 OK` response; `Content-Length` match |
+| HAProxy stats | TCP | 9000 | `HTTP/1.1 GET /stats`; `200 OK` |
+
+---
+
+### Scenario 24: Capture Setup — Identify Interfaces and Start Captures
+
+#### 24.1 — Identify the cluster-facing network interface on each node
+
+```bash
+# Run on each node — find the interface on the 192.168.1.0/24 subnet
+ip -o addr show | awk '/192\.168\.1\./ {print $2, $4}'
+```
+```
+eth0 192.168.1.101/24    # node1
+eth0 192.168.1.102/24    # node2
+eth0 192.168.1.103/24    # node3
+```
+
+Set a shell variable for all subsequent commands:
+```bash
+IFACE=eth0
+```
+
+#### 24.2 — Start background captures on all three nodes simultaneously
+
+Open **three SSH sessions** (one per node) and run on each:
+
+```bash
+# On node1 — capture all cluster-relevant ports, write to timestamped pcap
+IFACE=eth0
+PCAP_DIR=/var/log/flowfirst/pcap
+sudo mkdir -p ${PCAP_DIR}
+sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node1_$(date +%Y%m%d_%H%M%S).pcap \
+    'port 5672 or port 25672 or port 5405 or port 4567 or port 4568 or port 4444 or port 3306 or port 8080 or port 9000' \
+    -Z root &
+TCPDUMP_PID=$!
+echo "tcpdump PID: ${TCPDUMP_PID}"
+```
+
+```bash
+# On node2
+IFACE=eth0
+PCAP_DIR=/var/log/flowfirst/pcap
+sudo mkdir -p ${PCAP_DIR}
+sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node2_$(date +%Y%m%d_%H%M%S).pcap \
+    'port 5672 or port 25672 or port 5405 or port 4567 or port 4568 or port 4444 or port 3306 or port 8080 or port 9000' \
+    -Z root &
+TCPDUMP_PID=$!
+```
+
+```bash
+# On node3
+IFACE=eth0
+PCAP_DIR=/var/log/flowfirst/pcap
+sudo mkdir -p ${PCAP_DIR}
+sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node3_$(date +%Y%m%d_%H%M%S).pcap \
+    'port 5672 or port 25672 or port 5405 or port 4567 or port 4568 or port 4444 or port 3306 or port 8080 or port 9000' \
+    -Z root &
+TCPDUMP_PID=$!
+```
+
+#### 24.3 — Verify captures are running
+
+```bash
+sudo tcpdump -D    # list interfaces
+ls -lh ${PCAP_DIR}/   # confirm pcap files are growing
+```
+```
+-rw-r--r-- 1 root root 48K Jun  9 12:00 node1_20250609_120000.pcap
+```
+
+---
+
+### Scenario 25: AMQP Round-Trip — Flow1 & Flow2 Pipeline Execution
+
+With captures running from Scenario 24, trigger both pipeline flows and then examine the AMQP handshake and message delivery round-trips.
+
+#### 25.1 — Execute both flows via the VIP
+
+```bash
+# From any workstation or cluster node
+curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+sleep 10    # allow full pipeline traversal
+```
+
+#### 25.2 — Stop captures and examine AMQP traffic
+
+```bash
+sudo kill ${TCPDUMP_PID}    # stop capture on each node
+PCAP=$(ls -t /var/log/flowfirst/pcap/node1_*.pcap | head -1)
+```
+
+#### 25.3 — Verify TCP three-way handshake for AMQP connections
+
+```bash
+sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep -E "Flags \[S\]|Flags \[S\.\]|Flags \[\.\]" | head -20
+```
+```
+12:00:01.123456 IP 192.168.1.101.52341 > 192.168.1.102.5672: Flags [S],  seq 1234567, ...
+12:00:01.124001 IP 192.168.1.102.5672  > 192.168.1.101.52341: Flags [S.], seq 9876543, ack 1234568, ...
+12:00:01.124050 IP 192.168.1.101.52341 > 192.168.1.102.5672: Flags [.],  ack 9876544, ...
+```
+
+> ✅ **SYN → SYN-ACK → ACK** sequence confirms a successful TCP three-way handshake. Every AMQP connection must show this triplet.
+
+#### 25.4 — Verify AMQP 0-9-1 protocol banner
+
+```bash
+sudo tcpdump -r ${PCAP} -nn -A 'port 5672' | grep -E "AMQP|amqp" | head -10
+```
+```
+12:00:01.124100 ... "AMQP" 0 0 9 1    ← AMQP 0-9-1 protocol header sent by client
+```
+
+#### 25.5 — Examine AMQP frame sequence with `tshark`
+
+```bash
+sudo tshark -r ${PCAP} -d tcp.port==5672,amqp \
+    -Y 'amqp' \
+    -T fields \
+    -e frame.time_relative \
+    -e ip.src \
+    -e ip.dst \
+    -e amqp.method.method \
+    2>/dev/null | head -40
+```
+```
+0.000000    192.168.1.101  192.168.1.102  connection.start
+0.000120    192.168.1.102  192.168.1.101  connection.start-ok
+0.000240    192.168.1.102  192.168.1.101  connection.tune
+0.000310    192.168.1.101  192.168.1.102  connection.tune-ok
+0.000400    192.168.1.101  192.168.1.102  connection.open
+0.000480    192.168.1.102  192.168.1.101  connection.open-ok
+0.000550    192.168.1.101  192.168.1.102  channel.open
+0.000620    192.168.1.102  192.168.1.101  channel.open-ok
+0.000700    192.168.1.101  192.168.1.102  basic.publish        ← message sent to flow1_queue
+0.000780    192.168.1.102  192.168.1.101  basic.deliver        ← process2 receives it
+0.000850    192.168.1.101  192.168.1.102  basic.ack            ← process2 acknowledges
+0.001200    192.168.1.101  192.168.1.102  basic.publish        ← process2 re-publishes modified
+0.001290    192.168.1.102  192.168.1.101  basic.deliver        ← process3 receives it
+0.001360    192.168.1.101  192.168.1.102  basic.ack            ← process3 acknowledges
+```
+
+> ✅ **Full AMQP round-trip confirmed**: `connection.start` → `open-ok` → `basic.publish` → `basic.deliver` → `basic.ack` for each hop in the pipeline.
+
+#### 25.6 — Confirm message payload mutation across hops
+
+```bash
+# Extract AMQP payload content (ASCII printable)
+sudo tcpdump -r ${PCAP} -nn -A 'port 5672' \
+    | grep -A2 "basic.publish" \
+    | grep -oP '"payload":\{.*?\}' \
+    | head -10
+```
+
+Look for the `hop_count` field incrementing and `modified_by` being updated at each process — confirming the data mutation design is visible at the wire level.
+
+#### 25.7 — Verify clean TCP connection teardown (FIN-ACK)
+
+```bash
+sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep "Flags \[F" | head -10
+```
+```
+12:00:11.450001 IP 192.168.1.101.52341 > 192.168.1.102.5672: Flags [F.], seq ..., ack ...
+12:00:11.450200 IP 192.168.1.102.5672  > 192.168.1.101.52341: Flags [F.], seq ..., ack ...
+```
+
+> ✅ Graceful `FIN → FIN-ACK` teardown — no abrupt `RST` terminations.
+
+---
+
+### Scenario 26: REST API / HAProxy Round-Trip Verification
+
+#### 26.1 — Capture REST API traffic while sending requests
+
+```bash
+# On the node currently holding the VIP (e.g., node1)
+IFACE=eth0
+sudo tcpdump -i ${IFACE} -s 0 -w /tmp/rest_api.pcap \
+    'tcp port 8080' &
+TCPDUMP_PID=$!
+
+# Send 3 requests to generate traffic
+for i in 1 2 3; do
+  curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .handled_by_node
+  sleep 1
+done
+
+sudo kill ${TCPDUMP_PID}
+```
+
+#### 26.2 — Verify HTTP request/response round-trip
+
+```bash
+sudo tcpdump -r /tmp/rest_api.pcap -nn -A 'tcp port 8080' \
+    | grep -E "POST|HTTP/1|Content-Length|handled_by" | head -20
+```
+```
+12:00:05.001000 ... POST /api/flow1 HTTP/1.1
+12:00:05.001100 ... Content-Type: application/json
+12:00:05.002500 ... HTTP/1.0 200 OK
+12:00:05.002600 ... Content-Length: 87
+12:00:05.002700 ... {"status":"queued","flow":"flow1","handled_by_node":"node1"}
+```
+
+> ✅ HTTP `POST` request and `200 OK` response confirm REST API round-trip.
+
+#### 26.3 — Confirm HAProxy load-balancing across 3 nodes
+
+Send 9 requests (3 per node via round-robin) and capture the `handled_by_node` field:
+```bash
+for i in $(seq 1 9); do
+  curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq -r .handled_by_node
+done
+```
+```
+node1
+node2
+node3
+node1
+node2
+node3
+node1
+node2
+node3
+```
+
+Confirm in the pcap that the destination backend IPs rotate:
+```bash
+sudo tcpdump -r /tmp/rest_api.pcap -nn 'dst port 8080' \
+    | awk '{print $5}' | sort | uniq -c | sort -rn
+```
+```
+   3 192.168.1.101.8080:
+   3 192.168.1.102.8080:
+   3 192.168.1.103.8080:
+```
+
+> ✅ Even distribution confirms HAProxy round-robin is functioning.
+
+#### 26.4 — Verify TCP SYN-SYN/ACK-ACK for every HTTP connection
+
+```bash
+sudo tshark -r /tmp/rest_api.pcap \
+    -Y 'tcp.flags.syn==1' \
+    -T fields -e frame.time_relative -e ip.src -e ip.dst -e tcp.flags \
+    2>/dev/null
+```
+```
+0.000000  192.168.1.100  192.168.1.101  0x0002   ← SYN (HAProxy→backend)
+0.000080  192.168.1.101  192.168.1.100  0x0012   ← SYN-ACK
+1.001000  192.168.1.100  192.168.1.102  0x0002   ← SYN (next round-robin)
+1.001070  192.168.1.102  192.168.1.100  0x0012   ← SYN-ACK
+```
+
+---
+
+### Scenario 27: Corosync Heartbeat Round-Trip Verification
+
+#### 27.1 — Capture Corosync UDP heartbeats
+
+```bash
+# On node1 — capture only Corosync UDP 5405
+sudo tcpdump -i ${IFACE} -s 0 -w /tmp/corosync.pcap \
+    'udp port 5405' &
+TCPDUMP_PID=$!
+
+# Let it run for 30 seconds to capture several token rotations
+sleep 30
+sudo kill ${TCPDUMP_PID}
+```
+
+#### 27.2 — Count token messages per source node
+
+```bash
+sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
+    | awk '{print $3}' | cut -d. -f1-4 | sort | uniq -c | sort -rn
+```
+```
+ 148 192.168.1.101    ← node1 sent 148 Corosync messages
+ 147 192.168.1.102    ← node2 sent 147
+ 149 192.168.1.103    ← node3 sent 149
+```
+
+> ✅ Roughly equal message counts from all 3 nodes confirms active token-ring participation by every node.
+
+#### 27.3 — Verify bidirectional flow between every node pair
+
+```bash
+sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
+    | awk '{print $3, "->", $5}' \
+    | sed 's/\.[0-9]*://g' \
+    | sort -u | head -12
+```
+```
+192.168.1.101 -> 192.168.1.102    ← node1→node2
+192.168.1.101 -> 192.168.1.103    ← node1→node3
+192.168.1.102 -> 192.168.1.101    ← node2→node1
+192.168.1.102 -> 192.168.1.103    ← node2→node3
+192.168.1.103 -> 192.168.1.101    ← node3→node1
+192.168.1.103 -> 192.168.1.102    ← node3→node2
+```
+
+> ✅ All 6 directed pairs present — every node is communicating with every other node in the ring.
+
+#### 27.4 — Measure Corosync token inter-arrival time (heartbeat interval)
+
+```bash
+sudo tcpdump -r /tmp/corosync.pcap -nn -tt 'udp port 5405 and src 192.168.1.101' \
+    | awk '{print $1}' \
+    | awk 'NR>1{printf "%.3fms\n", ($1-prev)*1000} {prev=$1}' \
+    | sort -n | awk 'BEGIN{n=0;s=0} {n++;s+=$1} END{printf "avg=%.1fms  n=%d\n",s/n,n}'
+```
+```
+avg=999.8ms  n=147     ← token circulates approximately every 1 second (Corosync default)
+```
+
+> ✅ Token interval close to 1000 ms matches Corosync's default `token` parameter.
+
+---
+
+### Scenario 28: Galera wsrep Replication Round-Trip Verification
+
+#### 28.1 — Capture Galera replication traffic during a DB write
+
+```bash
+# On node1 — capture Galera ports
+sudo tcpdump -i ${IFACE} -s 0 -w /tmp/galera.pcap \
+    'tcp port 4567 or tcp port 4568 or tcp port 4444' &
+TCPDUMP_PID=$!
+
+# Trigger a write through the pipeline (process4 will INSERT into MariaDB)
+curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+sleep 5
+
+sudo kill ${TCPDUMP_PID}
+```
+
+#### 28.2 — Verify Galera TCP connections established on port 4567
+
+```bash
+sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 4567 and tcp[tcpflags] & tcp-syn != 0' \
+    | grep -E "Flags \[S\b"
+```
+```
+12:00:10.100001 IP 192.168.1.101.43210 > 192.168.1.102.4567: Flags [S],  ...
+12:00:10.100150 IP 192.168.1.102.4567  > 192.168.1.101.43210: Flags [S.], ...
+12:00:10.100200 IP 192.168.1.101.43210 > 192.168.1.102.4567: Flags [.],  ...
+```
+
+> ✅ TCP handshake on Galera wsrep port 4567.
+
+#### 28.3 — Count Galera writeset packets per node pair
+
+```bash
+sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 4567 and not tcp[tcpflags] & tcp-syn != 0' \
+    | awk '{print $3, "->", $5}' \
+    | sed 's/\.[0-9]*://g' \
+    | sort | uniq -c | sort -rn | head -10
+```
+```
+  42 192.168.1.101 -> 192.168.1.102    ← writesets from node1 to node2
+  41 192.168.1.101 -> 192.168.1.103    ← writesets from node1 to node3
+  41 192.168.1.102 -> 192.168.1.101
+  40 192.168.1.102 -> 192.168.1.103
+  42 192.168.1.103 -> 192.168.1.101
+  41 192.168.1.103 -> 192.168.1.102
+```
+
+> ✅ Bidirectional writeset replication between all node pairs confirms Galera multi-master is active.
+
+#### 28.4 — Correlate Galera replication with MariaDB query volume
+
+```bash
+# Count MariaDB client queries captured alongside Galera replication
+sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 3306' | wc -l
+```
+```
+24     ← 24 TCP segments on port 3306 (query + result + EOF packets)
+```
+
+#### 28.5 — Examine MariaDB protocol greeting and query round-trip
+
+```bash
+# Run a separate short capture focused on port 3306
+sudo tcpdump -i ${IFACE} -s 0 -w /tmp/mysql.pcap 'tcp port 3306' &
+TCPDUMP_PID=$!
+
+mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
+  -e "SELECT COUNT(*) FROM processed_messages;"
+
+sudo kill ${TCPDUMP_PID}
+```
+
+```bash
+sudo tcpdump -r /tmp/mysql.pcap -nn -A 'tcp port 3306' \
+    | grep -E "mysql|MariaDB|COM_QUERY|SELECT|COUNT|localhost" | head -20
+```
+```
+12:00:20.001000 ... server version: 10.11.x-MariaDB   ← greeting packet
+12:00:20.002000 ... COM_QUERY: SELECT COUNT(*) ...     ← client sends query
+12:00:20.003000 ... result: 8                          ← server returns result
+```
+
+Or use `tshark` for structured output:
+```bash
+sudo tshark -r /tmp/mysql.pcap -d tcp.port==3306,mysql \
+    -Y 'mysql' \
+    -T fields \
+    -e frame.time_relative \
+    -e ip.src \
+    -e mysql.query \
+    -e mysql.num_fields \
+    2>/dev/null | grep -v "^$"
+```
+```
+0.000000  192.168.1.100  (server greeting, version 10.11)
+0.001200  192.168.1.101  SELECT COUNT(*) FROM processed_messages
+0.002100  192.168.1.100  (result: 1 field, 1 row)
+```
+
+> ✅ `COM_QUERY` → result set → `EOF` packet confirms full MariaDB round-trip.
+
+---
+
+### Scenario 29: Network Round-Trip During Glitch — Before/During/After Comparison
+
+This scenario combines Scenario 17 (latency injection) with live tcpdump to measure the actual impact of a network glitch on every protocol's round-trip time (RTT).
+
+#### 29.1 — Establish baseline RTTs (clean network)
+
+```bash
+# On node1 — capture all protocols for 30 seconds baseline
+sudo tcpdump -i ${IFACE} -s 0 -w /tmp/baseline.pcap \
+    'port 5672 or port 5405 or port 4567 or port 3306 or port 8080' &
+TCPDUMP_PID=$!
+
+curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+sleep 20
+
+sudo kill ${TCPDUMP_PID}
+
+echo "=== Baseline AMQP SYN→SYN-ACK RTT ==="
+sudo tshark -r /tmp/baseline.pcap -Y 'tcp.analysis.initial_rtt and tcp.port==5672' \
+    -T fields -e tcp.analysis.initial_rtt 2>/dev/null | \
+    awk '{sum+=$1;n++} END{printf "avg RTT: %.3fms (n=%d)\n", sum*1000/n, n}'
+```
+```
+avg RTT: 0.312ms (n=6)     ← sub-millisecond baseline
+```
+
+#### 29.2 — Inject latency on node2 and capture during glitch
+
+```bash
+# On node2 — inject 200ms delay
+sudo tc qdisc add dev ${IFACE} root netem delay 200ms 20ms
+
+# On node1 — capture during glitch
+sudo tcpdump -i ${IFACE} -s 0 -w /tmp/glitch.pcap \
+    'port 5672 or port 5405 or port 4567 or port 3306 or port 8080' &
+TCPDUMP_PID=$!
+
+curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+sleep 20
+
+sudo kill ${TCPDUMP_PID}
+```
+
+#### 29.3 — Compare RTTs baseline vs. glitch
+
+```bash
+# AMQP RTT during glitch
+echo "=== Glitch AMQP SYN→SYN-ACK RTT ==="
+sudo tshark -r /tmp/glitch.pcap -Y 'tcp.analysis.initial_rtt and tcp.port==5672' \
+    -T fields -e tcp.analysis.initial_rtt 2>/dev/null | \
+    awk '{sum+=$1;n++} END{printf "avg RTT: %.3fms (n=%d)\n", sum*1000/n, n}'
+```
+```
+avg RTT: 201.4ms (n=4)     ← 200ms injected delay is clearly visible
+```
+
+```bash
+# Corosync token timing during glitch — compare with Scenario 27.4 baseline
+echo "=== Glitch Corosync token inter-arrival ==="
+sudo tcpdump -r /tmp/glitch.pcap -nn -tt 'udp port 5405 and src 192.168.1.102' \
+    | awk '{print $1}' \
+    | awk 'NR>1{printf "%.1fms\n",($1-prev)*1000}{prev=$1}' \
+    | sort -n | tail -5
+```
+```
+1198.2ms     ← tokens from node2 arriving ~200ms late
+1203.5ms
+```
+
+> ✅ `tcpdump` directly measures the 200 ms injected delay in both AMQP and Corosync protocols.
+
+#### 29.4 — Cleanup and verify RTT returns to baseline
+
+```bash
+# On node2 — remove latency injection
+sudo tc qdisc del dev ${IFACE} root
+
+# Re-run baseline measurement
+sudo tcpdump -i ${IFACE} -s 0 -w /tmp/post_glitch.pcap \
+    'port 5672 or port 8080' &
+TCPDUMP_PID=$!
+
+curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+sleep 10
+
+sudo kill ${TCPDUMP_PID}
+
+sudo tshark -r /tmp/post_glitch.pcap -Y 'tcp.analysis.initial_rtt and tcp.port==5672' \
+    -T fields -e tcp.analysis.initial_rtt 2>/dev/null | \
+    awk '{sum+=$1;n++} END{printf "avg RTT: %.3fms (n=%d)\n", sum*1000/n, n}'
+```
+```
+avg RTT: 0.308ms (n=6)     ← back to sub-millisecond baseline
+```
+
+---
+
+### Scenario 30: tcpdump-Based Full Pipeline Flow Trace
+
+This scenario captures a single Flow 1 message from HTTP POST all the way to MariaDB INSERT and traces every network hop in the pcap files.
+
+#### 30.1 — Start captures on all 3 nodes simultaneously
+
+```bash
+# Run this on node1, node2, node3 in parallel (3 SSH sessions)
+NODE=$(hostname)
+IFACE=eth0
+PCAP_DIR=/var/log/flowfirst/pcap
+sudo mkdir -p ${PCAP_DIR}
+sudo tcpdump -i ${IFACE} -s 0 \
+    -w ${PCAP_DIR}/${NODE}_flow_trace_$(date +%H%M%S).pcap \
+    'port 5672 or port 3306 or port 8080' &
+echo "Capture started on ${NODE}, PID=$!"
+```
+
+#### 30.2 — Trigger one Flow 1 message
+
+```bash
+# From node1 or workstation
+MSG_ID=$(curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq -r .message_id)
+echo "Tracking message: ${MSG_ID}"
+sleep 8    # allow full pipeline: P1→P2→P3→P4→DB
+```
+
+#### 30.3 — Stop captures and locate the message in pcaps
+
+```bash
+# Stop on all nodes
+sudo pkill -f "tcpdump.*flow_trace" 2>/dev/null || true
+
+# On each node — search pcap for the message_id in AMQP payload
+for PCAP in /var/log/flowfirst/pcap/*flow_trace*.pcap; do
+    echo "=== ${PCAP} ==="
+    sudo tcpdump -r ${PCAP} -nn -A 'port 5672' 2>/dev/null \
+        | grep -c "${MSG_ID}" || true
+done
+```
+```
+=== node1_flow_trace_120010.pcap ===
+4     ← message seen 4 times on node1 (publish flow1_queue + flow1_reflected_queue)
+=== node2_flow_trace_120010.pcap ===
+2     ← message transited node2's AMQP broker
+=== node3_flow_trace_120010.pcap ===
+2     ← final delivery to process4 and DB write
+```
+
+#### 30.4 — Reconstruct the full hop timeline
+
+```bash
+# On each node — extract timestamps for this message_id
+for PCAP in /var/log/flowfirst/pcap/*flow_trace*.pcap; do
+    NODE=$(basename ${PCAP} | cut -d_ -f1)
+    sudo tcpdump -r ${PCAP} -nn -tt -A 'port 5672' 2>/dev/null \
+        | grep -B1 "${MSG_ID}" \
+        | grep "^[0-9]" \
+        | awk -v node="${NODE}" '{printf "%s  %s  AMQP hop\n", $1, node}'
+done | sort -n
+```
+```
+1749470410.123456  node1  AMQP hop    ← process1 publishes to flow1_queue
+1749470410.124800  node2  AMQP hop    ← process2 receives, modifies, republishes
+1749470410.126200  node1  AMQP hop    ← process3 receives on flow1_reflected_queue
+1749470410.127100  node3  AMQP hop    ← process4 receives on final queue
+1749470410.128500  node3  AMQP hop    ← DB INSERT via MariaDB (port 3306)
+```
+
+> ✅ The full pipeline message journey — from REST POST to DB INSERT — is traced at the packet level with sub-millisecond timestamps.
+
+#### 30.5 — Verify DB INSERT round-trip in the pcap
+
+```bash
+PCAP=$(ls /var/log/flowfirst/pcap/node3_flow_trace*.pcap | head -1)
+
+# Extract MySQL COM_QUERY and OK response
+sudo tcpdump -r ${PCAP} -nn -A 'tcp port 3306' 2>/dev/null \
+    | grep -E "INSERT|affected|last_insert_id" | head -5
+```
+```
+12:00:10.128500 ... INSERT INTO processed_messages ...
+12:00:10.129100 ... affected_rows=1, last_insert_id=42
+```
+
+> ✅ `INSERT` + `affected_rows=1` confirms the DB write completed successfully.
+
+---
+
+### Helper Script: `scripts/tcpdump_flows.sh`
+
+This script automates capture startup, flow execution, and round-trip analysis for all protocols.
+
+```bash
+# Start captures on the current node
+sudo ./scripts/tcpdump_flows.sh start [iface]
+
+# Run all use-cases and wait for pipeline traversal
+sudo ./scripts/tcpdump_flows.sh run-flows [vip_ip]
+
+# Stop captures
+sudo ./scripts/tcpdump_flows.sh stop
+
+# Analyse captured pcap files — print round-trip summaries for all protocols
+sudo ./scripts/tcpdump_flows.sh analyse [pcap_file]
+
+# Full automated sequence: start + run-flows + stop + analyse
+sudo ./scripts/tcpdump_flows.sh all [iface] [vip_ip]
+```
+
+---
+
+### Post-Capture Round-Trip Verification Checklist
+
+After running any capture scenario, use this checklist to confirm complete network round-trips for every protocol:
+
+```bash
+PCAP=/var/log/flowfirst/pcap/node1_*.pcap   # adjust to your latest file
+
+# ── 1. AMQP TCP three-way handshakes ─────────────────────────────────────────
+echo "=== 1. AMQP SYN/SYN-ACK/ACK triplets ==="
+sudo tcpdump -r ${PCAP} -nn 'port 5672 and tcp[tcpflags] & tcp-syn != 0' \
+    | grep -c "Flags \[S" || true
+# expect: pairs of SYN + SYN-ACK entries (each connection shows 2)
+
+# ── 2. AMQP full method sequence ──────────────────────────────────────────────
+echo "=== 2. AMQP connection.open-ok present ==="
+sudo tshark -r ${PCAP} -d tcp.port==5672,amqp \
+    -Y 'amqp.method.method == "connection.open-ok"' \
+    -T fields -e frame.number 2>/dev/null | wc -l
+# expect: >= 1 per pipeline process
+
+# ── 3. AMQP basic.publish and basic.ack pairs ────────────────────────────────
+echo "=== 3. AMQP publish→ack pairs ==="
+PUBLISHES=$(sudo tshark -r ${PCAP} -d tcp.port==5672,amqp \
+    -Y 'amqp.method.method == "basic.publish"' \
+    -T fields -e frame.number 2>/dev/null | wc -l)
+ACKS=$(sudo tshark -r ${PCAP} -d tcp.port==5672,amqp \
+    -Y 'amqp.method.method == "basic.ack"' \
+    -T fields -e frame.number 2>/dev/null | wc -l)
+echo "  publishes=${PUBLISHES}  acks=${ACKS}"
+# expect: acks >= publishes (acks include publisher confirms)
+
+# ── 4. Corosync bidirectional coverage ───────────────────────────────────────
+echo "=== 4. Corosync all-pairs coverage ==="
+sudo tcpdump -r ${PCAP} -nn 'udp port 5405' \
+    | awk '{print $3, $5}' | sed 's/\.[0-9]*://g' | sort -u
+# expect: all 6 directed pairs (node1↔node2, node1↔node3, node2↔node3)
+
+# ── 5. Galera TCP SYN→SYN-ACK on port 4567 ──────────────────────────────────
+echo "=== 5. Galera replication connections ==="
+sudo tcpdump -r ${PCAP} -nn 'tcp port 4567 and tcp[tcpflags] & tcp-syn != 0' \
+    | grep -c "Flags \[S\b" || true
+# expect: >= 2 (one per peer connection)
+
+# ── 6. MariaDB greeting + query + result ────────────────────────────────────
+echo "=== 6. MariaDB COM_QUERY round-trips ==="
+sudo tshark -r ${PCAP} -d tcp.port==3306,mysql \
+    -Y 'mysql.command == 3' \
+    -T fields -e mysql.query 2>/dev/null | head -5
+# expect: SELECT or INSERT statements visible
+
+# ── 7. HTTP POST 200 OK pairs ────────────────────────────────────────────────
+echo "=== 7. HTTP POST→200 OK round-trips ==="
+POSTS=$(sudo tcpdump -r ${PCAP} -nn -A 'tcp port 8080' 2>/dev/null \
+    | grep -c "POST /api/" || true)
+OKS=$(sudo tcpdump -r ${PCAP} -nn -A 'tcp port 8080' 2>/dev/null \
+    | grep -c "200 OK" || true)
+echo "  POST_requests=${POSTS}  200_OK_responses=${OKS}"
+# expect: OKs == POSTs
+
+# ── 8. No RST (abrupt termination) on AMQP ──────────────────────────────────
+echo "=== 8. AMQP RST check (expect 0) ==="
+sudo tcpdump -r ${PCAP} -nn 'port 5672 and tcp[tcpflags] & tcp-rst != 0' \
+    | wc -l
+# expect: 0 — any RST indicates abnormal connection termination
+
+# ── 9. No retransmissions on Galera ─────────────────────────────────────────
+echo "=== 9. Galera TCP retransmissions ==="
+sudo tshark -r ${PCAP} -Y 'tcp.analysis.retransmission and tcp.port==4567' \
+    -T fields -e frame.number 2>/dev/null | wc -l
+# expect: 0 on a healthy network; > 0 during glitch scenarios
+```
+
+---
+
+## Cluster & Network Operations Quick Reference
 
 | Goal | Command |
 |---|---|
@@ -2249,6 +2952,14 @@ mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
 | Remove iptables DROP rule | `sudo iptables -D INPUT/OUTPUT -s/-d <ip> -j DROP` |
 | List all iptables rules | `sudo iptables -L -n -v --line-numbers` |
 | Flush all iptables DROP rules | `sudo iptables -F` *(flushes entire chain — use carefully)* |
+| Start tcpdump capture to file | `sudo tcpdump -i <iface> -s 0 -w <file.pcap> '<filter>'` |
+| Read and display pcap | `sudo tcpdump -r <file.pcap> -nn -A '<filter>'` |
+| Count packets matching filter | `sudo tcpdump -r <file.pcap> -nn '<filter>' \| wc -l` |
+| Decode AMQP methods (tshark) | `sudo tshark -r <file> -d tcp.port==5672,amqp -Y 'amqp'` |
+| Decode MySQL queries (tshark) | `sudo tshark -r <file> -d tcp.port==3306,mysql -Y 'mysql'` |
+| Measure TCP initial RTT | `sudo tshark -r <file> -Y 'tcp.analysis.initial_rtt' -T fields -e tcp.analysis.initial_rtt` |
+| Find TCP retransmissions | `sudo tshark -r <file> -Y 'tcp.analysis.retransmission'` |
+| Find TCP RST packets | `sudo tcpdump -r <file> -nn 'tcp[tcpflags] & tcp-rst != 0'` |
 
 ---
 

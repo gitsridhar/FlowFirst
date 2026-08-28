@@ -569,6 +569,252 @@ Access the live stats dashboard to view real-time frontend and backend health me
 
 ---
 
+### Scenario 7: Pacemaker Cluster Validation with `crm_mon` & `crm_resource`
+
+Use these commands on **any cluster node** to confirm that all Pacemaker resources are running, correctly distributed, and healthy.
+
+---
+
+#### 7.1 — Full One-Shot Cluster Status (`crm_mon -1Ar`)
+
+```bash
+sudo crm_mon -1Ar
+```
+
+**Representative expected output (all 3 nodes healthy):**
+```
+Cluster Summary:
+  * Stack: corosync
+  * Current DC: node1 (version 2.1.6-8.el9-6fdc9deea29) - partition with quorum
+  * Last updated: Mon Jun  9 12:00:00 2025
+  * Last change:  Mon Jun  9 11:50:00 2025 by root via cibadmin on node1
+  * 3 nodes configured
+  * 14 resource instances configured
+
+Node List:
+  * Online: [ node1 node2 node3 ]
+
+Active Resources:
+  * Resource Group: vip-haproxy-group:
+    * vip        (ocf::heartbeat:IPaddr2):        Started node1
+    * haproxy    (systemd:haproxy):               Started node1
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1]:
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2]:
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p3-clone [flowfirst-p3]:
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p4-clone [flowfirst-p4]:
+    * Started: [ node1 node2 node3 ]
+```
+
+> Key indicators:
+> - `partition with quorum` — 2-of-3 nodes agree; cluster is fully operational
+> - `vip` and `haproxy` are **grouped** and always land on the same node together
+> - All 4 process clones show `Started: [ node1 node2 node3 ]` — active on every node
+
+---
+
+#### 7.2 — Continuous Live Monitor (`crm_mon -Ar`)
+
+```bash
+sudo crm_mon -Ar          # Refreshes every 15 seconds; press Ctrl-C to exit
+sudo crm_mon -Ar -i 5     # Refresh every 5 seconds
+```
+
+This is the interactive equivalent and is ideal for watching resource migration in real time during a failover test (Scenario 5).
+
+---
+
+#### 7.3 — Resource Constraint & Location Refresh (`crm_resource -C`)
+
+The `-C` flag clears all **failed-action history** and **location constraints** that Pacemaker accumulated when resources failed or were manually migrated. Run this after recovering a node that was put into standby:
+
+```bash
+sudo crm_resource -C
+```
+
+**Expected output:**
+```
+Cleaned up all resources on all nodes
+```
+
+To clear a **single resource** across all nodes:
+```bash
+sudo crm_resource -r vip -C
+sudo crm_resource -r flowfirst-p1-clone -C
+```
+
+---
+
+#### 7.4 — Per-Resource Status (`crm_resource --resource … --locate`)
+
+```bash
+# Where is the VIP currently running?
+sudo crm_resource --resource vip --locate
+```
+```
+resource vip is running on: node1
+```
+
+```bash
+# Where is each clone instance running?
+sudo crm_resource --resource flowfirst-p1-clone --locate
+```
+```
+resource flowfirst-p1-clone is running on: node1  node2  node3
+```
+
+---
+
+#### 7.5 — Move VIP to a Specific Node
+
+```bash
+# Force VIP (and HAProxy group) to node2
+sudo crm_resource --resource vip-haproxy-group --move --node node2
+sudo crm_mon -1Ar | grep vip
+```
+```
+    * vip        (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy    (systemd:haproxy):               Started node2
+```
+
+Remove the forced constraint to let Pacemaker re-balance freely:
+```bash
+sudo crm_resource --resource vip-haproxy-group --clear
+```
+
+---
+
+#### 7.6 — Node Standby & Recovery (VIP Failover Validation)
+
+```bash
+# 1. Put node1 into standby (simulates node outage)
+sudo pcs node standby node1
+
+# 2. Confirm VIP migrated to node2 or node3
+sudo crm_mon -1Ar | grep -E "vip|haproxy"
+```
+```
+    * vip        (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy    (systemd:haproxy):               Started node2
+```
+
+```bash
+# 3. Confirm API still reachable via VIP — no downtime
+curl -s http://192.168.1.100:8080/health | jq .handled_by_node
+```
+```
+"node2"
+```
+
+```bash
+# 4. Restore node1
+sudo pcs node unstandby node1
+
+# 5. Clear any residual constraints
+sudo crm_resource -C
+
+# 6. Confirm all nodes back online
+sudo crm_mon -1Ar | grep "Online:"
+```
+```
+  * Online: [ node1 node2 node3 ]
+```
+
+---
+
+#### 7.7 — Check for Failed Actions
+
+```bash
+sudo pcs status | grep -A5 "Failed"
+```
+
+If any resource has failed actions, the output will resemble:
+```
+Failed Resource Actions:
+  * flowfirst-p1_start_0 on node3 'not installed' (5): call=12, status='complete',
+      exitreason='Could not find Python venv at /opt/flowfirst/.venv',
+      last-rc-change='Mon Jun  9 11:45:10 2025', queued=0ms, exec=48ms
+```
+
+Fix the underlying issue on `node3`, then clear the failure:
+```bash
+sudo crm_resource -r flowfirst-p1-clone -C
+sudo pcs resource refresh flowfirst-p1-clone
+```
+
+---
+
+#### 7.8 — Full `pcs status` Reference Output (All Healthy)
+
+```bash
+sudo pcs status
+```
+```
+Cluster name: flowfirst_cluster
+Cluster Summary:
+  * Stack: corosync
+  * Current DC: node1 (version 2.1.6-8.el9) - partition with quorum
+  * Last updated: Mon Jun  9 12:05:00 2025
+  * Last change:  Mon Jun  9 11:50:00 2025 by root via cibadmin on node1
+  * 3 nodes configured
+  * 14 resource instances configured
+
+Node List:
+  * Online: [ node1 node2 node3 ]
+
+Full List of Resources:
+  * Resource Group: vip-haproxy-group:
+    * vip        (ocf::heartbeat:IPaddr2):        Started node1
+    * haproxy    (systemd:haproxy):               Started node1
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * flowfirst-p1       (systemd:flowfirst-process1):    Started node1
+    * flowfirst-p1       (systemd:flowfirst-process1):    Started node2
+    * flowfirst-p1       (systemd:flowfirst-process1):    Started node3
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+    * flowfirst-p2       (systemd:flowfirst-process2):    Started node1
+    * flowfirst-p2       (systemd:flowfirst-process2):    Started node2
+    * flowfirst-p2       (systemd:flowfirst-process2):    Started node3
+  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+    * flowfirst-p3       (systemd:flowfirst-process3):    Started node1
+    * flowfirst-p3       (systemd:flowfirst-process3):    Started node2
+    * flowfirst-p3       (systemd:flowfirst-process3):    Started node3
+  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+    * flowfirst-p4       (systemd:flowfirst-process4):    Started node1
+    * flowfirst-p4       (systemd:flowfirst-process4):    Started node2
+    * flowfirst-p4       (systemd:flowfirst-process4):    Started node3
+
+Daemon Status:
+  corosync: active/enabled
+  pacemaker: active/enabled
+  pcsd:      active/enabled
+```
+
+---
+
+## Cluster Operations Quick Reference
+
+| Goal | Command |
+|---|---|
+| Full one-shot cluster status | `sudo crm_mon -1Ar` |
+| Live continuous monitor | `sudo crm_mon -Ar` |
+| Clear all failed-action history | `sudo crm_resource -C` |
+| Clear failures for one resource | `sudo crm_resource -r <resource-id> -C` |
+| Locate where a resource runs | `sudo crm_resource --resource <id> --locate` |
+| Force resource to a node | `sudo crm_resource --resource <id> --move --node <node>` |
+| Remove forced constraint | `sudo crm_resource --resource <id> --clear` |
+| Put a node into standby | `sudo pcs node standby <nodename>` |
+| Restore a node from standby | `sudo pcs node unstandby <nodename>` |
+| Refresh resource state | `sudo pcs resource refresh <resource-id>` |
+| List all constraints | `sudo pcs constraint list --full` |
+| Show Corosync ring status | `sudo corosync-cfgtool -s` |
+| Show quorum status | `sudo corosync-quorumtool -l` |
+| Verify cluster config syntax | `sudo crm_verify -L -V` |
+| Show CIB (cluster config XML) | `sudo pcs cluster cib` |
+
+---
+
 ## Local Single-Node / Development Mode (Docker Compose)
 
 For local testing without multi-node hardware:

@@ -1447,6 +1447,811 @@ flow2_reflected_queue    0         3
 
 ---
 
+## Network Glitch Simulation Scenarios
+
+These scenarios use Linux traffic-control (`tc netem`) and `iptables` to inject realistic network faults between cluster nodes — packet loss, latency spikes, bandwidth throttling, and hard network partitions — and verify the cluster's response using `pcs`, `crm_mon`, Corosync, Galera, and RabbitMQ commands. A helper script [`scripts/simulate_network_glitch.sh`](scripts/simulate_network_glitch.sh) is provided to automate injection and cleanup.
+
+> **Prerequisites on every node:**
+> ```bash
+> sudo dnf install -y iproute-tc iptables-nft   # RHEL 9.6
+> ```
+
+---
+
+### Network Glitch Tool Overview
+
+| Tool | Fault type | Scope |
+|---|---|---|
+| `tc qdisc netem` | Delay, loss, corruption, reorder | Per-interface — affects all traffic on that NIC |
+| `iptables -j DROP` | Hard packet drop (one-way or both-way) | Per-source/destination — surgical, selective |
+| `iptables -j REJECT` | RST response (connection refused) | Per-source/destination |
+| `corosync-cfgtool -k` | Kill a Corosync ring | Corosync link only |
+
+All faults are **temporary and fully reversible**. Every sub-scenario includes the matching cleanup command.
+
+---
+
+### Scenario 17: Soft Network Degradation — Latency & Packet Loss (`tc netem`)
+
+This simulates a flaky inter-node network link: high latency and packet loss that keeps the node reachable but causes Corosync token timeouts, Galera replication lag, and RabbitMQ connection retries.
+
+#### 17.1 — Inject 300 ms delay + 10 % packet loss on node2's cluster interface
+
+```bash
+# On node2 — identify the cluster-facing interface
+ip route get 192.168.1.101 | awk '{print $5; exit}'
+# Example output: eth0
+IFACE=eth0
+
+# Add netem qdisc: 300ms delay ± 50ms jitter, 10% packet loss
+sudo tc qdisc add dev ${IFACE} root netem \
+    delay 300ms 50ms distribution normal \
+    loss 10%
+
+# Confirm it is active
+sudo tc qdisc show dev ${IFACE}
+```
+```
+qdisc netem 8001: root refcnt 2 limit 1000
+    delay 300ms  50ms  loss 10%
+```
+
+#### 17.2 — Observe Corosync detecting the degraded link
+
+From **node1** (within 30–60 s Corosync token timeout):
+```bash
+sudo corosync-cfgtool -s
+```
+```
+Local node ID 1
+RING ID 0
+    id      = 192.168.1.101
+    status  = ring 0 active with no faults
+
+RING ID 0
+    id      = 192.168.1.102     ← node2
+    status  = Faulty            ← Corosync flagged the ring as degraded
+```
+
+```bash
+sudo journalctl -u corosync -n 20 --no-pager | grep -E "token|loss|timeout"
+```
+```
+corosync[1234]: [TOTEM ] A processor failed, forming a new configuration
+corosync[1234]: [TOTEM ] token was lost, forming a new configuration
+```
+
+#### 17.3 — Observe Pacemaker response
+
+```bash
+sudo crm_mon -1Ar | grep -E "Online|OFFLINE|Stopped"
+```
+
+With only 300 ms delay Pacemaker usually **tolerates** the degradation (no fencing) unless the token timeout is breached repeatedly. Expected:
+```
+  * Online: [ node1 node2 node3 ]    ← cluster intact, no fencing triggered
+```
+
+If the loss is severe enough to cross the token timeout repeatedly, node2 may be fenced:
+```
+  * Online: [ node1 node3 ]
+  * OFFLINE: [ node2 ]
+
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 2 of 3):
+    * Started: [ node1 node3 ]
+    * Stopped: [ node2 ]
+```
+
+#### 17.4 — Check Galera replication lag on node2
+
+```bash
+# On node2
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_recv_queue_avg';"
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_flow_control_paused';"
+```
+```
++---------------------------+-------+
+| wsrep_local_recv_queue_avg| 4.750 |   ← queue backing up due to latency
++---------------------------+-------+
+
++---------------------------+-------+
+| wsrep_flow_control_paused | 0.320 |   ← 32% of time paused for flow control
++---------------------------+-------+
+```
+
+#### 17.5 — Check RabbitMQ connection state
+
+```bash
+# On node2
+sudo rabbitmqctl list_connections peer_host state | grep -v "^Listing"
+```
+```
+192.168.1.101   running
+192.168.1.103   running
+```
+RabbitMQ uses `net_ticktime` (default 60 s). At 300 ms latency it stays connected but shows elevated send queue depths:
+```bash
+sudo rabbitmqctl list_connections peer_host send_pend | grep -v "^Listing"
+```
+```
+192.168.1.101   2847
+192.168.1.103   312
+```
+
+#### 17.6 — Verify the pipeline is still processing
+
+```bash
+curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+```
+```json
+{ "status": "queued", "flow": "flow1", "message_id": "abc123", "handled_by_node": "node1" }
+```
+Messages may be processed more slowly but the pipeline continues — HAProxy routes around the degraded node2.
+
+#### 17.7 — Remove the degradation (cleanup)
+
+```bash
+# On node2
+sudo tc qdisc del dev ${IFACE} root
+
+# Confirm cleared
+sudo tc qdisc show dev ${IFACE}
+```
+```
+qdisc mq 0: root
+```
+
+```bash
+# Clear any Pacemaker failure history
+sudo crm_resource -C
+
+# Verify full cluster health restored
+sudo crm_mon -1Ar | grep "Online:"
+```
+```
+  * Online: [ node1 node2 node3 ]
+```
+
+---
+
+### Scenario 18: High Bandwidth Throttling — Simulating a Saturated Link
+
+#### 18.1 — Limit node3's cluster interface to 1 Mbit/s
+
+```bash
+# On node3
+IFACE=eth0
+sudo tc qdisc add dev ${IFACE} root tbf \
+    rate 1mbit burst 32kbit latency 400ms
+
+sudo tc qdisc show dev ${IFACE}
+```
+```
+qdisc tbf 8001: root refcnt 2 rate 1Mbit burst 32Kb lat 400ms
+```
+
+#### 18.2 — Monitor Galera SST/IST behaviour under bandwidth constraint
+
+```bash
+# On node3 — watch wsrep state
+watch -n2 "sudo mysql -u root -p -e \"SHOW STATUS LIKE 'wsrep_local_state_comment';\" 2>/dev/null"
+```
+```
++---------------------------+---------------+
+| wsrep_local_state_comment | Donor/Desynced|   ← SST in progress — slow due to throttle
++---------------------------+---------------+
+```
+
+#### 18.3 — Inject simultaneous packet corruption (2 %)
+
+```bash
+# On node3 — add corruption on top of the throttle
+sudo tc qdisc change dev ${IFACE} root netem corrupt 2%
+
+# Check pipeline impact
+sudo rabbitmqctl list_queues name messages | grep -v "^Listing"
+```
+```
+flow1_queue              12     ← messages backing up — node3 consumers struggling
+flow1_reflected_queue    8
+```
+
+#### 18.4 — Cleanup
+
+```bash
+# On node3
+sudo tc qdisc del dev ${IFACE} root
+sudo crm_resource -C
+```
+
+---
+
+### Scenario 19: Hard Network Partition — `iptables` DROP Between Two Nodes
+
+This is the most dangerous fault: node2 can reach node1 and node3, but node1 and node3 **cannot reach each other**. This creates a split-brain candidate situation where Corosync must fence one side.
+
+#### 19.1 — Understand the topology before partitioning
+
+```bash
+sudo crm_mon -1Ar | grep "Online:"
+```
+```
+  * Online: [ node1 node2 node3 ]
+```
+
+Note the current DC (Designated Coordinator):
+```bash
+sudo pcs status | grep "Current DC"
+```
+```
+  * Current DC: node1 (version 2.1.6-8.el9) - partition with quorum
+```
+
+#### 19.2 — Drop all cluster traffic between node1 and node3 (both directions)
+
+```bash
+# On node1 — drop all packets TO node3
+sudo iptables -I INPUT  -s 192.168.1.103 -j DROP
+sudo iptables -I OUTPUT -d 192.168.1.103 -j DROP
+
+# On node3 — drop all packets TO node1
+sudo iptables -I INPUT  -s 192.168.1.101 -j DROP
+sudo iptables -I OUTPUT -d 192.168.1.101 -j DROP
+```
+
+> The cluster now has two sides:
+> - **Side A**: node1 (can reach node2 only)
+> - **Side B**: node3 (can reach node2 only)
+> - **node2**: can reach both — it holds quorum
+
+#### 19.3 — Observe Corosync partition detection (within 10–30 s)
+
+```bash
+# From node2 — watch Corosync reconfigure
+sudo journalctl -u corosync -f --no-pager | grep -E "partition|quorum|fenc|membership"
+```
+```
+corosync[1234]: [QUORUM] Members[2]: 1 2            ← node1+node2 form a partition
+corosync[1234]: [QUORUM] Members[2]: 2 3            ← node3+node2 form a partition
+corosync[1234]: [QUORUM] This node is within the primary component
+```
+
+Corosync uses a **two-node majority rule**: each side has 2 of 3 nodes (node1+node2 and node2+node3). node2 will be in both partitions' majority. The partition that includes node2 **retains quorum**.
+
+#### 19.4 — Observe Pacemaker fencing decision
+
+```bash
+# From node2 (within 30–60 s)
+sudo crm_mon -1Ar
+```
+```
+Cluster Summary:
+  * Stack: corosync
+  * Current DC: node2 (version 2.1.6-8.el9) - partition with quorum
+  * Online: [ node1 node2 ]
+  * OFFLINE: [ node3 ]           ← node3 lost quorum as seen from node1+node2 partition
+
+  * Resource Group: vip-haproxy-group:
+    * vip     (ocf::heartbeat:IPaddr2):   Started node1
+    * haproxy (systemd:haproxy):          Started node1
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 2 of 3):
+    * Started: [ node1 node2 ]
+    * Stopped: [ node3 ]
+```
+
+```bash
+# Check stonith fencing events
+sudo pcs status | grep -A5 "Fencing"
+```
+```
+Fencing History:
+  * reboot of node3 (via fence_xvm)   succeeded: Mon Jun 9 12:45:01 2025
+```
+
+> If STONITH is not configured, Pacemaker will refuse to fence and the cluster will show a warning but resources continue on the quorum side.
+
+#### 19.5 — Verify VIP and pipeline are still serving
+
+```bash
+# From node1 — API must still respond via VIP
+curl -s http://192.168.1.100:8080/health | jq .
+```
+```json
+{ "status": "ok", "handled_by_node": "node1" }
+```
+
+```bash
+# Galera from node1
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+```
++--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 2     |   ← running with 2/3 — still accepts writes (no minority check)
++--------------------+-------+
+```
+
+```bash
+# RabbitMQ from node1
+sudo rabbitmqctl cluster_status | grep "Running Nodes"
+```
+```
+Running Nodes: rabbit@node1  rabbit@node2
+```
+
+#### 19.6 — Restore network connectivity (cleanup)
+
+```bash
+# On node1 — remove DROP rules
+sudo iptables -D INPUT  -s 192.168.1.103 -j DROP
+sudo iptables -D OUTPUT -d 192.168.1.103 -j DROP
+
+# On node3 — remove DROP rules
+sudo iptables -D INPUT  -s 192.168.1.101 -j DROP
+sudo iptables -D OUTPUT -d 192.168.1.101 -j DROP
+```
+
+#### 19.7 — Re-integrate node3 into the cluster
+
+```bash
+# On node3 — restart cluster services (Pacemaker may have shut them down after fencing)
+sudo pcs cluster start
+sleep 15
+
+# From node1 — confirm node3 rejoined
+sudo crm_mon -1Ar | grep "Online:"
+```
+```
+  * Online: [ node1 node2 node3 ]
+```
+
+```bash
+# Galera rejoins via IST
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+```
++--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 3     |
++--------------------+-------+
+```
+
+```bash
+# RabbitMQ node3 rejoins
+sudo rabbitmqctl cluster_status | grep "Running Nodes"
+```
+```
+Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
+```
+
+```bash
+# Clear all failure history
+sudo crm_resource -C
+
+# Confirm all process clones back at 3/3
+sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
+```
+```
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+```
+
+---
+
+### Scenario 20: Selective Port-Level Block — Corosync Ring Only
+
+Rather than dropping all traffic, this scenario blocks **only Corosync's UDP port 5405** between two nodes — simulating a misconfigured firewall rule that leaves SSH/HTTP/MariaDB/RabbitMQ intact but severs cluster heartbeats.
+
+#### 20.1 — Block Corosync UDP 5405 between node1 and node2
+
+```bash
+# On node1 — block Corosync heartbeats to/from node2
+sudo iptables -I INPUT  -s 192.168.1.102 -p udp --dport 5405 -j DROP
+sudo iptables -I OUTPUT -d 192.168.1.102 -p udp --dport 5405 -j DROP
+
+# On node2 — mirror the block
+sudo iptables -I INPUT  -s 192.168.1.101 -p udp --dport 5405 -j DROP
+sudo iptables -I OUTPUT -d 192.168.1.101 -p udp --dport 5405 -j DROP
+```
+
+#### 20.2 — Observe: Corosync loses heartbeat but application traffic flows
+
+```bash
+# Corosync ring shows fault (from node1)
+sudo corosync-cfgtool -s
+```
+```
+RING ID 0
+    id      = 192.168.1.101
+    status  = ring 0 active with no faults
+RING ID 0
+    id      = 192.168.1.102
+    status  = Faulty
+```
+
+```bash
+# But RabbitMQ still connects to node2 (AMQP 5672 is not blocked)
+sudo rabbitmqctl list_connections peer_host state | grep 192.168.1.102
+```
+```
+192.168.1.102   running
+```
+
+```bash
+# And MariaDB still replicates to node2 (3306/4567 not blocked)
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+```
++--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 3     |   ← Galera still intact — only Corosync is impacted
++--------------------+-------+
+```
+
+#### 20.3 — Pacemaker detects node2 as OFFLINE
+
+```bash
+sudo crm_mon -1Ar | grep -E "Online|OFFLINE"
+```
+```
+  * Online: [ node1 node3 ]
+  * OFFLINE: [ node2 ]
+```
+
+Pacemaker clones on node2 stop; node2's VIP (if held) migrates to node1 or node3. Pipeline continues on 2/3 nodes.
+
+#### 20.4 — Cleanup
+
+```bash
+# On node1
+sudo iptables -D INPUT  -s 192.168.1.102 -p udp --dport 5405 -j DROP
+sudo iptables -D OUTPUT -d 192.168.1.102 -p udp --dport 5405 -j DROP
+
+# On node2
+sudo iptables -D INPUT  -s 192.168.1.101 -p udp --dport 5405 -j DROP
+sudo iptables -D OUTPUT -d 192.168.1.101 -p udp --dport 5405 -j DROP
+
+# Restart cluster on node2
+sudo pcs cluster start
+sleep 15
+sudo crm_resource -C
+sudo crm_mon -1Ar | grep "Online:"
+```
+```
+  * Online: [ node1 node2 node3 ]
+```
+
+---
+
+### Scenario 21: Selective Port-Level Block — Galera Replication Only
+
+Block Galera's wsrep replication port (4567) between two nodes while leaving Corosync and RabbitMQ intact.
+
+#### 21.1 — Block Galera replication between node1 and node3
+
+```bash
+# On node1
+sudo iptables -I INPUT  -s 192.168.1.103 -p tcp --dport 4567 -j DROP
+sudo iptables -I OUTPUT -d 192.168.1.103 -p tcp --dport 4567 -j DROP
+sudo iptables -I INPUT  -s 192.168.1.103 -p udp --dport 4567 -j DROP
+sudo iptables -I OUTPUT -d 192.168.1.103 -p udp --dport 4567 -j DROP
+
+# On node3 — mirror
+sudo iptables -I INPUT  -s 192.168.1.101 -p tcp --dport 4567 -j DROP
+sudo iptables -I OUTPUT -d 192.168.1.101 -p tcp --dport 4567 -j DROP
+sudo iptables -I INPUT  -s 192.168.1.101 -p udp --dport 4567 -j DROP
+sudo iptables -I OUTPUT -d 192.168.1.101 -p udp --dport 4567 -j DROP
+```
+
+#### 21.2 — Observe Galera degradation while Corosync stays healthy
+
+```bash
+# Pacemaker cluster is unaffected — all 3 nodes still online
+sudo crm_mon -1Ar | grep "Online:"
+```
+```
+  * Online: [ node1 node2 node3 ]
+```
+
+```bash
+# But Galera flow control activates on node3
+sudo mysql -u root -p -h 192.168.1.103 -e \
+  "SHOW STATUS WHERE Variable_name IN
+   ('wsrep_cluster_size','wsrep_local_state_comment','wsrep_flow_control_paused');"
+```
+```
++---------------------------+--------+
+| wsrep_cluster_size        | 3      |   ← still 3 — routing through node2
+| wsrep_local_state_comment | Synced |
+| wsrep_flow_control_paused | 0.418  |   ← 42% pause — replication going via node2 hop
++---------------------------+--------+
+```
+
+Galera routes writes through node2 as an intermediary — degraded but functional.
+
+#### 21.3 — Observe write latency increase
+
+```bash
+# Time a write through the HAProxy VIP
+time mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
+  -e "INSERT INTO processed_messages (flow_type,source_process,payload,history_trail)
+      VALUES ('test','glitch_test','{}','[]');"
+```
+```
+real    0m0.847s     ← normally ~10ms; elevated due to Galera flow control
+```
+
+#### 21.4 — Cleanup
+
+```bash
+# On node1
+for proto in tcp udp; do
+  sudo iptables -D INPUT  -s 192.168.1.103 -p ${proto} --dport 4567 -j DROP
+  sudo iptables -D OUTPUT -d 192.168.1.103 -p ${proto} --dport 4567 -j DROP
+done
+
+# On node3
+for proto in tcp udp; do
+  sudo iptables -D INPUT  -s 192.168.1.101 -p ${proto} --dport 4567 -j DROP
+  sudo iptables -D OUTPUT -d 192.168.1.101 -p ${proto} --dport 4567 -j DROP
+done
+
+sudo crm_resource -C
+```
+
+---
+
+### Scenario 22: Selective Port-Level Block — RabbitMQ AMQP Only
+
+Block AMQP port 5672 on node2 — RabbitMQ stops accepting connections but Corosync and Galera remain intact.
+
+#### 22.1 — Block AMQP traffic to/from node2
+
+```bash
+# On node2
+sudo iptables -I INPUT  -p tcp --dport 5672 -j DROP
+sudo iptables -I OUTPUT -p tcp --sport 5672 -j DROP
+```
+
+#### 22.2 — Observe `pika` client reconnection
+
+The pipeline processes use multi-host `ConnectionParameters`. Within `pika`'s heartbeat interval (default 60 s), or immediately on the next connection attempt, they will fail over to `node1` or `node3`.
+
+Check the process logs on any node:
+```bash
+sudo journalctl -u flowfirst-process2 -n 20 --no-pager | grep -E "connect|reconnect|error"
+```
+```
+process2: Connection to 192.168.1.102:5672 failed, trying next host
+process2: Connected to 192.168.1.101:5672
+```
+
+#### 22.3 — Verify RabbitMQ cluster view
+
+```bash
+# From node1 — node2 still in cluster config but not accepting AMQP connections
+sudo rabbitmqctl cluster_status
+```
+```
+Disk Nodes: rabbit@node1  rabbit@node2  rabbit@node3
+Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
+```
+> RabbitMQ cluster inter-node communication (port 25672) is separate from AMQP client connections (5672). The RabbitMQ cluster stays intact even though AMQP clients cannot connect to node2.
+
+#### 22.4 — Verify pipeline queues are still being consumed
+
+```bash
+sudo rabbitmqctl list_queues name messages consumers
+```
+```
+flow1_queue              0    2     ← 2 consumers (node1 + node3; node2 excluded)
+flow2_queue              0    2
+flow2_examined_queue     0    2
+```
+
+#### 22.5 — Cleanup
+
+```bash
+# On node2
+sudo iptables -D INPUT  -p tcp --dport 5672 -j DROP
+sudo iptables -D OUTPUT -p tcp --sport 5672 -j DROP
+
+# Verify 3 consumers restored on all queues
+sleep 10
+sudo rabbitmqctl list_queues name messages consumers
+```
+```
+flow1_queue              0    3
+flow2_queue              0    3
+flow2_examined_queue     0    3
+```
+
+---
+
+### Scenario 23: Intermittent Flapping — Periodic Network Glitch
+
+Simulate a network interface that glitches every 30 seconds — typical of a bad cable or switch port.
+
+#### 23.1 — Start a background glitch loop on node3
+
+```bash
+# On node3 — toggle 5% loss on/off every 30 seconds for 5 cycles
+IFACE=eth0
+for i in $(seq 1 5); do
+    echo "[$(date)] Injecting packet loss — cycle ${i}"
+    sudo tc qdisc add dev ${IFACE} root netem loss 15% delay 200ms 2>/dev/null || \
+    sudo tc qdisc change dev ${IFACE} root netem loss 15% delay 200ms
+
+    sleep 30
+
+    echo "[$(date)] Clearing packet loss — cycle ${i}"
+    sudo tc qdisc del dev ${IFACE} root 2>/dev/null
+
+    sleep 30
+done
+echo "Flapping simulation complete"
+```
+
+#### 23.2 — Watch Pacemaker react on node1 (run in a separate terminal)
+
+```bash
+# Continuous monitor — watch node3 flap
+sudo crm_mon -Ar -i 5 2>&1 | grep -E "Online|OFFLINE|Stopped|Started"
+```
+
+Expected oscillation:
+```
+  * Online: [ node1 node2 node3 ]           ← glitch clear
+  * Online: [ node1 node2 ] OFFLINE: [node3] ← glitch injected, Pacemaker fences node3
+  * Online: [ node1 node2 node3 ]           ← glitch cleared, node3 rejoins
+```
+
+#### 23.3 — Check Pacemaker failure counters building up
+
+```bash
+sudo pcs resource failcount show flowfirst-p1-clone
+```
+```
+Resource Fail Counts:
+  flowfirst-p1: node3 = 3
+```
+
+Once the failcount hits the `migration-threshold` (default 1000), Pacemaker will permanently ban the resource from that node until the count is cleared:
+
+```bash
+# Reset failure counters after flapping stops
+sudo crm_resource -r flowfirst-p1-clone -C
+sudo crm_resource -r flowfirst-p2-clone -C
+sudo crm_resource -r flowfirst-p3-clone -C
+sudo crm_resource -r flowfirst-p4-clone -C
+```
+
+#### 23.4 — Cleanup
+
+```bash
+# Ensure netem is cleared
+sudo tc qdisc del dev ${IFACE} root 2>/dev/null || true
+sudo crm_resource -C
+sudo crm_mon -1Ar | grep "Online:"
+```
+```
+  * Online: [ node1 node2 node3 ]
+```
+
+---
+
+### Helper Script: `scripts/simulate_network_glitch.sh`
+
+This script automates all glitch injection and cleanup operations described above. Run it on the target node.
+
+```bash
+sudo ./scripts/simulate_network_glitch.sh <command> [node_ip] [options]
+```
+
+| Command | Description |
+|---|---|
+| `latency <iface> <delay_ms> <loss_pct>` | Inject netem latency + loss |
+| `throttle <iface> <rate_mbit>` | Limit bandwidth with TBF |
+| `partition <remote_ip>` | Drop all traffic to a remote IP (both INPUT/OUTPUT) |
+| `block-port <remote_ip> <proto> <port>` | Drop specific port traffic |
+| `clear-netem <iface>` | Remove all `tc` rules on interface |
+| `clear-iptables <remote_ip>` | Remove all DROP rules for a remote IP |
+| `clear-all` | Remove all injected faults (tc + iptables) |
+| `status` | Show active `tc` rules and `iptables` DROP rules |
+
+---
+
+### Post-Glitch Full Health Validation Checklist
+
+Run this on **node1** after any glitch scenario to confirm a clean cluster state:
+
+```bash
+# 1. Pacemaker — all 3 nodes online, all clones 3/3
+sudo crm_mon -1Ar
+
+# 2. No failed actions
+sudo pcs status | grep -c "Failed"   # expect 0
+
+# 3. No residual constraints from moves/bans
+sudo pcs constraint list --full | grep -v "^Listing"
+
+# 4. Corosync rings fault-free
+sudo corosync-cfgtool -s | grep -v "no faults" | grep "status"
+# expect all rings to show "ring N active with no faults"
+
+# 5. Galera — all 3 nodes synced
+sudo mysql -u root -p -e \
+  "SELECT VARIABLE_NAME, VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS
+   WHERE VARIABLE_NAME IN
+   ('WSREP_CLUSTER_SIZE','WSREP_LOCAL_STATE_COMMENT','WSREP_FLOW_CONTROL_PAUSED');"
+# expect: cluster_size=3, state=Synced, flow_control_paused=0.000
+
+# 6. RabbitMQ — all 3 running, queues empty
+sudo rabbitmqctl cluster_status | grep "Running Nodes"
+sudo rabbitmqctl list_queues name messages consumers
+
+# 7. End-to-end pipeline smoke test
+curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+sleep 5
+mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
+  -e "SELECT id, flow_type, source_process FROM processed_messages ORDER BY id DESC LIMIT 4;"
+```
+
+---
+
+## Updated Cluster Operations Quick Reference
+
+| Goal | Command |
+|---|---|
+| Full one-shot cluster status | `sudo crm_mon -1Ar` |
+| Live continuous monitor | `sudo crm_mon -Ar` |
+| Clear all failed-action history | `sudo crm_resource -C` |
+| Clear failures for one resource | `sudo crm_resource -r <resource-id> -C` |
+| Show resource fail counts | `sudo pcs resource failcount show <resource-id>` |
+| Locate where a resource runs | `sudo crm_resource --resource <id> --locate` |
+| Force resource to a node | `sudo crm_resource --resource <id> --move --node <node>` |
+| Remove forced constraint | `sudo crm_resource --resource <id> --clear` |
+| Disable a resource cluster-wide | `sudo pcs resource disable <resource-id>` |
+| Enable a resource cluster-wide | `sudo pcs resource enable <resource-id>` |
+| Ban a resource from one node | `sudo pcs resource ban <resource-id> <nodename>` |
+| Clear ban on a resource | `sudo pcs resource clear <resource-id> <nodename>` |
+| Put a node into standby | `sudo pcs node standby <nodename>` |
+| Restore a node from standby | `sudo pcs node unstandby <nodename>` |
+| Refresh resource state | `sudo pcs resource refresh <resource-id>` |
+| List all constraints | `sudo pcs constraint list --full` |
+| Show Corosync ring status | `sudo corosync-cfgtool -s` |
+| Show quorum status | `sudo corosync-quorumtool -l` |
+| Verify cluster config syntax | `sudo crm_verify -L -V` |
+| Show CIB (cluster config XML) | `sudo pcs cluster cib` |
+| Start cluster on a node | `sudo pcs cluster start` |
+| Stop cluster on a node | `sudo pcs cluster stop` |
+| Bootstrap Galera primary | `sudo galera_new_cluster` |
+| Check Galera cluster size | `SHOW STATUS LIKE 'wsrep_cluster_size';` |
+| Check Galera sync state | `SHOW STATUS LIKE 'wsrep_local_state_comment';` |
+| Check Galera flow control | `SHOW STATUS LIKE 'wsrep_flow_control_paused';` |
+| Check Galera recv queue | `SHOW STATUS LIKE 'wsrep_local_recv_queue_avg';` |
+| Check RabbitMQ cluster status | `sudo rabbitmqctl cluster_status` |
+| List RabbitMQ queue depths | `sudo rabbitmqctl list_queues name messages consumers` |
+| Inject netem latency + loss | `sudo tc qdisc add dev <iface> root netem delay <ms> loss <pct>%` |
+| Remove netem fault | `sudo tc qdisc del dev <iface> root` |
+| Show active tc rules | `sudo tc qdisc show dev <iface>` |
+| Drop all traffic to remote IP | `sudo iptables -I INPUT/OUTPUT -s/-d <ip> -j DROP` |
+| Remove iptables DROP rule | `sudo iptables -D INPUT/OUTPUT -s/-d <ip> -j DROP` |
+| List all iptables rules | `sudo iptables -L -n -v --line-numbers` |
+| Flush all iptables DROP rules | `sudo iptables -F` *(flushes entire chain — use carefully)* |
+
+---
+
 ## Local Single-Node / Development Mode (Docker Compose)
 
 For local testing without multi-node hardware:

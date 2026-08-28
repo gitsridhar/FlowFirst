@@ -793,7 +793,628 @@ Daemon Status:
 
 ---
 
-## Cluster Operations Quick Reference
+## Service Lifecycle Scenarios
+
+These scenarios cover stopping and starting individual pipeline services, groups of services, and infrastructure services (RabbitMQ, MariaDB, HAProxy) — with full validation at each step.
+
+---
+
+### Scenario 8: Stop & Start a Single Pipeline Process on One Node
+
+This is the surgical approach: stop one process instance on one node while the clones on the other two nodes continue to serve traffic.
+
+```bash
+# On node2: stop process2 via Pacemaker (recommended — Pacemaker restarts it automatically)
+sudo pcs resource ban flowfirst-p2-clone node2
+
+# Confirm it is no longer running on node2
+sudo crm_mon -1Ar | grep p2
+```
+```
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 2 of 3):
+    * flowfirst-p2       (systemd:flowfirst-process2):    Started node1
+    * flowfirst-p2       (systemd:flowfirst-process2):    Started node3
+    * Stopped: [ node2 ]
+```
+
+```bash
+# Re-allow it on node2 and verify it comes back
+sudo pcs resource clear flowfirst-p2-clone node2
+sudo crm_resource -r flowfirst-p2-clone -C
+sleep 5
+sudo crm_mon -1Ar | grep p2
+```
+```
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+```
+
+---
+
+### Scenario 9: Stop & Start All Four Pipeline Processes (Cluster-Wide)
+
+#### 9.1 — Stop all pipeline processes on all nodes
+
+```bash
+sudo pcs resource disable flowfirst-p1-clone
+sudo pcs resource disable flowfirst-p2-clone
+sudo pcs resource disable flowfirst-p3-clone
+sudo pcs resource disable flowfirst-p4-clone
+```
+
+Confirm they are stopped:
+```bash
+sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
+```
+```
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (disabled, 0 of 3):
+    * Stopped: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (disabled, 0 of 3):
+    * Stopped: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (disabled, 0 of 3):
+    * Stopped: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (disabled, 0 of 3):
+    * Stopped: [ node1 node2 node3 ]
+```
+
+#### 9.2 — Start all pipeline processes cluster-wide
+
+Re-enable in dependency order: persistence first, then reflectors, then examiner, then producer.
+
+```bash
+sudo pcs resource enable flowfirst-p4-clone
+sudo pcs resource enable flowfirst-p3-clone
+sudo pcs resource enable flowfirst-p2-clone
+sudo pcs resource enable flowfirst-p1-clone
+sleep 10
+sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
+```
+```
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+```
+
+#### 9.3 — Validate the REST API is serving traffic
+
+```bash
+curl -s http://192.168.1.100:8080/health | jq .
+```
+```json
+{
+  "status": "ok",
+  "handled_by_node": "node1"
+}
+```
+
+---
+
+### Scenario 10: Stop & Start RabbitMQ on a Single Node
+
+#### 10.1 — Stop RabbitMQ on node3
+
+```bash
+# On node3
+sudo systemctl stop rabbitmq-server
+
+# Verify the remaining 2-node RabbitMQ cluster still has quorum
+sudo rabbitmqctl cluster_status
+```
+```
+Cluster name: rabbit@node1
+Disk Nodes: rabbit@node1  rabbit@node2  rabbit@node3
+Running Nodes: rabbit@node1  rabbit@node2
+Versions: ...
+Alarms: (none)
+```
+
+The pipeline processes use `pika` multi-host connection parameters and will automatically reconnect to `node1` or `node2`.
+
+#### 10.2 — Restart RabbitMQ on node3 and verify it rejoins
+
+```bash
+# On node3
+sudo systemctl start rabbitmq-server
+sleep 5
+sudo rabbitmqctl cluster_status | grep "Running Nodes"
+```
+```
+Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
+```
+
+---
+
+### Scenario 11: Stop & Start MariaDB Galera on a Single Node
+
+#### 11.1 — Stop MariaDB on node2
+
+```bash
+# On node2
+sudo systemctl stop mariadb
+
+# On any other node — confirm the cluster is still running with 2 members
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+```
++--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 2     |
++--------------------+-------+
+```
+
+#### 11.2 — Restart MariaDB on node2 (normal rejoin — NOT a bootstrap)
+
+```bash
+# On node2
+sudo systemctl start mariadb
+sleep 10
+
+# Confirm it rejoined
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+```
++--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 3     |
++--------------------+-------+
+```
+
+Verify the node is synced:
+```bash
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"
+```
+```
++---------------------------+--------+
+| Variable_name             | Value  |
++---------------------------+--------+
+| wsrep_local_state_comment | Synced |
++---------------------------+--------+
+```
+
+---
+
+### Scenario 12: Stop & Start HAProxy on a Single Node
+
+HAProxy runs under Pacemaker as part of `vip-haproxy-group`. Do **not** manipulate it directly with `systemctl` — use `pcs resource` so Pacemaker stays in control.
+
+#### 12.1 — Disable the VIP + HAProxy group (stops on current node, migrates to another)
+
+```bash
+# Move the group away from node1 to node2
+sudo pcs resource move vip-haproxy-group node2
+sleep 5
+sudo crm_mon -1Ar | grep -E "vip|haproxy"
+```
+```
+    * vip        (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy    (systemd:haproxy):               Started node2
+```
+
+#### 12.2 — Confirm HAProxy stats endpoint responds on the new node
+
+```bash
+curl -s http://192.168.1.102:9000/stats -o /dev/null -w "%{http_code}"
+```
+```
+200
+```
+
+#### 12.3 — Clear the forced constraint and let Pacemaker decide
+
+```bash
+sudo pcs resource clear vip-haproxy-group
+```
+
+---
+
+## OS Reboot Scenarios
+
+These scenarios cover rebooting individual nodes, all nodes sequentially, and all nodes simultaneously, with complete validation procedures after each restart.
+
+---
+
+### Scenario 13: Reboot a Single Node (Node3) — Zero Pipeline Downtime
+
+The cluster retains quorum (2 of 3 nodes remain) and all cloned resources continue on the surviving nodes.
+
+#### 13.1 — Pre-reboot state check
+
+```bash
+# From node1 — record the baseline
+sudo crm_mon -1Ar
+sudo rabbitmqctl cluster_status | grep "Running Nodes"
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+
+Expected: 3 nodes online, 3 RabbitMQ nodes running, `wsrep_cluster_size = 3`.
+
+#### 13.2 — Reboot node3
+
+```bash
+# On node3
+sudo reboot
+```
+
+#### 13.3 — While node3 is rebooting — verify cluster continuity
+
+From **node1** or **node2**:
+```bash
+sudo crm_mon -1Ar | grep "Online:"
+```
+```
+  * Online: [ node1 node2 ]
+  * OFFLINE: [ node3 ]
+```
+
+```bash
+# Confirm VIP still up (it was not on node3)
+curl -s http://192.168.1.100:8080/health | jq .
+```
+```json
+{ "status": "ok", "handled_by_node": "node1" }
+```
+
+```bash
+# Confirm pipeline clones still active on the 2 surviving nodes
+sudo crm_mon -1Ar | grep "Clone Set"
+```
+```
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 2 of 3):
+    * Started: [ node1 node2 ]
+    * Stopped: [ node3 ]
+```
+
+#### 13.4 — Post-reboot: validate node3 rejoins automatically
+
+After node3 finishes booting (typically 60–90 seconds), Corosync and Pacemaker services start automatically (`enabled` in systemd), and Galera performs IST re-sync.
+
+```bash
+# From node1 — poll until node3 reappears
+sudo crm_mon -1Ar | grep "Online:"
+```
+```
+  * Online: [ node1 node2 node3 ]
+```
+
+```bash
+# Confirm all pipeline clones restored to 3/3
+sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
+```
+```
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+```
+
+```bash
+# Confirm Galera is synced
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+```
++--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 3     |
++--------------------+-------+
+```
+
+```bash
+# Clear any residual failed-action history
+sudo crm_resource -C
+```
+
+---
+
+### Scenario 14: Reboot the Node Hosting the VIP (Node1) — Forced Failover
+
+This is the highest-impact single-node reboot: the Virtual IP, HAProxy, and all process clones on node1 must migrate before node1 goes offline.
+
+#### 14.1 — Identify the current VIP holder
+
+```bash
+sudo crm_resource --resource vip --locate
+```
+```
+resource vip is running on: node1
+```
+
+#### 14.2 — Gracefully evacuate node1 before rebooting (recommended)
+
+```bash
+# Put node1 into standby — Pacemaker migrates VIP to node2 or node3 before reboot
+sudo pcs node standby node1
+sleep 5
+sudo crm_mon -1Ar | grep -E "vip|haproxy|Online"
+```
+```
+  * Online: [ node1 node2 node3 ]
+  * Standby: [ node1 ]
+  ...
+    * vip        (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy    (systemd:haproxy):               Started node2
+```
+
+```bash
+# Confirm zero downtime during migration
+curl -s http://192.168.1.100:8080/health | jq .handled_by_node
+```
+```
+"node2"
+```
+
+#### 14.3 — Reboot node1
+
+```bash
+# On node1
+sudo pcs node unstandby node1   # (optional — Pacemaker will handle rejoin on boot)
+sudo reboot
+```
+
+#### 14.4 — Post-reboot validation on node2 or node3
+
+```bash
+# Wait for node1 to come back (60–120 s), then:
+sudo crm_mon -1Ar
+```
+```
+  * Online: [ node1 node2 node3 ]
+
+  * Resource Group: vip-haproxy-group:
+    * vip        (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy    (systemd:haproxy):               Started node2
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  ...
+```
+
+```bash
+# Clear residual constraints
+sudo crm_resource -C
+
+# Trigger a test flow to confirm end-to-end pipeline health
+curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+```
+
+---
+
+### Scenario 15: Sequential Rolling Reboot of All Three Nodes
+
+Reboot one node at a time, waiting for full rejoin before rebooting the next. Quorum is maintained throughout.
+
+```bash
+# === STEP 1: Reboot node3 ===
+ssh node3 'sudo reboot'
+
+# Wait for node3 to come back (poll from node1)
+until sudo crm_mon -1 2>/dev/null | grep -q "Online:.*node3"; do
+  echo "Waiting for node3 to rejoin..."; sleep 10
+done
+echo "node3 is back online"
+
+sudo crm_resource -C          # clear failure history from node3 outage
+sleep 5
+
+# === STEP 2: Reboot node2 ===
+ssh node2 'sudo reboot'
+
+until sudo crm_mon -1 2>/dev/null | grep -q "Online:.*node2"; do
+  echo "Waiting for node2 to rejoin..."; sleep 10
+done
+echo "node2 is back online"
+
+sudo crm_resource -C
+sleep 5
+
+# === STEP 3: Reboot node1 (VIP holder — evacuate first) ===
+sudo pcs node standby node1
+sleep 10   # allow VIP migration to complete
+
+ssh node1 'sudo reboot'
+
+until sudo crm_mon -1 2>/dev/null | grep -q "Online:.*node1"; do
+  echo "Waiting for node1 to rejoin..."; sleep 10
+done
+echo "node1 is back online"
+
+sudo pcs node unstandby node1
+sudo crm_resource -C
+```
+
+#### Post-rolling-reboot validation
+
+```bash
+sudo crm_mon -1Ar
+```
+```
+  * Online: [ node1 node2 node3 ]
+
+  * Resource Group: vip-haproxy-group:
+    * vip     (ocf::heartbeat:IPaddr2):   Started node2
+    * haproxy (systemd:haproxy):          Started node2
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+```
+
+```bash
+# Full infrastructure health sweep
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"  # expect 3
+sudo rabbitmqctl cluster_status | grep "Running Nodes"              # expect all 3
+curl -s http://192.168.1.100:8080/health | jq .                     # expect ok
+```
+
+---
+
+### Scenario 16: Simultaneous Reboot of All Three Nodes (Cluster Cold Start)
+
+A complete power-cycle or simultaneous OS reboot causes the Galera cluster to lose quorum. Galera **requires a manual bootstrap** of the primary component on whichever node has the most up-to-date data before the other nodes can rejoin.
+
+> ⚠️ **Warning:** Do not run `systemctl start mariadb` on all nodes simultaneously after a cold start — this will result in a split-brain condition. Bootstrap exactly one node first.
+
+#### 16.1 — Identify the most up-to-date Galera node before rebooting
+
+```bash
+# On each node before the reboot, note the seqno:
+sudo cat /var/lib/mysql/grastate.dat
+```
+```
+# GALERA saved state
+version: 2.1
+uuid:    xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+seqno:   2847          ← highest seqno = most up-to-date node
+safe_to_bootstrap: 1   ← Galera sets this on the last node to leave the cluster
+```
+
+The node with `safe_to_bootstrap: 1` (or the highest `seqno`) is the **bootstrap node**.
+
+#### 16.2 — Reboot all three nodes simultaneously
+
+```bash
+# On each node (or via out-of-band IPMI/iDRAC):
+sudo reboot
+```
+
+#### 16.3 — Bootstrap the primary Galera node (run on bootstrap node only)
+
+After all nodes have finished booting, bring up Galera on the bootstrap node **first**:
+
+```bash
+# On the bootstrap node (e.g., node1 — the one with safe_to_bootstrap: 1)
+sudo galera_new_cluster        # starts mariadb with --wsrep-new-cluster flag
+sleep 5
+
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+```
++--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 1     |   ← primary component with 1 member — correct
++--------------------+-------+
+```
+
+#### 16.4 — Rejoin node2 and node3 (normal start — NOT bootstrap)
+
+```bash
+# On node2
+sudo systemctl start mariadb
+# On node3
+sudo systemctl start mariadb
+```
+
+Wait for IST/SST to complete (30–120 seconds depending on data volume):
+
+```bash
+# From node1
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+```
++--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 3     |
++--------------------+-------+
+```
+
+#### 16.5 — Restart Pacemaker cluster after cold start
+
+After a simultaneous reboot, Pacemaker may be waiting for quorum. Start the cluster on all nodes:
+
+```bash
+# On each node
+sudo pcs cluster start
+
+# From node1 — wait for quorum
+sleep 15
+sudo pcs status | grep -E "Online:|quorum"
+```
+```
+  * Stack: corosync
+  * Current DC: node1 (version 2.1.6-8.el9) - partition with quorum
+  * Online: [ node1 node2 node3 ]
+```
+
+#### 16.6 — Re-enable and validate all pipeline resources
+
+Pacemaker remembers resource state from before the cold start. If resources are still enabled, they will auto-start once quorum is restored. Verify:
+
+```bash
+sudo crm_mon -1Ar
+```
+```
+  * Online: [ node1 node2 node3 ]
+
+  * Resource Group: vip-haproxy-group:
+    * vip     (ocf::heartbeat:IPaddr2):   Started node1
+    * haproxy (systemd:haproxy):          Started node1
+  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+    * Started: [ node1 node2 node3 ]
+```
+
+If any resources did not auto-start:
+```bash
+sudo pcs resource enable flowfirst-p4-clone
+sudo pcs resource enable flowfirst-p3-clone
+sudo pcs resource enable flowfirst-p2-clone
+sudo pcs resource enable flowfirst-p1-clone
+sudo crm_resource -C
+```
+
+#### 16.7 — End-to-end pipeline smoke test after cold start
+
+```bash
+# Send one message through each flow and verify DB persistence
+curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+
+sleep 5   # allow messages to traverse the pipeline
+
+# Check the last 4 rows in the database (from any node via VIP)
+mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
+  -e "SELECT id, flow_type, source_process, JSON_PRETTY(history_trail) \
+      FROM processed_messages ORDER BY id DESC LIMIT 4\G"
+```
+
+```bash
+# Confirm RabbitMQ queues are empty (all messages consumed)
+sudo rabbitmqctl list_queues name messages consumers
+```
+```
+Listing queues for vhost / ...
+name                     messages  consumers
+flow1_queue              0         3
+flow1_reflected_queue    0         3
+flow2_queue              0         3
+flow2_examined_queue     0         3
+flow2_reflected_queue    0         3
+```
+
+---
+
+## Updated Cluster Operations Quick Reference
 
 | Goal | Command |
 |---|---|
@@ -804,6 +1425,10 @@ Daemon Status:
 | Locate where a resource runs | `sudo crm_resource --resource <id> --locate` |
 | Force resource to a node | `sudo crm_resource --resource <id> --move --node <node>` |
 | Remove forced constraint | `sudo crm_resource --resource <id> --clear` |
+| Disable a resource cluster-wide | `sudo pcs resource disable <resource-id>` |
+| Enable a resource cluster-wide | `sudo pcs resource enable <resource-id>` |
+| Ban a resource from one node | `sudo pcs resource ban <resource-id> <nodename>` |
+| Clear ban on a resource | `sudo pcs resource clear <resource-id> <nodename>` |
 | Put a node into standby | `sudo pcs node standby <nodename>` |
 | Restore a node from standby | `sudo pcs node unstandby <nodename>` |
 | Refresh resource state | `sudo pcs resource refresh <resource-id>` |
@@ -812,6 +1437,13 @@ Daemon Status:
 | Show quorum status | `sudo corosync-quorumtool -l` |
 | Verify cluster config syntax | `sudo crm_verify -L -V` |
 | Show CIB (cluster config XML) | `sudo pcs cluster cib` |
+| Start cluster on a node | `sudo pcs cluster start` |
+| Stop cluster on a node | `sudo pcs cluster stop` |
+| Bootstrap Galera primary | `sudo galera_new_cluster` |
+| Check Galera cluster size | `SHOW STATUS LIKE 'wsrep_cluster_size';` |
+| Check Galera sync state | `SHOW STATUS LIKE 'wsrep_local_state_comment';` |
+| Check RabbitMQ cluster status | `sudo rabbitmqctl cluster_status` |
+| List RabbitMQ queue depths | `sudo rabbitmqctl list_queues name messages consumers` |
 
 ---
 

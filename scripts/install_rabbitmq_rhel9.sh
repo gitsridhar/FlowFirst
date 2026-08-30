@@ -2,67 +2,116 @@
 set -euo pipefail
 
 # ==============================================================================
-# FlowFirst - RabbitMQ & Erlang Installation Script for RHEL 9.6
+# FlowFirst - RabbitMQ Server & Erlang Installation Script for RHEL 9.6
+#
+# Key sources (as of 2025):
+#   GPG keys are published at https://github.com/rabbitmq/signing-keys/releases/tag/3.0
+#   The old Cloudsmith key URLs (dl.cloudsmith.io/…/gpg.*.key) are NO LONGER VALID.
+#   Use the GitHub release assets below instead.
 # ==============================================================================
 
 echo "=================================================================="
 echo " Installing RabbitMQ Server & Erlang on RHEL 9.6"
 echo "=================================================================="
 
-# 1. Import GPG Signing Keys for Erlang and RabbitMQ
-echo "[1/5] Importing GPG keys..."
-sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key'
-sudo rpm --import 'https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key'
+# ---------------------------------------------------------------------------
+# Key URLs — sourced from github.com/rabbitmq/signing-keys, release 3.0
+# ---------------------------------------------------------------------------
+ERLANG_KEY_URL="https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key"
+SERVER_KEY_URL="https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key"
+RELEASE_KEY_URL="https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc"
 
-# 2. Add Yum/DNF Repository Definitions for RHEL 9 (el/9)
-echo "[2/5] Creating /etc/yum.repos.d/rabbitmq.repo..."
-sudo tee /etc/yum.repos.d/rabbitmq.repo << 'EOF'
+# ---------------------------------------------------------------------------
+# 1. Import GPG Signing Keys
+# ---------------------------------------------------------------------------
+echo "[1/5] Importing GPG signing keys from github.com/rabbitmq/signing-keys ..."
+
+echo "  → Erlang repo key (E495BB49CC4BBE5B)"
+curl -fsSL "${ERLANG_KEY_URL}" | sudo rpm --import /dev/stdin
+
+echo "  → RabbitMQ server repo key (9F4587F226208342)"
+curl -fsSL "${SERVER_KEY_URL}" | sudo rpm --import /dev/stdin
+
+echo "  → RabbitMQ release signing key (primary trust anchor)"
+curl -fsSL "${RELEASE_KEY_URL}" | sudo rpm --import /dev/stdin
+
+echo "  GPG keys imported OK."
+
+# ---------------------------------------------------------------------------
+# 2. Write DNF/Yum Repository Definitions
+# ---------------------------------------------------------------------------
+echo "[2/5] Writing /etc/yum.repos.d/rabbitmq.repo ..."
+
+sudo tee /etc/yum.repos.d/rabbitmq.repo > /dev/null << EOF
+## ── Erlang (from Cloudsmith, signed with E495BB49CC4BBE5B) ─────────────────
 [rabbitmq-erlang]
 name=rabbitmq-erlang
-baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/rpm/el/9/$basearch
+baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/rpm/el/9/\$basearch
 repo_gpgcheck=1
 enabled=1
-gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/gpg.E495BB49CC4BBE5B.key
+# GPG key hosted on GitHub (Cloudsmith URL is no longer valid)
+gpgkey=https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key
 gpgcheck=0
 sslverify=1
 sslcacert=/etc/pki/tls/certs/ca-bundle.crt
 metadata_expire=300
 
+## ── RabbitMQ Server (from Cloudsmith, signed with 9F4587F226208342) ────────
 [rabbitmq-server]
 name=rabbitmq-server
 baseurl=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/rpm/el/9/noarch
 repo_gpgcheck=1
 enabled=1
-gpgkey=https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/gpg.9F4587F22620D4E7.key
+# GPG key hosted on GitHub (Cloudsmith URL is no longer valid; fingerprint suffix
+# changed from 2620D4E7 → 26208342 in signing-keys release 3.0)
+gpgkey=https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key
+        https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc
 gpgcheck=0
 sslverify=1
 sslcacert=/etc/pki/tls/certs/ca-bundle.crt
 metadata_expire=300
 EOF
 
-# 3. Update Package Cache and Install Erlang & RabbitMQ Server
-echo "[3/5] Installing erlang and rabbitmq-server via dnf..."
-sudo dnf update -y
+echo "  Repo file written OK."
+
+# ---------------------------------------------------------------------------
+# 3. Clean metadata cache and install packages
+# ---------------------------------------------------------------------------
+echo "[3/5] Cleaning DNF cache and installing erlang + rabbitmq-server ..."
+sudo dnf clean metadata
+sudo dnf makecache
 sudo dnf install -y erlang rabbitmq-server
 
-# 4. Enable Management Plugin & Start RabbitMQ Service
-echo "[4/5] Enabling rabbitmq_management plugin and starting service..."
+# ---------------------------------------------------------------------------
+# 4. Enable management plugin and start service
+# ---------------------------------------------------------------------------
+echo "[4/5] Enabling rabbitmq_management plugin and starting service ..."
 sudo rabbitmq-plugins enable rabbitmq_management
 sudo systemctl enable --now rabbitmq-server
 
-# 5. Configure Default Admin User / Permissions (optional for remote management)
-echo "[5/5] Configuring RabbitMQ default admin permissions..."
-if ! sudo rabbitmqctl list_users | grep -q "flowuser"; then
+# ---------------------------------------------------------------------------
+# 5. Configure admin user for the pipeline
+# ---------------------------------------------------------------------------
+echo "[5/5] Configuring FlowFirst pipeline user ..."
+if ! sudo rabbitmqctl list_users 2>/dev/null | grep -q "flowuser"; then
     sudo rabbitmqctl add_user flowuser flowpassword || true
     sudo rabbitmqctl set_user_tags flowuser administrator || true
     sudo rabbitmqctl set_permissions -p / flowuser ".*" ".*" ".*" || true
+    echo "  Created user: flowuser"
+else
+    echo "  User flowuser already exists — skipping creation."
 fi
 
 echo ""
 echo "=================================================================="
 echo " RabbitMQ installation completed successfully!"
-echo " AMQP Broker Port:   5672"
-echo " Management Web UI:  http://<IP>:15672 (guest/guest or flowuser/flowpassword)"
-echo " Service Status:"
-sudo systemctl status rabbitmq-server --no-pager
+echo ""
+echo " AMQP Broker Port  :  5672"
+echo " Cluster Bus Port  :  25672"
+echo " Management Web UI :  http://<node-ip>:15672"
+echo "   Default login   :  guest / guest"
+echo "   Pipeline login  :  flowuser / flowpassword"
+echo ""
+echo " Service status:"
+sudo systemctl status rabbitmq-server --no-pager -l
 echo "=================================================================="

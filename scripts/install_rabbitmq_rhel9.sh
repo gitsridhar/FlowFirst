@@ -20,6 +20,38 @@ echo " Installing RabbitMQ Server & Erlang on RHEL 9.6"
 echo "=================================================================="
 
 # ---------------------------------------------------------------------------
+# Pre-flight: clock synchronisation check
+# RabbitMQ cluster nodes MUST have synchronised system clocks.
+# Clock drift causes Erlang distribution handshake failures and node rejections.
+# ---------------------------------------------------------------------------
+echo "[PRE-FLIGHT] Checking clock synchronisation..."
+CHRONY_OK=false
+if systemctl is-active --quiet chronyd 2>/dev/null; then
+    LEAP=$(chronyc tracking 2>/dev/null | grep "^Leap status" | awk '{print $NF}' || true)
+    if [ "${LEAP}" = "Normal" ]; then
+        OFFSET=$(chronyc tracking 2>/dev/null | grep "^System time" | awk '{print $4, $5}' || true)
+        echo "  chronyd is running and synchronised (offset: ${OFFSET})."
+        CHRONY_OK=true
+    else
+        echo "  WARNING: chronyd is running but clock status is '${LEAP}'."
+    fi
+else
+    echo "  WARNING: chronyd is not running."
+fi
+
+if [ "${CHRONY_OK}" = "false" ]; then
+    echo ""
+    echo "  *** CLOCK NOT SYNCHRONISED ***"
+    echo "  RabbitMQ may fail to start or join the cluster with an unsynchronised clock."
+    echo "  Run the following before proceeding:"
+    echo "    sudo ./scripts/setup_chronyd.sh"
+    echo ""
+    echo "  Continuing in 10 seconds — press Ctrl-C to abort and fix the clock first."
+    sleep 10
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
 # Detect system architecture
 # ---------------------------------------------------------------------------
 ARCH=$(uname -m)   # x86_64 | aarch64

@@ -199,8 +199,39 @@ pip install -r requirements.txt
 
 # 4. Initialize environment configuration
 cp .env.example .env
-# (Edit NODE_NAME in .env to match the current node: node1, node2, or node3)
 ```
+
+Then **edit `.env`** and set the values for this node.
+The table below explains every variable — pay close attention to the dotenv rules column:
+
+| Variable | What to set | Notes |
+|---|---|---|
+| `NODE_NAME` | `node1` / `node2` / `node3` | Must match the hostname used in Pacemaker |
+| `NODE1_IP` | `192.168.1.101` | Literal IP — no `${}` references |
+| `NODE2_IP` | `192.168.1.102` | Literal IP |
+| `NODE3_IP` | `192.168.1.103` | Literal IP |
+| `FLOWFIRST_VIP` | `192.168.1.100` | The Pacemaker Virtual IP |
+| `RABBITMQ_HOST` | **VIP IP** (`192.168.1.100`) | Single-host fallback — set to VIP so that if needed it routes through HAProxy. In normal cluster operation this value is **not used** because `config.py` builds `RABBITMQ_HOSTS` automatically from `NODE1_IP`…`NODE3_IP`. |
+| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds the full `node1:5672,node2:5672,node3:5672` list at runtime. If set, the value must be literal IPs — `${VAR}` references are **not expanded** by `python-dotenv`. |
+| `RABBITMQ_PORT` | `5672` | Literal integer — do **not** use `${VAR}` syntax |
+| `MARIADB_HOST` | **VIP IP** (`192.168.1.100`) | Routes through HAProxy to the Galera cluster |
+| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `node1,node2,node3` at runtime. |
+| `MARIADB_PORT` | `3306` | Literal integer |
+
+> **⚠️ Important — `python-dotenv` does not expand `${VAR}` references**
+>
+> Shell variable interpolation such as `RABBITMQ_HOST=${FLOWFIRST_VIP}` or
+> `RABBITMQ_HOSTS=${NODE1_IP}:${RABBITMQ_PORT},...` is **silently read as a
+> literal string** by `python-dotenv`. This causes `int("${RABBITMQ_PORT}")` to
+> crash with `ValueError: invalid literal for int() with base 10`.
+>
+> **Rule:** every value in `.env` must be a plain literal — IP addresses, port
+> numbers, strings. No `$VAR` or `${VAR}` substitutions anywhere.
+>
+> `config.py` contains a defensive guard (`_int_env` / `_str_env`) that
+> detects unexpanded references, emits a stderr warning, and falls back to
+> the built-in default rather than crashing — but the correct fix is always
+> to use literal values in `.env`.
 
 ---
 

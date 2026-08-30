@@ -256,12 +256,15 @@ wsrep_local_state_comment: Synced
 
 ### Phase 3: Install RabbitMQ on All 3 Nodes
 
-> **Note — three issues were fixed in the install script (as of 2025):**
+> **Note — four issues were fixed in the install script (as of 2025):**
 > 1. **Cloudsmith baseurls dead** — `dl.cloudsmith.io/public/rabbitmq/…` returns 404.
->    Replaced with `yum1.rabbitmq.com` / `yum2.rabbitmq.com` (official RabbitMQ mirrors, both verified live).
 > 2. **Cloudsmith GPG key URLs dead** — `dl.cloudsmith.io/…/gpg.*.key` also returns 404.
->    Keys are now fetched from `github.com/rabbitmq/signing-keys` release 3.0.
+>    Keys now fetched from `github.com/rabbitmq/signing-keys` release 3.0.
 > 3. **Server key fingerprint changed** — suffix `2620D4E7` → `26208342` in signing-keys release 3.0.
+> 4. **`aarch64` not available on `yum1/yum2.rabbitmq.com`** — those mirrors only carry `x86_64`.
+>    The script now detects the architecture at runtime (`uname -m`) and writes different repo stanzas:
+>    - `x86_64` → `yum1/yum2.rabbitmq.com` (4 stanzas: x86_64 + noarch for both Erlang and RabbitMQ)
+>    - `aarch64` → `packagecloud.io/rabbitmq` (2 stanzas: aarch64 for both Erlang and RabbitMQ)
 
 ```bash
 cd /opt/flowfirst

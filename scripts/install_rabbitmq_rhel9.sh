@@ -4,16 +4,15 @@ set -euo pipefail
 # ==============================================================================
 # FlowFirst - RabbitMQ Server & Erlang Installation Script for RHEL 9.6
 #
-# Architecture-aware repo selection (verified live as of 2025):
+# Architecture-aware installation strategy (verified live as of 2025):
 #
-#   x86_64 ── Erlang + RabbitMQ server:  yum1/yum2.rabbitmq.com
-#   aarch64 ─ Erlang + RabbitMQ server:  packagecloud.io/rabbitmq
-#
-# Why two sources?
-#   yum1/yum2.rabbitmq.com only carries x86_64 (+ noarch); aarch64 returns 404.
-#   packagecloud.io carries both x86_64 and aarch64, and is the fallback for ARM.
+#   x86_64  — install from yum1/yum2.rabbitmq.com repos via dnf
+#   aarch64 — download release RPMs directly from GitHub (packagecloud el9/aarch64
+#              repo exists as a URL but its primary.xml is empty — no packages)
 #
 # GPG keys: github.com/rabbitmq/signing-keys/releases/tag/3.0
+#   Only v2 (SHA-256) keys are imported; packagecloud's v1 (SHA-1) keys are
+#   rejected by RHEL 9 rpm and are not needed.
 # ==============================================================================
 
 echo "=================================================================="
@@ -23,18 +22,11 @@ echo "=================================================================="
 # ---------------------------------------------------------------------------
 # Detect system architecture
 # ---------------------------------------------------------------------------
-ARCH=$(uname -m)          # x86_64 | aarch64
+ARCH=$(uname -m)   # x86_64 | aarch64
 echo "  Detected architecture: ${ARCH}"
 
 # ---------------------------------------------------------------------------
-# Key URLs — github.com/rabbitmq/signing-keys, release 3.0
-#
-# NOTE: packagecloud.io/rabbitmq/*/gpgkey files are signed with GnuPG v1.4
-# (SHA-1), which rpm on RHEL 9 rejects with "import failed".  We do NOT
-# import those keys.  Instead we rely solely on the v2 GitHub keys below.
-# For aarch64 packagecloud repos we set repo_gpgcheck=0 (skips repo-metadata
-# signature) but keep gpgcheck=1 so individual package RPMs are still
-# verified with the valid SHA-256 GitHub keys.
+# Key URLs — github.com/rabbitmq/signing-keys, release 3.0 (GnuPG v2 / SHA-256)
 # ---------------------------------------------------------------------------
 ERLANG_KEY_URL="https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key"
 SERVER_KEY_URL="https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key"
@@ -51,35 +43,27 @@ trap 'rm -rf "${TMPDIR_KEYS}"' EXIT
 
 echo "  → Erlang repo key          (E495BB49CC4BBE5B)"
 curl -fsSL -o "${TMPDIR_KEYS}/erlang.key"  "${ERLANG_KEY_URL}"
-
 echo "  → RabbitMQ server repo key (9F4587F226208342)"
 curl -fsSL -o "${TMPDIR_KEYS}/server.key"  "${SERVER_KEY_URL}"
-
 echo "  → RabbitMQ release signing key (primary trust anchor)"
 curl -fsSL -o "${TMPDIR_KEYS}/release.key" "${RELEASE_KEY_URL}"
 
 sudo rpm --import "${TMPDIR_KEYS}/erlang.key"
 sudo rpm --import "${TMPDIR_KEYS}/server.key"
 sudo rpm --import "${TMPDIR_KEYS}/release.key"
-
 echo "  GPG keys imported OK."
 
-# ---------------------------------------------------------------------------
-# 2. Write DNF/Yum Repository Definitions
-#
-#   x86_64:  yum1.rabbitmq.com / yum2.rabbitmq.com
-#            (/erlang/el/9/x86_64, /erlang/el/9/noarch,
-#             /rabbitmq/el/9/x86_64, /rabbitmq/el/9/noarch)
-#
-#   aarch64: packagecloud.io/rabbitmq
-#            (/erlang/el/9/aarch64, /rabbitmq-server/el/9/aarch64)
-# ---------------------------------------------------------------------------
-echo "[2/5] Writing /etc/yum.repos.d/rabbitmq.repo (arch=${ARCH}) ..."
-
+# ===========================================================================
+# x86_64 path — use official yum repos
+# ===========================================================================
 if [[ "${ARCH}" == "x86_64" ]]; then
 
+# ---------------------------------------------------------------------------
+# 2. Write repo file (x86_64)
+# ---------------------------------------------------------------------------
+echo "[2/5] Writing /etc/yum.repos.d/rabbitmq.repo (x86_64) ..."
+
 sudo tee /etc/yum.repos.d/rabbitmq.repo > /dev/null << 'EOF'
-## ── Erlang x86_64 ────────────────────────────────────────────────────────────
 [rabbitmq-erlang]
 name=rabbitmq-erlang
 baseurl=https://yum1.rabbitmq.com/erlang/el/9/x86_64
@@ -92,7 +76,6 @@ sslverify=1
 sslcacert=/etc/pki/tls/certs/ca-bundle.crt
 metadata_expire=300
 
-## ── Erlang noarch ────────────────────────────────────────────────────────────
 [rabbitmq-erlang-noarch]
 name=rabbitmq-erlang-noarch
 baseurl=https://yum1.rabbitmq.com/erlang/el/9/noarch
@@ -106,7 +89,6 @@ sslverify=1
 sslcacert=/etc/pki/tls/certs/ca-bundle.crt
 metadata_expire=300
 
-## ── RabbitMQ Server x86_64 ───────────────────────────────────────────────────
 [rabbitmq-server]
 name=rabbitmq-server
 baseurl=https://yum2.rabbitmq.com/rabbitmq/el/9/x86_64
@@ -120,7 +102,6 @@ sslverify=1
 sslcacert=/etc/pki/tls/certs/ca-bundle.crt
 metadata_expire=300
 
-## ── RabbitMQ Server noarch ───────────────────────────────────────────────────
 [rabbitmq-server-noarch]
 name=rabbitmq-server-noarch
 baseurl=https://yum2.rabbitmq.com/rabbitmq/el/9/noarch
@@ -134,53 +115,65 @@ sslverify=1
 sslcacert=/etc/pki/tls/certs/ca-bundle.crt
 metadata_expire=300
 EOF
-
-elif [[ "${ARCH}" == "aarch64" ]]; then
-
-sudo tee /etc/yum.repos.d/rabbitmq.repo > /dev/null << 'EOF'
-## ── Erlang aarch64 (packagecloud) ────────────────────────────────────────────
-## repo_gpgcheck=0: packagecloud signs repo metadata with a GnuPG v1 (SHA-1)
-## key that RHEL 9 rpm rejects.  Package RPMs themselves are verified via
-## gpgcheck=1 using the valid SHA-256 GitHub keys imported in step 1.
-[rabbitmq-erlang]
-name=rabbitmq-erlang
-baseurl=https://packagecloud.io/rabbitmq/erlang/el/9/aarch64
-repo_gpgcheck=0
-enabled=1
-gpgkey=https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key
-gpgcheck=1
-sslverify=1
-sslcacert=/etc/pki/tls/certs/ca-bundle.crt
-metadata_expire=300
-
-## ── RabbitMQ Server aarch64 (packagecloud) ───────────────────────────────────
-[rabbitmq-server]
-name=rabbitmq-server
-baseurl=https://packagecloud.io/rabbitmq/rabbitmq-server/el/9/aarch64
-repo_gpgcheck=0
-enabled=1
-gpgkey=https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key
-       https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc
-gpgcheck=1
-sslverify=1
-sslcacert=/etc/pki/tls/certs/ca-bundle.crt
-metadata_expire=300
-EOF
-
-else
-    echo "ERROR: Unsupported architecture '${ARCH}'. Only x86_64 and aarch64 are supported."
-    exit 1
-fi
-
 echo "  Repo file written OK."
 
 # ---------------------------------------------------------------------------
-# 3. Clean metadata cache and install packages
+# 3. Install via dnf (x86_64)
 # ---------------------------------------------------------------------------
 echo "[3/5] Refreshing DNF metadata and installing erlang + rabbitmq-server ..."
 sudo dnf clean metadata
 sudo dnf makecache
 sudo dnf install -y erlang rabbitmq-server
+
+# ===========================================================================
+# aarch64 path — download release RPMs directly from GitHub
+#
+# Why not repos?
+#   yum1/yum2.rabbitmq.com  — no aarch64 tree (404)
+#   packagecloud el/9/aarch64 — repo URL exists but primary.xml is empty
+#
+# GitHub releases carry:
+#   erlang-rpm:      erlang-X.Y.Z-1.el9.aarch64.rpm  (exact el9 build)
+#   rabbitmq-server: rabbitmq-server-X.Y.Z-1.el8.noarch.rpm (noarch, works on el9)
+# ===========================================================================
+elif [[ "${ARCH}" == "aarch64" ]]; then
+
+echo "[2/5] Resolving latest release versions from GitHub API ..."
+
+# Resolve latest erlang-rpm release tag and RPM URL
+ERLANG_TAG=$(curl -fsSL 'https://api.github.com/repos/rabbitmq/erlang-rpm/releases/latest' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+ERLANG_VER="${ERLANG_TAG#v}"
+ERLANG_RPM_URL="https://github.com/rabbitmq/erlang-rpm/releases/download/${ERLANG_TAG}/erlang-${ERLANG_VER}-1.el9.aarch64.rpm"
+echo "  Erlang   : ${ERLANG_TAG}  →  erlang-${ERLANG_VER}-1.el9.aarch64.rpm"
+
+# Resolve latest rabbitmq-server release tag and RPM URL
+SERVER_TAG=$(curl -fsSL 'https://api.github.com/repos/rabbitmq/rabbitmq-server/releases/latest' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+SERVER_VER="${SERVER_TAG#v}"
+SERVER_RPM_URL="https://github.com/rabbitmq/rabbitmq-server/releases/download/${SERVER_TAG}/rabbitmq-server-${SERVER_VER}-1.el8.noarch.rpm"
+echo "  RabbitMQ : ${SERVER_TAG}  →  rabbitmq-server-${SERVER_VER}-1.el8.noarch.rpm"
+
+echo "[3/5] Downloading and installing RPMs (aarch64) ..."
+TMPDIR_RPMS=$(mktemp -d)
+# keep TMPDIR_RPMS in the same trap
+trap 'rm -rf "${TMPDIR_KEYS}" "${TMPDIR_RPMS}"' EXIT
+
+echo "  → Downloading erlang RPM ..."
+curl -fsSL -o "${TMPDIR_RPMS}/erlang.rpm" "${ERLANG_RPM_URL}"
+
+echo "  → Downloading rabbitmq-server RPM ..."
+curl -fsSL -o "${TMPDIR_RPMS}/rabbitmq-server.rpm" "${SERVER_RPM_URL}"
+
+echo "  → Installing RPMs with dnf ..."
+# Install erlang first (rabbitmq-server depends on it)
+sudo dnf install -y "${TMPDIR_RPMS}/erlang.rpm"
+sudo dnf install -y "${TMPDIR_RPMS}/rabbitmq-server.rpm"
+
+else
+    echo "ERROR: Unsupported architecture '${ARCH}'. Supported: x86_64, aarch64."
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Enable management plugin and start service

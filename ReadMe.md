@@ -201,37 +201,66 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Then **edit `.env`** and set the values for this node.
-The table below explains every variable — pay close attention to the dotenv rules column:
+Then **edit `.env`** on each node. The rules are simple:
 
-| Variable | What to set | Notes |
+> **Only two variables differ between nodes. Everything else is identical.**
+
+#### Per-node variables (change these on each node)
+
+| Variable | node1 | node2 | node3 | What it means |
+|---|---|---|---|---|
+| `NODE_NAME` | `node1` | `node2` | `node3` | The hostname **of this node** — must match `/etc/hostname` and the name passed to `pcs cluster setup` |
+| `CURRENT_NODE_IP` | `192.168.1.101` | `192.168.1.102` | `192.168.1.103` | The cluster-interface IP **of this node** — used by Galera's `wsrep_node_address` and Corosync bind address |
+
+#### Shared variables (identical on all three nodes)
+
+| Variable | Value | Notes |
 |---|---|---|
-| `NODE_NAME` | `node1` / `node2` / `node3` | Must match the hostname used in Pacemaker |
-| `NODE1_IP` | `192.168.1.101` | Literal IP — no `${}` references |
-| `NODE2_IP` | `192.168.1.102` | Literal IP |
-| `NODE3_IP` | `192.168.1.103` | Literal IP |
-| `FLOWFIRST_VIP` | `192.168.1.100` | The Pacemaker Virtual IP |
-| `RABBITMQ_HOST` | **VIP IP** (`192.168.1.100`) | Single-host fallback — set to VIP so that if needed it routes through HAProxy. In normal cluster operation this value is **not used** because `config.py` builds `RABBITMQ_HOSTS` automatically from `NODE1_IP`…`NODE3_IP`. |
-| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds the full `node1:5672,node2:5672,node3:5672` list at runtime. If set, the value must be literal IPs — `${VAR}` references are **not expanded** by `python-dotenv`. |
-| `RABBITMQ_PORT` | `5672` | Literal integer — do **not** use `${VAR}` syntax |
-| `MARIADB_HOST` | **VIP IP** (`192.168.1.100`) | Routes through HAProxy to the Galera cluster |
-| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `node1,node2,node3` at runtime. |
+| `CLUSTER_NAME` | `flowfirst_cluster` | Same on every node |
+| `NODE1_IP` | `192.168.1.101` | **Always the IP of node1**, regardless of which node the file is on |
+| `NODE2_IP` | `192.168.1.102` | **Always the IP of node2** |
+| `NODE3_IP` | `192.168.1.103` | **Always the IP of node3** |
+| `FLOWFIRST_VIP` | `192.168.1.100` | Pacemaker Virtual IP — same on all nodes |
+| `RABBITMQ_HOST` | `192.168.1.100` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
+| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `192.168.1.101:5672,192.168.1.102:5672,192.168.1.103:5672` at runtime from `NODE*_IP`. |
+| `RABBITMQ_PORT` | `5672` | Literal integer |
+| `MARIADB_HOST` | `192.168.1.100` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
+| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `192.168.1.101,192.168.1.102,192.168.1.103` at runtime. |
 | `MARIADB_PORT` | `3306` | Literal integer |
 
-> **⚠️ Important — `python-dotenv` does not expand `${VAR}` references**
+#### Concrete `.env` for each node
+
+**node1** (`/opt/flowfirst/.env`):
+```
+NODE_NAME=node1
+CURRENT_NODE_IP=192.168.1.101
+# everything else identical — see .env.example
+```
+
+**node2** (`/opt/flowfirst/.env`):
+```
+NODE_NAME=node2
+CURRENT_NODE_IP=192.168.1.102
+# everything else identical — see .env.example
+```
+
+**node3** (`/opt/flowfirst/.env`):
+```
+NODE_NAME=node3
+CURRENT_NODE_IP=192.168.1.103
+# everything else identical — see .env.example
+```
+
+> **⚠️ `python-dotenv` does not expand `${VAR}` references**
 >
-> Shell variable interpolation such as `RABBITMQ_HOST=${FLOWFIRST_VIP}` or
-> `RABBITMQ_HOSTS=${NODE1_IP}:${RABBITMQ_PORT},...` is **silently read as a
-> literal string** by `python-dotenv`. This causes `int("${RABBITMQ_PORT}")` to
-> crash with `ValueError: invalid literal for int() with base 10`.
+> Shell interpolation like `RABBITMQ_HOST=${FLOWFIRST_VIP}` is read as the
+> **literal string** `${FLOWFIRST_VIP}` by Python. This causes
+> `int("${RABBITMQ_PORT}")` → `ValueError: invalid literal for int()`.
 >
-> **Rule:** every value in `.env` must be a plain literal — IP addresses, port
-> numbers, strings. No `$VAR` or `${VAR}` substitutions anywhere.
->
-> `config.py` contains a defensive guard (`_int_env` / `_str_env`) that
-> detects unexpanded references, emits a stderr warning, and falls back to
-> the built-in default rather than crashing — but the correct fix is always
-> to use literal values in `.env`.
+> **Rule:** every value in `.env` must be a plain literal — no `$VAR` or
+> `${VAR}` anywhere. `config.py` guards against this with `_int_env` /
+> `_str_env` helpers that warn and fall back to defaults, but the `.env`
+> file is always the right place to fix it.
 
 ---
 

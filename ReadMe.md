@@ -256,9 +256,12 @@ wsrep_local_state_comment: Synced
 
 ### Phase 3: Install RabbitMQ on All 3 Nodes
 
-> **Note:** The old Cloudsmith GPG key URLs (`dl.cloudsmith.io/…/gpg.*.key`) are no longer valid.
-> The script uses the canonical keys from **`github.com/rabbitmq/signing-keys` release 3.0** instead.
-> The RabbitMQ server key fingerprint also changed from `2620D4E7` → `26208342` in that release.
+> **Note — three issues were fixed in the install script (as of 2025):**
+> 1. **Cloudsmith baseurls dead** — `dl.cloudsmith.io/public/rabbitmq/…` returns 404.
+>    Replaced with `yum1.rabbitmq.com` / `yum2.rabbitmq.com` (official RabbitMQ mirrors, both verified live).
+> 2. **Cloudsmith GPG key URLs dead** — `dl.cloudsmith.io/…/gpg.*.key` also returns 404.
+>    Keys are now fetched from `github.com/rabbitmq/signing-keys` release 3.0.
+> 3. **Server key fingerprint changed** — suffix `2620D4E7` → `26208342` in signing-keys release 3.0.
 
 ```bash
 cd /opt/flowfirst
@@ -266,12 +269,11 @@ sudo ./scripts/install_rabbitmq_rhel9.sh
 ```
 
 The script performs these steps automatically:
-1. Imports `cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key` from GitHub
-2. Imports `cloudsmith.rabbitmq-server.9F4587F226208342.key` from GitHub *(updated fingerprint)*
-3. Imports `rabbitmq-release-signing-key.asc` (primary trust anchor) from GitHub
-4. Writes `/etc/yum.repos.d/rabbitmq.repo` with corrected `gpgkey=` URLs
-5. Runs `dnf clean metadata && dnf makecache && dnf install -y erlang rabbitmq-server`
-6. Enables `rabbitmq_management` plugin and starts the service
+1. Downloads all 3 GPG keys to temp files (bypasses `rpm --import /dev/stdin` pipe bug on RHEL 9)
+2. Imports keys with `sudo rpm --import <file>`
+3. Writes `/etc/yum.repos.d/rabbitmq.repo` with 4 stanzas using `yum1/yum2.rabbitmq.com` baseurls and GitHub `gpgkey=` URLs
+4. Runs `dnf clean metadata && dnf makecache && dnf install -y erlang rabbitmq-server`
+5. Enables `rabbitmq_management` plugin and starts the service
 
 ---
 

@@ -65,12 +65,36 @@ enable_ha_repo() {
         fi
     done
 
-    # No known repo found — add the CentOS Stream 9 HA mirrorlist as fallback
-    echo "  No HA repo found via config-manager; adding CentOS Stream 9 HA repo..."
+    # No known repo found — add CentOS Stream 9 repos as fallback.
+    # Three repos are required:
+    #   HighAvailability — pcs, pacemaker, corosync, fence-agents
+    #   AppStream        — pacemaker-libs, pacemaker-cluster-libs, corosynclib
+    #                      (HA repo carries older lib versions that don't satisfy
+    #                       the latest pacemaker/corosync dependency requirements)
+    #   BaseOS           — low-level deps pulled by corosynclib / pacemaker-libs
+    echo "  No HA repo found via config-manager; adding CentOS Stream 9 repos..."
     sudo tee /etc/yum.repos.d/centos-ha.repo > /dev/null << 'HAREPO'
 [centos-stream9-ha]
 name=CentOS Stream 9 - HighAvailability
 baseurl=https://mirror.stream.centos.org/9-stream/HighAvailability/$basearch/os/
+gpgcheck=1
+enabled=1
+gpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official
+sslverify=1
+metadata_expire=300
+
+[centos-stream9-appstream]
+name=CentOS Stream 9 - AppStream
+baseurl=https://mirror.stream.centos.org/9-stream/AppStream/$basearch/os/
+gpgcheck=1
+enabled=1
+gpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official
+sslverify=1
+metadata_expire=300
+
+[centos-stream9-baseos]
+name=CentOS Stream 9 - BaseOS
+baseurl=https://mirror.stream.centos.org/9-stream/BaseOS/$basearch/os/
 gpgcheck=1
 enabled=1
 gpgkey=https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official

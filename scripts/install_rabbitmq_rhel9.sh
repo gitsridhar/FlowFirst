@@ -28,13 +28,17 @@ echo "  Detected architecture: ${ARCH}"
 
 # ---------------------------------------------------------------------------
 # Key URLs — github.com/rabbitmq/signing-keys, release 3.0
+#
+# NOTE: packagecloud.io/rabbitmq/*/gpgkey files are signed with GnuPG v1.4
+# (SHA-1), which rpm on RHEL 9 rejects with "import failed".  We do NOT
+# import those keys.  Instead we rely solely on the v2 GitHub keys below.
+# For aarch64 packagecloud repos we set repo_gpgcheck=0 (skips repo-metadata
+# signature) but keep gpgcheck=1 so individual package RPMs are still
+# verified with the valid SHA-256 GitHub keys.
 # ---------------------------------------------------------------------------
 ERLANG_KEY_URL="https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key"
 SERVER_KEY_URL="https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key"
 RELEASE_KEY_URL="https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc"
-# packagecloud keys (needed for aarch64 repos)
-PC_ERLANG_KEY_URL="https://packagecloud.io/rabbitmq/erlang/gpgkey"
-PC_SERVER_KEY_URL="https://packagecloud.io/rabbitmq/rabbitmq-server/gpgkey"
 
 # ---------------------------------------------------------------------------
 # 1. Import GPG Signing Keys
@@ -57,15 +61,6 @@ curl -fsSL -o "${TMPDIR_KEYS}/release.key" "${RELEASE_KEY_URL}"
 sudo rpm --import "${TMPDIR_KEYS}/erlang.key"
 sudo rpm --import "${TMPDIR_KEYS}/server.key"
 sudo rpm --import "${TMPDIR_KEYS}/release.key"
-
-if [[ "${ARCH}" == "aarch64" ]]; then
-    echo "  → Packagecloud Erlang key (aarch64 repos)"
-    curl -fsSL -o "${TMPDIR_KEYS}/pc_erlang.key" "${PC_ERLANG_KEY_URL}"
-    echo "  → Packagecloud RabbitMQ server key (aarch64 repos)"
-    curl -fsSL -o "${TMPDIR_KEYS}/pc_server.key" "${PC_SERVER_KEY_URL}"
-    sudo rpm --import "${TMPDIR_KEYS}/pc_erlang.key"
-    sudo rpm --import "${TMPDIR_KEYS}/pc_server.key"
-fi
 
 echo "  GPG keys imported OK."
 
@@ -144,13 +139,15 @@ elif [[ "${ARCH}" == "aarch64" ]]; then
 
 sudo tee /etc/yum.repos.d/rabbitmq.repo > /dev/null << 'EOF'
 ## ── Erlang aarch64 (packagecloud) ────────────────────────────────────────────
+## repo_gpgcheck=0: packagecloud signs repo metadata with a GnuPG v1 (SHA-1)
+## key that RHEL 9 rpm rejects.  Package RPMs themselves are verified via
+## gpgcheck=1 using the valid SHA-256 GitHub keys imported in step 1.
 [rabbitmq-erlang]
 name=rabbitmq-erlang
 baseurl=https://packagecloud.io/rabbitmq/erlang/el/9/aarch64
-repo_gpgcheck=1
+repo_gpgcheck=0
 enabled=1
-gpgkey=https://packagecloud.io/rabbitmq/erlang/gpgkey
-       https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key
+gpgkey=https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key
 gpgcheck=1
 sslverify=1
 sslcacert=/etc/pki/tls/certs/ca-bundle.crt
@@ -160,10 +157,9 @@ metadata_expire=300
 [rabbitmq-server]
 name=rabbitmq-server
 baseurl=https://packagecloud.io/rabbitmq/rabbitmq-server/el/9/aarch64
-repo_gpgcheck=1
+repo_gpgcheck=0
 enabled=1
-gpgkey=https://packagecloud.io/rabbitmq/rabbitmq-server/gpgkey
-       https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key
+gpgkey=https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key
        https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc
 gpgcheck=1
 sslverify=1

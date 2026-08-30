@@ -26,14 +26,21 @@ RELEASE_KEY_URL="https://github.com/rabbitmq/signing-keys/releases/download/3.0/
 # ---------------------------------------------------------------------------
 echo "[1/5] Importing GPG signing keys from github.com/rabbitmq/signing-keys ..."
 
-echo "  → Erlang repo key (E495BB49CC4BBE5B)"
-curl -fsSL "${ERLANG_KEY_URL}" | sudo rpm --import /dev/stdin
+# rpm --import cannot read from a pipe on RHEL 9 — download to temp files first
+TMPDIR_KEYS=$(mktemp -d)
+trap 'rm -rf "${TMPDIR_KEYS}"' EXIT
 
-echo "  → RabbitMQ server repo key (9F4587F226208342)"
-curl -fsSL "${SERVER_KEY_URL}" | sudo rpm --import /dev/stdin
+echo "  → Downloading Erlang repo key (E495BB49CC4BBE5B)"
+curl -fsSL -o "${TMPDIR_KEYS}/erlang.key"   "${ERLANG_KEY_URL}"
+echo "  → Downloading RabbitMQ server repo key (9F4587F226208342)"
+curl -fsSL -o "${TMPDIR_KEYS}/server.key"   "${SERVER_KEY_URL}"
+echo "  → Downloading RabbitMQ release signing key (primary trust anchor)"
+curl -fsSL -o "${TMPDIR_KEYS}/release.key"  "${RELEASE_KEY_URL}"
 
-echo "  → RabbitMQ release signing key (primary trust anchor)"
-curl -fsSL "${RELEASE_KEY_URL}" | sudo rpm --import /dev/stdin
+echo "  → Importing keys into RPM database"
+sudo rpm --import "${TMPDIR_KEYS}/erlang.key"
+sudo rpm --import "${TMPDIR_KEYS}/server.key"
+sudo rpm --import "${TMPDIR_KEYS}/release.key"
 
 echo "  GPG keys imported OK."
 

@@ -178,9 +178,101 @@ erDiagram
 
 ---
 
-### Phase 0: Time Synchronisation — Install & Configure Chrony on All 3 Nodes
+### Phase 0: Bootstrap — Repository Clone, Python Environment & Time Sync (All 3 Nodes)
 
-> **Do this before anything else — before RabbitMQ, before Galera, before Pacemaker.**
+> **Do this first on every node — before any service is installed.**
+> The repository must be present before any other script can run.
+> Chrony must be synchronised before RabbitMQ, Galera, or Pacemaker are installed.
+
+---
+
+#### Phase 0a — Clone the Repository & Set Up the Python Environment
+
+```bash
+# 1. Install base utilities and Python
+sudo dnf install -y git python3 python3-pip
+
+# 2. Clone repository to /opt/flowfirst
+sudo git clone <repo-url> /opt/flowfirst
+sudo chown -R $USER:$USER /opt/flowfirst
+cd /opt/flowfirst
+
+# 3. Create and activate Python virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 4. Initialise environment configuration
+cp .env.example .env
+```
+
+Then **edit `.env`** on each node. The rules are simple:
+
+> **Only two variables differ between nodes. Everything else is identical.**
+
+#### Per-node variables (change these on each node)
+
+| Variable | node1 | node2 | node3 | What it means |
+|---|---|---|---|---|
+| `NODE_NAME` | `node1` | `node2` | `node3` | The hostname **of this node** — must match `/etc/hostname` and the name passed to `pcs cluster setup` |
+| `CURRENT_NODE_IP` | `192.168.1.101` | `192.168.1.102` | `192.168.1.103` | The cluster-interface IP **of this node** — used by Galera's `wsrep_node_address` and Corosync bind address |
+
+#### Shared variables (identical on all three nodes)
+
+| Variable | Value | Notes |
+|---|---|---|
+| `CLUSTER_NAME` | `flowfirst_cluster` | Same on every node |
+| `NODE1_IP` | `192.168.1.101` | **Always the IP of node1**, regardless of which node the file is on |
+| `NODE2_IP` | `192.168.1.102` | **Always the IP of node2** |
+| `NODE3_IP` | `192.168.1.103` | **Always the IP of node3** |
+| `FLOWFIRST_VIP` | `192.168.1.100` | Pacemaker Virtual IP — same on all nodes |
+| `RABBITMQ_HOST` | `192.168.1.100` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
+| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `192.168.1.101:5672,192.168.1.102:5672,192.168.1.103:5672` at runtime from `NODE*_IP`. |
+| `RABBITMQ_PORT` | `5672` | Literal integer |
+| `MARIADB_HOST` | `192.168.1.100` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
+| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `192.168.1.101,192.168.1.102,192.168.1.103` at runtime. |
+| `MARIADB_PORT` | `3306` | Literal integer |
+
+#### Concrete `.env` for each node
+
+**node1** (`/opt/flowfirst/.env`):
+```
+NODE_NAME=node1
+CURRENT_NODE_IP=192.168.1.101
+# everything else identical — see .env.example
+```
+
+**node2** (`/opt/flowfirst/.env`):
+```
+NODE_NAME=node2
+CURRENT_NODE_IP=192.168.1.102
+# everything else identical — see .env.example
+```
+
+**node3** (`/opt/flowfirst/.env`):
+```
+NODE_NAME=node3
+CURRENT_NODE_IP=192.168.1.103
+# everything else identical — see .env.example
+```
+
+> **⚠️ `python-dotenv` does not expand `${VAR}` references**
+>
+> Shell interpolation like `RABBITMQ_HOST=${FLOWFIRST_VIP}` is read as the
+> **literal string** `${FLOWFIRST_VIP}` by Python. This causes
+> `int("${RABBITMQ_PORT}")` → `ValueError: invalid literal for int()`.
+>
+> **Rule:** every value in `.env` must be a plain literal — no `$VAR` or
+> `${VAR}` anywhere. `config.py` guards against this with `_int_env` /
+> `_str_env` helpers that warn and fall back to defaults, but the `.env`
+> file is always the right place to fix it.
+
+---
+
+#### Phase 0b — Time Synchronisation — Install & Configure Chrony
+
+> **Do this before any service install — before RabbitMQ, before Galera, before Pacemaker.**
 >
 > RabbitMQ **will not start or join a cluster** if the system clock is not synchronised.
 > Erlang's distribution protocol and cookie handshake are time-sensitive.
@@ -287,93 +379,7 @@ sudo rabbitmqctl cluster_status
 
 ---
 
-### Phase 1: Repository Clone & Base Prerequisites on All 3 Nodes
-
-First, clone the repository onto **all 3 nodes** so that all setup scripts, SQL definitions, configuration templates, and Python sources are available locally.
-
-```bash
-# 1. Install base utilities and Python
-sudo dnf install -y git python3 python3-pip
-
-# 2. Clone repository to /opt/flowfirst and navigate to directory
-sudo git clone <repo-url> /opt/flowfirst
-sudo chown -R $USER:$USER /opt/flowfirst
-cd /opt/flowfirst
-
-# 3. Create and configure Python virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# 4. Initialize environment configuration
-cp .env.example .env
-```
-
-Then **edit `.env`** on each node. The rules are simple:
-
-> **Only two variables differ between nodes. Everything else is identical.**
-
-#### Per-node variables (change these on each node)
-
-| Variable | node1 | node2 | node3 | What it means |
-|---|---|---|---|---|
-| `NODE_NAME` | `node1` | `node2` | `node3` | The hostname **of this node** — must match `/etc/hostname` and the name passed to `pcs cluster setup` |
-| `CURRENT_NODE_IP` | `192.168.1.101` | `192.168.1.102` | `192.168.1.103` | The cluster-interface IP **of this node** — used by Galera's `wsrep_node_address` and Corosync bind address |
-
-#### Shared variables (identical on all three nodes)
-
-| Variable | Value | Notes |
-|---|---|---|
-| `CLUSTER_NAME` | `flowfirst_cluster` | Same on every node |
-| `NODE1_IP` | `192.168.1.101` | **Always the IP of node1**, regardless of which node the file is on |
-| `NODE2_IP` | `192.168.1.102` | **Always the IP of node2** |
-| `NODE3_IP` | `192.168.1.103` | **Always the IP of node3** |
-| `FLOWFIRST_VIP` | `192.168.1.100` | Pacemaker Virtual IP — same on all nodes |
-| `RABBITMQ_HOST` | `192.168.1.100` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
-| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `192.168.1.101:5672,192.168.1.102:5672,192.168.1.103:5672` at runtime from `NODE*_IP`. |
-| `RABBITMQ_PORT` | `5672` | Literal integer |
-| `MARIADB_HOST` | `192.168.1.100` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
-| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `192.168.1.101,192.168.1.102,192.168.1.103` at runtime. |
-| `MARIADB_PORT` | `3306` | Literal integer |
-
-#### Concrete `.env` for each node
-
-**node1** (`/opt/flowfirst/.env`):
-```
-NODE_NAME=node1
-CURRENT_NODE_IP=192.168.1.101
-# everything else identical — see .env.example
-```
-
-**node2** (`/opt/flowfirst/.env`):
-```
-NODE_NAME=node2
-CURRENT_NODE_IP=192.168.1.102
-# everything else identical — see .env.example
-```
-
-**node3** (`/opt/flowfirst/.env`):
-```
-NODE_NAME=node3
-CURRENT_NODE_IP=192.168.1.103
-# everything else identical — see .env.example
-```
-
-> **⚠️ `python-dotenv` does not expand `${VAR}` references**
->
-> Shell interpolation like `RABBITMQ_HOST=${FLOWFIRST_VIP}` is read as the
-> **literal string** `${FLOWFIRST_VIP}` by Python. This causes
-> `int("${RABBITMQ_PORT}")` → `ValueError: invalid literal for int()`.
->
-> **Rule:** every value in `.env` must be a plain literal — no `$VAR` or
-> `${VAR}` anywhere. `config.py` guards against this with `_int_env` /
-> `_str_env` helpers that warn and fall back to defaults, but the `.env`
-> file is always the right place to fix it.
-
----
-
-### Phase 2: Setup MariaDB Galera Cluster on All 3 Nodes
+### Phase 1: Setup MariaDB Galera Cluster on All 3 Nodes
 
 All scripts automatically read parameters from `/opt/flowfirst/.env`.
 
@@ -423,9 +429,9 @@ wsrep_local_state_comment: Synced
 
 ---
 
-### Phase 3: Install RabbitMQ on All 3 Nodes
+### Phase 2: Install RabbitMQ on All 3 Nodes
 
-> **Prerequisite:** Phase 0 (chrony time sync) must be complete on all nodes before running this.
+> **Prerequisite:** Phase 0b (chrony time sync) must be complete on all nodes before running this.
 > The install script checks `chronyd` status at startup and prints a 10-second warning
 > if the clock is not synchronised — press **Ctrl-C** and run `setup_chronyd.sh` first.
 
@@ -454,14 +460,14 @@ The script performs these steps automatically:
 
 ---
 
-### Phase 4: Identify Your Cluster NIC & Set `VIP_NIC` on Each Node
+### Phase 3: Identify Your Cluster NIC & Set `VIP_NIC` on Each Node
 
 > **Critical — do this before running `setup_haproxy.sh` or `configure_multinode_resources.sh`.**
 > RHEL 9 uses *predictable NIC names* (`ens3`, `ens192`, `enp0s3`) — NOT `eth0`.
 > `VIP_NIC` must be the physical cluster interface name on **each individual node**.
 > It may differ across nodes if hardware varies.
 
-#### 4a — Discover the correct NIC name on each node
+#### 3a — Discover the correct NIC name on each node
 
 ```bash
 # Option 1: auto-detect via routing table (recommended)
@@ -478,7 +484,7 @@ ip -o link show | awk -F': ' '{print $2}' | grep -v lo
 ip -4 addr show | grep -v lo
 ```
 
-#### 4b — Set `VIP_NIC` in `.env` on each node
+#### 3b — Set `VIP_NIC` in `.env` on each node
 
 Edit `/opt/flowfirst/.env` and set `VIP_NIC` to the name found above.
 The value may be different on each node:
@@ -494,7 +500,7 @@ VIP_NIC=enp0s3
 VIP_NIC=ens192
 ```
 
-#### 4c — Run HAProxy setup on all 3 nodes
+#### 3c — Run HAProxy setup on all 3 nodes
 
 ```bash
 cd /opt/flowfirst
@@ -502,7 +508,7 @@ cd /opt/flowfirst
 sudo ./haproxy/setup_haproxy.sh
 ```
 
-#### 4d — Verify HAProxy starts cleanly
+#### 3d — Verify HAProxy starts cleanly
 
 ```bash
 sudo systemctl status haproxy
@@ -619,7 +625,7 @@ curl -s -u admin:admin123 http://192.168.1.100:9000/stats | grep -c "pxname"
 
 ---
 
-### Phase 5: Install Systemd Services on All 3 Nodes
+### Phase 4: Install Systemd Services on All 3 Nodes
 ```bash
 cd /opt/flowfirst
 # Install Systemd Units
@@ -631,13 +637,13 @@ sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 
 
 ---
 
-### Phase 6: Pacemaker Cluster & VIP Initialization
+### Phase 5: Pacemaker Cluster & VIP Initialization
 
 > **Note:** The cluster setup is a **two-step process**. `pcsd` must be running and
 > reachable on port 2224 on **all three nodes** before `pcs host auth` can succeed.
 > The script handles this with a `--prepare-node` flag.
 
-#### Step 6a — Run on ALL THREE nodes first (node1, node2, node3)
+#### Step 5a — Run on ALL THREE nodes first (node1, node2, node3)
 
 ```bash
 cd /opt/flowfirst
@@ -652,7 +658,7 @@ This single command on each node:
 5. Opens firewall ports: `2224/tcp` `3121/tcp` `5403/tcp` `5404/udp` `5405/udp`
 6. Adds all three node IPs to `/etc/hosts`
 
-#### Step 6b — Run on NODE 1 ONLY after all three nodes are prepared
+#### Step 5b — Run on NODE 1 ONLY after all three nodes are prepared
 
 ```bash
 cd /opt/flowfirst

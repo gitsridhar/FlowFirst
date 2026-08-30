@@ -640,6 +640,446 @@ mariadb -h ${NODE3_IP:-192.168.1.103} -u flowuser -pflowpassword flowfirst_db -e
 
 ---
 
+### Scenario 31: Galera IST — Incremental State Transfer
+
+#### What IST is and when it is used
+
+IST (Incremental State Transfer) is the **fast path** Galera uses to re-sync a rejoining node. Instead of copying the entire dataset, the donor streams only the **write-sets the joiner missed** directly from its in-memory/disk **gcache ring buffer**.
+
+IST is chosen automatically when **both** conditions are true:
+1. The joiner's last committed transaction (`wsrep_last_committed`) is still inside the donor's gcache window — i.e., the donor has retained all write-sets since the joiner fell behind.
+2. The joiner presents its `seqno` to the donor during the joining handshake and the donor can satisfy it.
+
+If either condition fails, Galera falls back to SST.
+
+```
+gcache ring buffer on donor:
+  [seqno 100]─────[seqno 850]────►[seqno 1000]  (current)
+               ▲
+         joiner last seqno = 850
+         gap = 150 write-sets  ← fits in gcache → IST
+```
+
+#### 31.1 — Confirm gcache.size in the running cluster
+
+```bash
+# On any node
+sudo mysql -u root -p -e "SHOW VARIABLES LIKE 'wsrep_provider_options'\G" \
+  | grep gcache.size
+```
+```
+wsrep_provider_options: ... gcache.size = 536870912; ...   ← 512 MB
+```
+
+#### 31.2 — Trigger a short outage and force IST
+
+```bash
+# Step 1: Stop node3
+sudo systemctl stop mariadb   # on node3
+
+# Step 2: Generate a small amount of write traffic (stays inside gcache window)
+for i in $(seq 1 20); do
+  curl -s -X POST http://192.168.1.100:8080/api/flow1 > /dev/null
+done
+sleep 3
+
+# Step 3: Check node3's last seqno before restart
+sudo cat /var/lib/mysql/grastate.dat   # on node3
+```
+```
+seqno:   892     ← last committed before outage
+```
+
+```bash
+# Step 4: Check donor's current seqno
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_last_committed';"
+```
+```
++---------------------+-------+
+| Variable_name       | Value |
++---------------------+-------+
+| wsrep_last_committed| 912   |   ← gap = 20 write-sets — well inside 512 MB gcache
++---------------------+-------+
+```
+
+#### 31.3 — Restart node3 and watch IST execute
+
+```bash
+# On node3
+sudo systemctl start mariadb
+
+# On node1 — watch the state progression in real time
+sudo watch -n1 "mysql -u root -p -e \
+  \"SHOW STATUS WHERE Variable_name IN \
+  ('wsrep_local_state_comment','wsrep_cluster_size','wsrep_last_committed');\" 2>/dev/null"
+```
+
+Expected state progression on node3:
+```
+wsrep_local_state_comment: Joiner/Waiting       ← requesting IST from donor
+wsrep_local_state_comment: Joiner/Receiving IST ← receiving write-sets
+wsrep_local_state_comment: Joined               ← replay complete
+wsrep_local_state_comment: Synced               ← fully caught up, rejoined cluster
+```
+
+Confirm IST (not SST) was used — IST leaves no SST lock files and the donor **stays `Synced`** throughout:
+```bash
+# On the donor node (node1 or node2) — state must never leave Synced during IST
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"
+```
+```
++---------------------------+--------+
+| wsrep_local_state_comment | Synced |   ← donor was never paused — IST confirmed
++---------------------------+--------+
+```
+
+```bash
+# Confirm cluster back to 3 members
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+```
++--------------------+-------+
+| Variable_name      | Value |
++--------------------+-------+
+| wsrep_cluster_size | 3     |
++--------------------+-------+
+```
+
+Also verify in the MariaDB error log:
+```bash
+sudo grep -i "IST\|incremental" /var/log/mariadb/mariadb.log | tail -5
+```
+```
+[Note] WSREP: Prepared IST receiver for seqno 892-912
+[Note] WSREP: 0.0 (node3): State transfer from 0.0 (node1) complete
+[Note] WSREP: Received IST: 20 write-sets
+[Note] WSREP: IST received
+```
+
+---
+
+### Scenario 32: Galera SST — State Snapshot Transfer
+
+#### What SST is and when it is used
+
+SST (State Snapshot Transfer) is the **slow path** — a full copy of the entire dataset from donor to joiner. Galera uses it when:
+1. The joiner has been offline so long that its `seqno` has **fallen outside the donor's gcache window** (the write-sets it missed have been overwritten in gcache).
+2. The joiner has `seqno: -1` in `grastate.dat` (unclean shutdown / corrupted state).
+3. The joiner is a **brand new node** with no data at all.
+
+During SST with `wsrep_sst_method=rsync` (the default), the **donor is desynced** from the cluster for the duration of the copy. With `wsrep_sst_method=mariabackup` the donor stays online.
+
+```
+gcache ring buffer on donor:
+  [seqno 1]────────────────────►[seqno 1000]  (current)
+  ▲ gcache overwritten
+  joiner last seqno = 200  ← outside gcache window → SST required
+```
+
+#### 32.1 — Set wsrep_sst_method (choose rsync or mariabackup)
+
+**rsync** (default — no extra packages required):
+```bash
+# /etc/my.cnf.d/galera.cnf on all nodes
+wsrep_sst_method=rsync
+```
+
+**mariabackup** (non-blocking donor — recommended for production):
+```bash
+# Install the package first on all nodes
+sudo dnf install -y mariadb-backup
+
+# /etc/my.cnf.d/galera.cnf on all nodes
+wsrep_sst_method=mariabackup
+```
+
+After changing `wsrep_sst_method`, restart MariaDB on all nodes **one at a time** (rolling restart — never all simultaneously):
+```bash
+sudo systemctl restart mariadb   # on node3 first, then node2, then node1
+```
+
+#### 32.2 — Force SST by making the joiner fall outside the gcache window
+
+To reliably trigger SST (rather than IST), set `gcache.size` to a very small value **before** the outage so the cache fills quickly:
+
+```bash
+# On all nodes — temporarily shrink gcache to force SST
+sudo mysql -u root -p -e "
+  SET GLOBAL wsrep_provider_options='gcache.size=1M';
+"
+# Note: gcache.size is applied at startup; live SET GLOBAL may not take effect
+# on all Galera versions. Edit galera.cnf and restart for a guaranteed change.
+```
+
+Or simply leave node3 offline long enough for heavy write traffic to fill and overwrite the gcache. Then:
+
+```bash
+# Confirm node3 is now outside the gcache window
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_last_committed';"   # on node1
+```
+```
+wsrep_last_committed: 15420    ← node3 last seqno was 892 — gap far exceeds 1M gcache
+```
+
+```bash
+# Mark node3's state as requiring SST (clear seqno)
+sudo systemctl stop mariadb   # on node3
+sudo sed -i 's/^seqno:.*/seqno:   -1/' /var/lib/mysql/grastate.dat   # on node3
+sudo cat /var/lib/mysql/grastate.dat
+```
+```
+seqno:   -1      ← forces Galera to request SST on next start
+safe_to_bootstrap: 0
+```
+
+#### 32.3 — Start node3 and observe SST
+
+```bash
+sudo systemctl start mariadb   # on node3
+```
+
+Watch state on node3:
+```bash
+sudo watch -n1 "mysql -u root -p -e \
+  \"SHOW STATUS WHERE Variable_name IN \
+  ('wsrep_local_state_comment','wsrep_cluster_size');\" 2>/dev/null"
+```
+```
+wsrep_local_state_comment: Joiner/Waiting          ← requesting SST
+wsrep_local_state_comment: Joiner/Receiving SST    ← full copy in progress (slow)
+wsrep_local_state_comment: Joined                  ← SST received, applying write-sets
+wsrep_local_state_comment: Synced                  ← rejoined
+```
+
+Watch the donor during SST — with `rsync` it will show `Donor/Desynced`:
+```bash
+# On node1 (donor)
+sudo watch -n1 "mysql -u root -p -e \
+  \"SHOW STATUS LIKE 'wsrep_local_state_comment';\" 2>/dev/null"
+```
+```
+wsrep_local_state_comment: Donor/Desynced   ← donor is paused (rsync SST)
+```
+
+With `mariabackup`:
+```bash
+wsrep_local_state_comment: Synced   ← donor stays online (mariabackup SST)
+```
+
+Confirm SST in the error log:
+```bash
+sudo grep -i "SST\|snapshot" /var/log/mariadb/mariadb.log | tail -10
+```
+```
+[Note] WSREP: State transfer required: own seqno -1
+[Note] WSREP: Initiating SST (rsync) from node1
+[Note] WSREP: SST complete, seqno: 15420
+[Note] WSREP: 0.0 (node3): State transfer from 0.0 (node1) complete
+```
+
+Monitor SST data transfer rate (from a separate terminal on the donor):
+```bash
+# If using rsync SST, watch the rsync process on the donor
+sudo watch -n2 "ps aux | grep rsync | grep -v grep"
+# If using mariabackup SST, watch mariadb-backup
+sudo watch -n2 "ps aux | grep mariadb-backup | grep -v grep"
+```
+
+---
+
+### Scenario 33: `gcache.size` Impact on IST vs SST
+
+#### How gcache.size determines IST or SST
+
+`gcache.size` is a circular ring buffer Galera maintains **per node** on disk (`/var/lib/mysql/galera.cache`). It stores recent write-sets (committed transactions) so that rejoining nodes can be caught up incrementally without a full copy.
+
+```
+┌─────────────────────────────────────────────────────┐
+│  gcache ring buffer  (gcache.size = N bytes)        │
+│                                                     │
+│  oldest retained    newest retained   current head  │
+│  ┌──────────────────────────────────────────────┐   │
+│  │ seqno 800  seqno 850  ...  seqno 990  seqno 1000 │
+│  └──────────────────────────────────────────────┘   │
+│        ▲                                            │
+│  joiner seqno 850 → gap 150 write-sets → IST ✅     │
+│                                                     │
+│  joiner seqno 200 → outside buffer     → SST ❌     │
+└─────────────────────────────────────────────────────┘
+```
+
+**Decision rule** (simplified):
+- `joiner_seqno >= oldest_seqno_in_gcache` → **IST** (fast, donor stays online)
+- `joiner_seqno <  oldest_seqno_in_gcache` → **SST** (slow, full copy)
+
+#### 33.1 — Effect of different gcache.size values
+
+The table below shows how `gcache.size` affects the maximum tolerable outage before SST becomes required, assuming a moderate write rate of **~500 write-sets/second** (typical for the FlowFirst pipeline under load):
+
+| `gcache.size` | Approx. write-sets stored | Max outage before SST | Use case |
+|---|---|---|---|
+| `128M` (default) | ~640,000 | ~21 minutes | Light workloads, dev/test |
+| `512M` | ~2,560,000 | ~85 minutes | Standard production |
+| `1G` | ~5,120,000 | ~170 minutes | Write-heavy workloads |
+| `2G` | ~10,240,000 | ~5.7 hours | Long maintenance windows |
+| `4G` | ~20,480,000 | ~11 hours | High-availability clusters |
+
+> **Rule of thumb:** set `gcache.size` to cover at least your longest expected maintenance window multiplied by your peak write-set rate.
+
+#### 33.2 — Change gcache.size live vs. at startup
+
+`gcache.size` is a Galera provider option. It takes effect **at MariaDB startup** — a running cluster cannot resize gcache live without a restart.
+
+```bash
+# Edit on all nodes before rolling restart
+sudo tee /etc/my.cnf.d/galera.cnf > /dev/null << 'EOF'
+# ... (keep other settings) ...
+wsrep_provider_options="gcache.size=2G"
+EOF
+```
+
+Restart one node at a time (never all simultaneously):
+```bash
+# Restart node3 first, wait for Synced, then node2, then node1
+sudo systemctl restart mariadb   # on node3
+```
+
+Wait until node3 is `Synced`:
+```bash
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"
+# expect: Synced
+```
+
+Then restart node2, wait for `Synced`, then restart node1.
+
+Confirm new gcache.size is active:
+```bash
+sudo mysql -u root -p -e "SHOW VARIABLES LIKE 'wsrep_provider_options'\G" \
+  | grep gcache.size
+```
+```
+wsrep_provider_options: ... gcache.size = 2147483648; ...   ← 2 GB
+```
+
+Check the actual gcache file size on disk:
+```bash
+ls -lh /var/lib/mysql/galera.cache
+```
+```
+-rw-r--r-- 1 mysql mysql 2.0G Jun 9 12:05 /var/lib/mysql/galera.cache
+```
+
+#### 33.3 — Demonstrate IST succeeding with adequate gcache
+
+```bash
+# gcache.size=512M on all nodes (current config)
+# Stop node3
+sudo systemctl stop mariadb   # node3
+
+# Generate 10,000 write-sets (well under 512M capacity)
+for i in $(seq 1 500); do
+  curl -s -X POST http://192.168.1.100:8080/api/flow1 > /dev/null &
+done
+wait
+sleep 5
+
+# Restart node3 — IST will be used
+sudo systemctl start mariadb   # node3
+
+# Confirm IST in log
+sudo grep -E "IST|Received IST|write-sets" /var/log/mariadb/mariadb.log | tail -5
+```
+```
+[Note] WSREP: Prepared IST receiver
+[Note] WSREP: Received IST: 500 write-sets
+[Note] WSREP: IST received
+```
+
+#### 33.4 — Demonstrate SST triggered by undersized gcache
+
+```bash
+# Temporarily set gcache to 1M on all nodes to guarantee overflow
+sudo mysql -u root -p -e \
+  "SET GLOBAL wsrep_provider_options='gcache.size=1M';"   # on all 3 nodes
+# Note: takes effect at next restart — restart node3 first while gcache is tiny
+
+# Stop node3, generate heavy traffic, then restart
+sudo systemctl stop mariadb   # node3
+for i in $(seq 1 5000); do
+  curl -s -X POST http://192.168.1.100:8080/api/flow2 > /dev/null
+done
+sleep 5
+sudo systemctl start mariadb   # node3
+
+# SST should be triggered — watch donor go Donor/Desynced
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"   # node1
+```
+```
++---------------------------+----------------+
+| wsrep_local_state_comment | Donor/Desynced |   ← SST in progress
++---------------------------+----------------+
+```
+
+```bash
+# Restore production gcache.size after the demo
+sudo mysql -u root -p -e \
+  "SET GLOBAL wsrep_provider_options='gcache.size=512M';"   # on all 3 nodes
+# Then do a rolling restart to persist the change in galera.cnf
+```
+
+#### 33.5 — Monitor gcache usage in real time
+
+```bash
+# Check current gcache occupancy and pool size
+sudo mysql -u root -p -e "
+SHOW STATUS WHERE Variable_name IN (
+  'wsrep_local_cached_downtime',
+  'wsrep_provider_name'
+);
+SHOW VARIABLES LIKE 'wsrep_provider_options'\G
+" 2>/dev/null | grep -E "gcache|cached"
+```
+
+Use the Galera gcache hit rate to assess if your `gcache.size` is adequate:
+```bash
+sudo mysql -u root -p -e "
+SHOW STATUS WHERE Variable_name IN (
+  'wsrep_local_state_comment',
+  'wsrep_flow_control_sent',
+  'wsrep_local_recv_queue_avg',
+  'wsrep_last_committed'
+);" 2>/dev/null
+```
+
+#### 33.6 — gcache.size Decision Guide
+
+```
+                    ┌─────────────────────────────────────┐
+                    │  Node rejoining the cluster?        │
+                    └──────────────┬──────────────────────┘
+                                   │
+              ┌────────────────────▼──────────────────────┐
+              │  joiner_seqno >= oldest_seqno_in_gcache?  │
+              └────────┬──────────────────────────┬────────┘
+                       │ YES                      │ NO
+                       ▼                          ▼
+          ┌────────────────────┐      ┌──────────────────────┐
+          │  IST               │      │  SST                 │
+          │  • Fast            │      │  • Slow (full copy)  │
+          │  • Donor stays     │      │  • Donor desynced    │
+          │    online          │      │    (rsync) or online │
+          │  • Only missing    │      │    (mariabackup)     │
+          │    write-sets sent │      │  • seqno reset to -1 │
+          └────────────────────┘      └──────────────────────┘
+                   ▲                             ▲
+          gcache.size LARGER            gcache.size smaller
+          → more IST opportunities      → more SST fallbacks
+```
+
+**Summary:** increase `gcache.size` to keep more IST windows open; use `mariabackup` as your `wsrep_sst_method` to make unavoidable SSTs non-blocking.
+
+---
+
 ### Scenario 5: Node Failure & Virtual IP (VIP) Failover
 
 1. **Put Node 1 into standby mode:**

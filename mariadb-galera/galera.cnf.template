@@ -17,7 +17,22 @@ wsrep_cluster_name="__MARIADB_GALERA_CLUSTER_NAME__"
 wsrep_cluster_address="gcomm://__GALERA_CLUSTER_ADDRESSES__"
 
 # Galera Synchronization & Recovery
+# wsrep_sst_method controls the full-copy transfer method used when IST cannot
+# be used (i.e. the joiner is too far behind the donor's gcache window).
+# rsync   — simple, no extra packages, blocks the donor during transfer
+# mariabackup — non-blocking donor, requires mariadb-backup package
 wsrep_sst_method=rsync
+
+# Galera Write-Set Cache (gcache)
+# gcache.size controls how many bytes of recent write-sets Galera retains on
+# disk for IST (Incremental State Transfer).
+# - If the joiner's gap fits inside the donor's gcache window → IST is used
+#   (fast: only missing write-sets are streamed, donor stays online).
+# - If the gap exceeds gcache → SST is used
+#   (slow: full data copy via wsrep_sst_method, donor is paused/desynced).
+# Default: 128M  Recommended minimum for production: 512M–2G
+# Set higher on write-heavy clusters to maximise IST reuse.
+wsrep_provider_options="gcache.size=512M"
 
 # Galera Node Configuration (Configured dynamically per node from environment)
 wsrep_node_address="__CURRENT_NODE_IP__"

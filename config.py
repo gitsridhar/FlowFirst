@@ -1,9 +1,33 @@
 import os
+import re
 import socket
 import pika
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _int_env(name: str, default: int) -> int:
+    """Read an env var as int, guarding against unexpanded shell references.
+
+    python-dotenv does not expand ${VAR} references — if a .env file was
+    copied from .env.example without substitution, variables like
+    RABBITMQ_PORT may arrive as the literal string '${RABBITMQ_PORT}'.
+    In that case we log a warning and fall back to the supplied default.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw or re.search(r"\$\{?\w+\}?", raw):
+        if raw:
+            import sys
+            print(
+                f"[config] WARNING: {name}='{raw}' contains an unexpanded shell "
+                f"reference — python-dotenv does not expand ${{VAR}}. "
+                f"Using default: {default}. Fix your .env file.",
+                file=sys.stderr,
+            )
+        return default
+    return int(raw)
+
 
 # Host identifier for multi-node cluster awareness
 NODE_NAME = os.getenv("NODE_NAME", socket.gethostname())
@@ -14,12 +38,30 @@ NODE2_IP = os.getenv("NODE2_IP", "127.0.0.1")
 NODE3_IP = os.getenv("NODE3_IP", "127.0.0.1")
 FLOWFIRST_VIP = os.getenv("FLOWFIRST_VIP", NODE1_IP)
 
+# Strip unexpanded shell references from IP/host values too
+def _str_env(name: str, default: str) -> str:
+    raw = os.getenv(name, "").strip()
+    if not raw or re.search(r"\$\{?\w+\}?", raw):
+        if raw:
+            import sys
+            print(
+                f"[config] WARNING: {name}='{raw}' contains an unexpanded shell "
+                f"reference — using default: '{default}'.",
+                file=sys.stderr,
+            )
+        return default
+    return raw
+
+
+# Re-read VIP and hosts with the guarded reader
+FLOWFIRST_VIP = _str_env("FLOWFIRST_VIP", NODE1_IP)
+
 # Process 1 REST API Settings
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", 8080))
+API_PORT = _int_env("API_PORT", 8080)
 
 # RabbitMQ Connection Settings
-RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", 5672))
+RABBITMQ_PORT = _int_env("RABBITMQ_PORT", 5672)
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", FLOWFIRST_VIP)
 RABBITMQ_USER = os.getenv("RABBITMQ_USER", "flowuser")
 RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "flowpassword")
@@ -32,8 +74,8 @@ else:
     RABBITMQ_HOSTS = f"{NODE1_IP}:{RABBITMQ_PORT},{NODE2_IP}:{RABBITMQ_PORT},{NODE3_IP}:{RABBITMQ_PORT}"
 
 # MariaDB Connection Settings
-MARIADB_PORT = int(os.getenv("MARIADB_PORT", 3306))
-MARIADB_HOST = os.getenv("MARIADB_HOST", FLOWFIRST_VIP)
+MARIADB_PORT = _int_env("MARIADB_PORT", 3306)
+MARIADB_HOST = _str_env("MARIADB_HOST", FLOWFIRST_VIP)
 MARIADB_USER = os.getenv("MARIADB_USER", "flowuser")
 MARIADB_PASSWORD = os.getenv("MARIADB_PASSWORD", "flowpassword")
 MARIADB_DB = os.getenv("MARIADB_DB", "flowfirst_db")

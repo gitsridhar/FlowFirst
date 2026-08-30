@@ -52,12 +52,12 @@ echo "  GPG keys imported OK."
 # ---------------------------------------------------------------------------
 echo "[2/5] Writing /etc/yum.repos.d/rabbitmq.repo ..."
 
-sudo tee /etc/yum.repos.d/rabbitmq.repo > /dev/null << EOF
+sudo tee /etc/yum.repos.d/rabbitmq.repo > /dev/null << 'EOF'
 ## ── Erlang ($basearch packages) ─────────────────────────────────────────────
 [rabbitmq-erlang]
 name=rabbitmq-erlang
-baseurl=https://yum1.rabbitmq.com/erlang/el/9/\$basearch
-        https://yum2.rabbitmq.com/erlang/el/9/\$basearch
+baseurl=https://yum1.rabbitmq.com/erlang/el/9/$basearch
+        https://yum2.rabbitmq.com/erlang/el/9/$basearch
 repo_gpgcheck=1
 enabled=1
 gpgkey=https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key
@@ -83,8 +83,8 @@ metadata_expire=300
 ## ── RabbitMQ Server ($basearch packages) ─────────────────────────────────────
 [rabbitmq-server]
 name=rabbitmq-server
-baseurl=https://yum2.rabbitmq.com/rabbitmq/el/9/\$basearch
-        https://yum1.rabbitmq.com/rabbitmq/el/9/\$basearch
+baseurl=https://yum2.rabbitmq.com/rabbitmq/el/9/$basearch
+        https://yum1.rabbitmq.com/rabbitmq/el/9/$basearch
 repo_gpgcheck=1
 enabled=1
 gpgkey=https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key

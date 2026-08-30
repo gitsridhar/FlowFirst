@@ -303,6 +303,12 @@ sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 
 
 ### Phase 6: Pacemaker Cluster & VIP Initialization (Run on Node 1 Only)
 
+> **Note:** `pcs`, `pacemaker`, and `corosync` live in the **High Availability add-on repo**,
+> which is **disabled by default** on all RHEL 9 variants. The script enables it automatically:
+> - RHEL 9 (subscription): `rhel-9-for-<arch>-highavailability-rpms` via `subscription-manager`
+> - CentOS Stream 9 / AlmaLinux / Rocky: known repo IDs via `dnf config-manager --enable`
+> - Fallback: adds `mirror.stream.centos.org/9-stream/HighAvailability` as a direct repo entry
+
 ```bash
 cd /opt/flowfirst
 

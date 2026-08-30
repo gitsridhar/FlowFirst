@@ -28,6 +28,23 @@ echo " Network Interface:   ${VIP_NIC}"
 echo " CIDR Netmask:        ${VIP_CIDR_NETMASK}"
 echo "=================================================================="
 
+# Pre-flight: verify the NIC exists on this node before touching the cluster
+echo "[0/5] Pre-flight: verifying network interface '${VIP_NIC}'..."
+if ! ip link show "${VIP_NIC}" >/dev/null 2>&1; then
+    echo ""
+    echo "ERROR: Network interface '${VIP_NIC}' does not exist on this node."
+    echo ""
+    echo "  Available interfaces:"
+    ip -o link show | awk -F': ' '{print "    " $2}' | grep -v '^    lo$'
+    echo ""
+    echo "  Fix: set VIP_NIC to the correct interface name in .env and re-run."
+    echo "  Auto-detect cluster NIC:  ip route get ${VIP} | awk '{print \$5; exit}'"
+    echo "  List all NICs:            ip -o link show | awk -F': ' '{print \$2}'"
+    exit 1
+fi
+echo "  Interface '${VIP_NIC}' found — proceeding."
+echo ""
+
 # 1. Clean up prior resources if present
 echo "[1/5] Removing existing cluster resources..."
 for res in vip-haproxy-group flowfirst-vip haproxy-clone haproxy-res flowfirst-p1-res-clone flowfirst-p2-res-clone flowfirst-p3-res-clone flowfirst-p4-res-clone flowfirst-p1-res flowfirst-p2-res flowfirst-p3-res flowfirst-p4-res; do

@@ -10,9 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Source environment variables if .env exists
-if [ -f "${ROOT_DIR}/.env" ]; then
-    # shellcheck disable=SC1091
+if [[ -f "${ROOT_DIR}/.env" ]]; then
     set -a
+    # shellcheck disable=SC1091
     source "${ROOT_DIR}/.env"
     set +a
 fi
@@ -24,6 +24,7 @@ NODE2_IP="${2:-${NODE2_IP:-192.168.1.102}}"
 NODE3_NAME="${NODE3_NAME:-node3}"
 NODE3_IP="${3:-${NODE3_IP:-192.168.1.103}}"
 VIP="${4:-${FLOWFIRST_VIP:-192.168.1.100}}"
+VIP_NIC="${VIP_NIC:-}"           # set in .env — see pre-flight check below
 API_PORT="${API_PORT:-8080}"
 MARIADB_PORT="${MARIADB_PORT:-3306}"
 RABBITMQ_PORT="${RABBITMQ_PORT:-5672}"
@@ -31,12 +32,59 @@ HAPROXY_STATS_PORT="${HAPROXY_STATS_PORT:-9000}"
 HAPROXY_STATS_USER="${HAPROXY_STATS_USER:-admin}"
 HAPROXY_STATS_PASS="${HAPROXY_STATS_PASS:-admin123}"
 
+# ---------------------------------------------------------------------------
+# Pre-flight: discover and validate the cluster NIC
+# ---------------------------------------------------------------------------
+# VIP_NIC must be the physical NIC that the cluster traffic uses on THIS node.
+# RHEL 9 uses predictable network interface names (e.g. ens3, ens192, enp0s3,
+# eth0) that differ between hardware/virtualisation platforms.
+# If VIP_NIC is not set in .env, auto-detect the interface that carries
+# the node's own cluster IP (CURRENT_NODE_IP or NODE1_IP as fallback).
+detect_cluster_nic() {
+    local probe_ip="${CURRENT_NODE_IP:-${NODE1_IP}}"
+    local detected
+    detected=$(ip -o route get "${probe_ip}" 2>/dev/null \
+               | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' \
+               | head -1)
+    if [[ -z "${detected}" ]]; then
+        # Fallback: interface that owns the probe_ip
+        detected=$(ip -o addr show \
+                   | awk -v ip="${probe_ip}" '$0 ~ ip {print $2}' \
+                   | head -1)
+    fi
+    echo "${detected}"
+}
+
+if [[ -z "${VIP_NIC}" ]]; then
+    VIP_NIC=$(detect_cluster_nic)
+    if [[ -z "${VIP_NIC}" ]]; then
+        echo "ERROR: Cannot determine cluster NIC automatically."
+        echo "  Set VIP_NIC=<interface> in /opt/flowfirst/.env"
+        echo "  Run: ip -o link show | awk '{print \$2}' | tr -d ':'"
+        echo "  to list available interfaces on this node."
+        exit 1
+    fi
+    echo "  [INFO] VIP_NIC not set in .env — auto-detected: ${VIP_NIC}"
+fi
+
+# Confirm the interface actually exists on this node
+if ! ip link show "${VIP_NIC}" &>/dev/null; then
+    echo "ERROR: Interface '${VIP_NIC}' does not exist on this node."
+    echo "  Available interfaces:"
+    ip -o link show | awk '{print "   ", $2}' | tr -d ':'
+    echo ""
+    echo "  Fix: set VIP_NIC=<correct-interface> in /opt/flowfirst/.env"
+    echo "  Common RHEL 9 names: ens3, ens192, enp0s3, enp1s0, eth0"
+    exit 1
+fi
+
 echo "=================================================================="
 echo " Setting up HAProxy Load Balancer for FlowFirst Multi-Node Cluster"
 echo " Node 1:          ${NODE1_NAME} (${NODE1_IP})"
 echo " Node 2:          ${NODE2_NAME} (${NODE2_IP})"
 echo " Node 3:          ${NODE3_NAME} (${NODE3_IP})"
 echo " Virtual IP (VIP):${VIP}"
+echo " VIP NIC:         ${VIP_NIC}"
 echo " API Port:        ${API_PORT}"
 echo " MariaDB Port:    ${MARIADB_PORT}"
 echo " RabbitMQ Port:   ${RABBITMQ_PORT}"
@@ -44,18 +92,32 @@ echo " Stats Dashboard: :${HAPROXY_STATS_PORT}"
 echo "=================================================================="
 
 # 1. Install HAProxy
-echo "[1/5] Installing HAProxy..."
+echo "[1/6] Installing HAProxy..."
 if command -v dnf >/dev/null 2>&1; then
     sudo dnf install -y haproxy
 fi
 
-# 2. Allow binding to non-local IP addresses (crucial for Virtual IP / Pacemaker VIP)
-echo "[2/5] Configuring sysctl net.ipv4.ip_nonlocal_bind..."
+# 2. Allow HAProxy to bind to the VIP address even when Pacemaker hasn't
+#    assigned it to this node yet.  Without this, HAProxy fails to start
+#    on nodes that don't currently hold the VIP.
+echo "[2/6] Configuring net.ipv4.ip_nonlocal_bind=1 ..."
 sudo sysctl -w net.ipv4.ip_nonlocal_bind=1
-echo "net.ipv4.ip_nonlocal_bind=1" | sudo tee /etc/sysctl.d/99-haproxy-nonlocalbind.conf > /dev/null
+echo "net.ipv4.ip_nonlocal_bind=1" | \
+    sudo tee /etc/sysctl.d/99-haproxy-nonlocalbind.conf > /dev/null
+# Apply immediately and persist across reboots
+sudo sysctl --system | grep nonlocal_bind || true
 
-# 3. Generate HAProxy configuration from template using environment variables
-echo "[3/5] Generating /etc/haproxy/haproxy.cfg..."
+# 3. SELinux: allow HAProxy to bind to cluster ports
+echo "[3/6] Configuring SELinux for HAProxy..."
+if command -v getsebool &>/dev/null && sudo getsebool haproxy_connect_any &>/dev/null; then
+    sudo setsebool -P haproxy_connect_any 1
+    echo "  SELinux: haproxy_connect_any set to ON"
+else
+    echo "  SELinux: haproxy_connect_any not available — skipping"
+fi
+
+# 4. Generate HAProxy configuration from template
+echo "[4/6] Generating /etc/haproxy/haproxy.cfg..."
 sed \
     -e "s/__NODE1_NAME__/${NODE1_NAME}/g" \
     -e "s/__NODE1_IP__/${NODE1_IP}/g" \
@@ -71,8 +133,8 @@ sed \
     -e "s/__HAPROXY_STATS_PASS__/${HAPROXY_STATS_PASS}/g" \
     "${SCRIPT_DIR}/haproxy.cfg.template" | sudo tee /etc/haproxy/haproxy.cfg > /dev/null
 
-# 4. Open firewall ports
-echo "[4/5] Opening firewall ports (: ${API_PORT}, : ${MARIADB_PORT}, : ${RABBITMQ_PORT}, : ${HAPROXY_STATS_PORT})..."
+# 5. Open firewall ports
+echo "[5/6] Opening firewall ports..."
 if command -v firewall-cmd >/dev/null 2>&1 && sudo systemctl is-active --quiet firewalld; then
     sudo firewall-cmd --permanent --add-port="${API_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${MARIADB_PORT}/tcp"
@@ -81,13 +143,14 @@ if command -v firewall-cmd >/dev/null 2>&1 && sudo systemctl is-active --quiet f
     sudo firewall-cmd --reload
 fi
 
-# 5. Validate configuration syntax
-echo "[5/5] Validating configuration syntax..."
+# 6. Validate configuration syntax
+echo "[6/6] Validating HAProxy configuration syntax..."
 sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 
 echo ""
 echo "=================================================================="
 echo " HAProxy configuration successfully installed and verified!"
-echo " Note: In a Pacemaker-managed cluster, HAProxy will be controlled"
-echo " as a Pacemaker cluster resource (or clone)."
+echo " VIP_NIC used: ${VIP_NIC}"
+echo " Note: HAProxy is managed by Pacemaker as part of vip-haproxy-group."
+echo " Do NOT start haproxy.service directly — let Pacemaker control it."
 echo "=================================================================="

@@ -340,11 +340,167 @@ The script performs these steps automatically:
 
 ---
 
-### Phase 4: Setup HAProxy on All 3 Nodes
+### Phase 4: Identify Your Cluster NIC & Set `VIP_NIC` on Each Node
+
+> **Critical — do this before running `setup_haproxy.sh` or `configure_multinode_resources.sh`.**
+> RHEL 9 uses *predictable NIC names* (`ens3`, `ens192`, `enp0s3`) — NOT `eth0`.
+> `VIP_NIC` must be the physical cluster interface name on **each individual node**.
+> It may differ across nodes if hardware varies.
+
+#### 4a — Discover the correct NIC name on each node
+
+```bash
+# Option 1: auto-detect via routing table (recommended)
+ip route get 192.168.1.100 | awk '{print $5; exit}'
+# Example output:  ens3
+
+# Option 2: list all non-loopback interfaces
+ip -o link show | awk -F': ' '{print $2}' | grep -v lo
+# Example output:
+#   ens3
+#   ens192
+
+# Option 3: show interface with IP
+ip -4 addr show | grep -v lo
+```
+
+#### 4b — Set `VIP_NIC` in `.env` on each node
+
+Edit `/opt/flowfirst/.env` and set `VIP_NIC` to the name found above.
+The value may be different on each node:
+
+```ini
+# On node1 (e.g. KVM guest with virtio NIC)
+VIP_NIC=ens3
+
+# On node2 (e.g. physical server with Broadcom NIC)
+VIP_NIC=enp0s3
+
+# On node3 (e.g. VMware guest)
+VIP_NIC=ens192
+```
+
+#### 4c — Run HAProxy setup on all 3 nodes
+
 ```bash
 cd /opt/flowfirst
-# Automatically generates /etc/haproxy/haproxy.cfg using IPs and ports from .env
+# Generates /etc/haproxy/haproxy.cfg from .env, sets ip_nonlocal_bind, SELinux boolean
 sudo ./haproxy/setup_haproxy.sh
+```
+
+#### 4d — Verify HAProxy starts cleanly
+
+```bash
+sudo systemctl status haproxy
+sudo journalctl -u haproxy -n 30 --no-pager
+```
+
+---
+
+#### HAProxy Troubleshooting Reference
+
+Three distinct root causes produce `haproxy.service: start job failed`. Each has a different fix:
+
+---
+
+**Failure 1 — Wrong `VIP_NIC` name**
+
+Symptom:
+```
+[ALERT] cannot find interface ens999 (bind ... dev ens999)
+```
+
+Fix:
+```bash
+# Find the correct name
+ip -o link show | awk -F': ' '{print $2}' | grep -v lo
+
+# Update .env on this node
+sed -i "s/^VIP_NIC=.*/VIP_NIC=ens3/" /opt/flowfirst/.env
+
+# Re-run haproxy setup
+sudo ./haproxy/setup_haproxy.sh
+```
+
+---
+
+**Failure 2 — `ip_nonlocal_bind` not set (VIP not yet active)**
+
+HAProxy binds to the VIP address before Pacemaker has assigned it to any node. The kernel rejects binding to an IP that does not currently exist on any interface.
+
+Symptom:
+```
+[ALERT] cannot bind socket [192.168.1.100:8080]
+```
+
+Fix (the setup script already does this, but if running manually):
+```bash
+# Enable immediately
+sudo sysctl -w net.ipv4.ip_nonlocal_bind=1
+
+# Persist across reboots
+echo "net.ipv4.ip_nonlocal_bind = 1" | sudo tee /etc/sysctl.d/99-haproxy-nonlocal.conf
+sudo sysctl -p /etc/sysctl.d/99-haproxy-nonlocal.conf
+
+# Restart HAProxy
+sudo systemctl restart haproxy
+```
+
+Verify:
+```bash
+sysctl net.ipv4.ip_nonlocal_bind
+# Expected: net.ipv4.ip_nonlocal_bind = 1
+```
+
+---
+
+**Failure 3 — SELinux blocking HAProxy port binding**
+
+RHEL 9 ships with SELinux in `Enforcing` mode. Without the `haproxy_connect_any` boolean, HAProxy cannot bind to custom ports such as `8080`, `3306`, or `9000`.
+
+Symptom — check the audit log:
+```bash
+sudo ausearch -m avc -ts recent | grep haproxy
+# Example:
+#   avc:  denied { name_bind } for  comm="haproxy" ...
+#   tcontext=system_u:object_r:http_cache_port_t:s0
+```
+
+Fix (the setup script already does this, but if needed manually):
+```bash
+# Allow HAProxy to connect/bind to any port
+sudo setsebool -P haproxy_connect_any 1
+
+# Confirm
+getsebool haproxy_connect_any
+# Expected: haproxy_connect_any --> on
+
+# Restart HAProxy
+sudo systemctl restart haproxy
+```
+
+---
+
+**Quick all-in-one HAProxy health check:**
+
+```bash
+# 1. Kernel flag
+sysctl net.ipv4.ip_nonlocal_bind
+
+# 2. SELinux boolean
+getsebool haproxy_connect_any
+
+# 3. NIC exists
+ip link show "$(grep ^VIP_NIC /opt/flowfirst/.env | cut -d= -f2)"
+
+# 4. Config syntax
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+
+# 5. Service status
+sudo systemctl status haproxy
+
+# 6. Stats page (from any node once Pacemaker has the VIP live)
+curl -s -u admin:admin123 http://192.168.1.100:9000/stats | grep -c "pxname"
 ```
 
 ---

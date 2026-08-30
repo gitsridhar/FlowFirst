@@ -301,26 +301,44 @@ sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 
 
 ---
 
-### Phase 6: Pacemaker Cluster & VIP Initialization (Run on Node 1 Only)
+### Phase 6: Pacemaker Cluster & VIP Initialization
 
-> **Note:** `pcs`, `pacemaker`, and `corosync` live in the **High Availability add-on repo**,
-> which is **disabled by default** on all RHEL 9 variants. The script enables it automatically:
-> - RHEL 9 (subscription): `rhel-9-for-<arch>-highavailability-rpms` via `subscription-manager`
-> - CentOS Stream 9 / AlmaLinux / Rocky: known repo IDs via `dnf config-manager --enable`
-> - Fallback: adds `mirror.stream.centos.org/9-stream/HighAvailability` as a direct repo entry
+> **Note:** The cluster setup is a **two-step process**. `pcsd` must be running and
+> reachable on port 2224 on **all three nodes** before `pcs host auth` can succeed.
+> The script handles this with a `--prepare-node` flag.
+
+#### Step 6a — Run on ALL THREE nodes first (node1, node2, node3)
+
+```bash
+cd /opt/flowfirst
+sudo ./pacemaker/setup_multinode_cluster.sh --prepare-node
+```
+
+This single command on each node:
+1. Enables the HA repo (or adds CentOS Stream 9 HA + AppStream + BaseOS as fallback)
+2. Installs `pcs pacemaker corosync fence-agents-all haproxy`
+3. Enables and starts `pcsd` (TCP 2224)
+4. Sets the `hacluster` password (read from `.env` → `HACLUSTER_PASS`, default `hacluster123`)
+5. Opens firewall ports: `2224/tcp` `3121/tcp` `5403/tcp` `5404/udp` `5405/udp`
+6. Adds all three node IPs to `/etc/hosts`
+
+#### Step 6b — Run on NODE 1 ONLY after all three nodes are prepared
 
 ```bash
 cd /opt/flowfirst
 
-# 1. Initialize Corosync 3-node cluster using cluster definitions from .env
+# Cluster init — pre-flight checks port 2224 on all nodes before proceeding
 sudo ./pacemaker/setup_multinode_cluster.sh
 
-# 2. Deploy Virtual IP (VIP), HAProxy group, and Cloned Pipeline Resources using VIP from .env
+# Deploy Virtual IP (VIP), HAProxy group, and cloned pipeline resources
 sudo ./pacemaker/configure_multinode_resources.sh
 
-# 3. Check Pacemaker Status
+# Verify
 sudo pcs status
 ```
+
+The script runs a **pre-flight check** before `pcs host auth` — it tests TCP port 2224
+on each node and exits with an actionable error if any node is not yet prepared.
 
 ---
 

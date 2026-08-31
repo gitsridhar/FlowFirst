@@ -178,15 +178,128 @@ erDiagram
 
 ---
 
-### Phase 0: Bootstrap — Repository Clone, Python Environment & Time Sync (All 3 Nodes)
+### Phase 0: Bootstrap — Time Sync, Repository Clone & Python Environment (All 3 Nodes)
 
 > **Do this first on every node — before any service is installed.**
-> The repository must be present before any other script can run.
-> Chrony must be synchronised before RabbitMQ, Galera, or Pacemaker are installed.
+> Time must be synchronised first: `git clone`, `pip install`, and every subsequent
+> script depend on a correct system clock. Chrony is installed without the repo
+> because `dnf install chrony` needs no local files.
 
 ---
 
-#### Phase 0a — Clone the Repository & Set Up the Python Environment
+#### Phase 0a — Time Synchronisation — Install & Configure Chrony
+
+> **Do this before cloning the repository or installing any packages.**
+>
+> RabbitMQ **will not start or join a cluster** if the system clock is not synchronised.
+> Erlang's distribution protocol and cookie handshake are time-sensitive.
+> A drift of more than a few seconds causes node rejection errors, silent queue
+> disconnections, and Galera wsrep certification failures. Pacemaker fencing
+> decisions can also race incorrectly on nodes with divergent clocks.
+
+```bash
+# chrony can be installed directly — no repo clone needed
+sudo dnf install -y chrony
+sudo systemctl enable --now chronyd
+sudo chronyc makestep
+```
+
+To use a custom NTP server (recommended for air-gapped environments), run the full
+setup script **after** the repo is cloned in Phase 0b:
+
+```bash
+# After Phase 0b — re-configure with a custom server if needed
+cd /opt/flowfirst
+sudo ./scripts/setup_chronyd.sh 192.168.1.1    # local NTP server
+# or
+sudo ./scripts/setup_chronyd.sh time.google.com
+```
+
+The full `setup_chronyd.sh` script performs these steps automatically:
+1. Installs `chrony` via `dnf` (skips if already installed)
+2. Writes a clean `/etc/chrony.conf` with the specified server + `pool.ntp.org` fallback
+3. Enables and restarts `chronyd`
+4. Forces an immediate time step with `chronyc makestep` (no waiting for gradual slew)
+5. Prints `chronyc tracking` and `chronyc sources` output
+
+**Verify sync on every node before continuing to Phase 0b:**
+
+```bash
+chronyc tracking
+# Key fields to check:
+#   Reference ID  — should show NTP server IP, not 7F7F0101 (local fallback)
+#   System time   — offset should be < 0.1 seconds
+#   Leap status   — must say "Normal"
+
+# Quick one-liner for all three nodes:
+for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+    echo "=== ${node} ==="
+    ssh "${node}" "chronyc tracking | grep -E 'Reference|System time|Leap'"
+done
+```
+
+#### Optional: `CHRONY_NTP_SERVER` in `.env`
+
+If all three nodes use the same internal NTP server, add this to `/opt/flowfirst/.env`
+so `setup_chronyd.sh` picks it up automatically without a command-line argument:
+
+```ini
+CHRONY_NTP_SERVER=192.168.1.1
+```
+
+#### Chrony Troubleshooting Reference
+
+**Problem: `Leap status: Not synchronised`**
+
+The daemon is running but cannot reach any NTP server yet. Common on fresh installs.
+
+```bash
+# Check which servers are being contacted
+chronyc sources -v
+
+# If all show "?" (no response), verify connectivity:
+ping pool.ntp.org
+
+# Force a manual query to a specific server:
+chronyc -a 'server pool.ntp.org iburst'
+
+# Wait up to 60 seconds, then recheck:
+sleep 30 && chronyc tracking | grep "Leap status"
+```
+
+**Problem: `Reference ID: 7F7F0101` (local fallback)**
+
+chronyd is not reaching any external server and has fallen back to its own internal clock.
+This is **not** synchronised to real time.
+
+```bash
+# Confirm firewall allows outbound UDP 123
+sudo firewall-cmd --list-all | grep 123
+
+# Open it if missing:
+sudo firewall-cmd --permanent --add-service=ntp
+sudo firewall-cmd --reload
+
+# Restart and recheck:
+sudo systemctl restart chronyd
+sleep 10 && chronyc tracking
+```
+
+**Problem: chronyd running but RabbitMQ still rejects cluster join**
+
+After fixing the clock, restart Erlang's epmd and RabbitMQ so the new system time
+is reflected in the Erlang runtime:
+
+```bash
+sudo systemctl stop rabbitmq-server
+sudo epmd -kill 2>/dev/null || true
+sudo systemctl start rabbitmq-server
+sudo rabbitmqctl cluster_status
+```
+
+---
+
+#### Phase 0b — Clone the Repository & Set Up the Python Environment
 
 ```bash
 # 1. Install base utilities and Python
@@ -267,115 +380,6 @@ CURRENT_NODE_IP=192.168.1.103
 > `${VAR}` anywhere. `config.py` guards against this with `_int_env` /
 > `_str_env` helpers that warn and fall back to defaults, but the `.env`
 > file is always the right place to fix it.
-
----
-
-#### Phase 0b — Time Synchronisation — Install & Configure Chrony
-
-> **Do this before any service install — before RabbitMQ, before Galera, before Pacemaker.**
->
-> RabbitMQ **will not start or join a cluster** if the system clock is not synchronised.
-> Erlang's distribution protocol and cookie handshake are time-sensitive.
-> A drift of more than a few seconds causes node rejection errors, silent queue
-> disconnections, and Galera wsrep certification failures. Pacemaker fencing
-> decisions can also race incorrectly on nodes with divergent clocks.
-
-```bash
-cd /opt/flowfirst
-sudo ./scripts/setup_chronyd.sh
-```
-
-The script accepts an optional NTP server argument (default: `pool.ntp.org`):
-
-```bash
-# Use your site's local NTP server (recommended for air-gapped environments)
-sudo ./scripts/setup_chronyd.sh 192.168.1.1
-
-# Use Google Public NTP
-sudo ./scripts/setup_chronyd.sh time.google.com
-```
-
-The script performs these steps automatically:
-1. Installs `chrony` via `dnf` (skips if already installed)
-2. Writes a clean `/etc/chrony.conf` with the specified server + `pool.ntp.org` fallback
-3. Enables and restarts `chronyd`
-4. Forces an immediate time step with `chronyc makestep` (no waiting for gradual slew)
-5. Prints `chronyc tracking` and `chronyc sources` output
-
-**Verify sync on every node before continuing:**
-
-```bash
-chronyc tracking
-# Key fields to check:
-#   Reference ID  — should show NTP server IP, not 7F7F0101 (local fallback)
-#   System time   — offset should be < 0.1 seconds
-#   Leap status   — must say "Normal"
-
-# Quick one-liner for all three nodes:
-for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
-    echo "=== ${node} ==="
-    ssh "${node}" "chronyc tracking | grep -E 'Reference|System time|Leap'"
-done
-```
-
-#### Optional: `CHRONY_NTP_SERVER` in `.env`
-
-If all three nodes use the same internal NTP server, add this to `/opt/flowfirst/.env`
-so `setup_chronyd.sh` picks it up automatically without a command-line argument:
-
-```ini
-CHRONY_NTP_SERVER=192.168.1.1
-```
-
-#### Chrony Troubleshooting Reference
-
-**Problem: `Leap status: Not synchronised`**
-
-The daemon is running but cannot reach any NTP server yet. Common on fresh installs.
-
-```bash
-# Check which servers are being contacted
-chronyc sources -v
-
-# If all show "?" (no response), verify connectivity:
-ping pool.ntp.org
-
-# Force a manual query to a specific server:
-chronyc -a 'server pool.ntp.org iburst'
-
-# Wait up to 60 seconds, then recheck:
-sleep 30 && chronyc tracking | grep "Leap status"
-```
-
-**Problem: `Reference ID: 7F7F0101` (local fallback)**
-
-chronyd is not reaching any external server and has fallen back to its own internal clock.
-This is **not** synchronised to real time.
-
-```bash
-# Confirm firewall allows outbound UDP 123
-sudo firewall-cmd --list-all | grep 123
-
-# Open it if missing:
-sudo firewall-cmd --permanent --add-service=ntp
-sudo firewall-cmd --reload
-
-# Restart and recheck:
-sudo systemctl restart chronyd
-sleep 10 && chronyc tracking
-```
-
-**Problem: chronyd running but RabbitMQ still rejects cluster join**
-
-After fixing the clock, restart Erlang's epmd and RabbitMQ so the new system time
-is reflected in the Erlang runtime:
-
-```bash
-sudo systemctl stop rabbitmq-server
-sudo epmd -kill 2>/dev/null || true
-sudo systemctl start rabbitmq-server
-sudo rabbitmqctl cluster_status
-```
 
 ---
 

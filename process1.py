@@ -24,7 +24,19 @@ rabbitmq_channel = None
 def init_rabbitmq():
     """Establish and initialize shared RabbitMQ connection & channel."""
     global rabbitmq_connection, rabbitmq_channel
-    rabbitmq_connection = get_connection()
+
+    # Retry loop — Pacemaker may start this process before RabbitMQ is ready.
+    for attempt in range(1, 11):
+        try:
+            rabbitmq_connection = get_connection()
+            break
+        except Exception as e:
+            print(f"[Process 1 API] RabbitMQ not ready (attempt {attempt}/10): {e} — retrying in 5s...")
+            time.sleep(5)
+    else:
+        print("[Process 1 API] Could not connect to RabbitMQ after 10 attempts. Exiting.")
+        raise SystemExit(1)
+
     rabbitmq_channel = rabbitmq_connection.channel()
     setup_queues(rabbitmq_channel)
     print(f"[Process 1 API] Connected to RabbitMQ at {rabbitmq_connection._connected_to}")

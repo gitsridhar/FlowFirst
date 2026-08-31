@@ -80,7 +80,20 @@ def main():
     except Exception as e:
         print(f"[Process 4] Warning: Could not auto-initialize MariaDB (is MariaDB running?): {e}")
 
-    connection = get_connection()
+    # Retry loop — Pacemaker may start this process before RabbitMQ is ready.
+    connection = None
+    for attempt in range(1, 11):
+        try:
+            connection = get_connection()
+            break
+        except Exception as e:
+            print(f"[Process 4] RabbitMQ not ready (attempt {attempt}/10): {e} — retrying in 5s...")
+            import time as _time; _time.sleep(5)
+    if connection is None:
+        print("[Process 4] Could not connect to RabbitMQ after 10 attempts. Exiting.")
+        raise SystemExit(1)
+
+    print(f"[Process 4] Connected to RabbitMQ at {connection._connected_to}")
     channel = connection.channel()
     setup_queues(channel)
 

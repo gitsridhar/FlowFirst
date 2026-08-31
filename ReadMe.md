@@ -512,12 +512,28 @@ cd /opt/flowfirst
 sudo ./haproxy/setup_haproxy.sh
 ```
 
-#### 3d — Verify HAProxy starts cleanly
+#### 3d — Verify HAProxy configuration syntax only
+
+> **Do NOT start `haproxy.service` manually.** HAProxy is managed exclusively by
+> Pacemaker as part of `vip-haproxy-group`. Starting it directly here will conflict
+> with Pacemaker's resource management once the cluster is initialised.
+> The only check needed at this stage is that the generated config file is valid.
 
 ```bash
-sudo systemctl status haproxy
-sudo journalctl -u haproxy -n 30 --no-pager
+# Validate config syntax — no service start
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+
+# Confirm TCP frontends bind to the VIP, not wildcard
+grep "bind" /etc/haproxy/haproxy.cfg
+# Expected:
+#   bind *:8080               ← REST API
+#   bind *:9000               ← stats
+#   bind 192.168.1.100:3306   ← MariaDB (VIP only — no port conflict)
+#   bind 192.168.1.100:5672   ← RabbitMQ (VIP only — no port conflict)
 ```
+
+HAProxy will be started automatically by Pacemaker in Phase 5 when the VIP is
+assigned. Verify it is running at that point — see **Step 5c** below.
 
 ---
 
@@ -665,7 +681,7 @@ grep "bind" /etc/haproxy/haproxy.cfg
 
 ---
 
-**Quick all-in-one HAProxy health check:**
+**Quick all-in-one HAProxy pre-start check** (run after Phase 3, before Phase 5):
 
 ```bash
 # 1. Kernel flag
@@ -679,13 +695,11 @@ ip link show "$(grep ^VIP_NIC /opt/flowfirst/.env | cut -d= -f2)"
 
 # 4. Config syntax
 sudo haproxy -c -f /etc/haproxy/haproxy.cfg
-
-# 5. Service status
-sudo systemctl status haproxy
-
-# 6. Stats page (from any node once Pacemaker has the VIP live)
-curl -s -u admin:admin123 http://192.168.1.100:9000/stats | grep -c "pxname"
 ```
+
+> **Do not run `systemctl status haproxy` or `systemctl start haproxy` here.**
+> HAProxy service status is only meaningful after Pacemaker brings it up in Phase 5.
+> See **Step 5c** for the post-Pacemaker HAProxy verification.
 
 ---
 
@@ -733,12 +747,41 @@ sudo ./pacemaker/setup_multinode_cluster.sh
 # Deploy Virtual IP (VIP), HAProxy group, and cloned pipeline resources
 sudo ./pacemaker/configure_multinode_resources.sh
 
-# Verify
+# Verify cluster and all resources are started
 sudo pcs status
 ```
 
 The script runs a **pre-flight check** before `pcs host auth` — it tests TCP port 2224
 on each node and exits with an actionable error if any node is not yet prepared.
+
+#### Step 5c — Verify HAProxy is running under Pacemaker
+
+Once `pcs status` shows all resources started, confirm HAProxy came up correctly
+under Pacemaker's control on the node that holds the VIP:
+
+```bash
+# Confirm Pacemaker started haproxy-res as part of vip-haproxy-group
+sudo pcs status | grep -A5 "vip-haproxy-group"
+# Expected: haproxy-res Started on one node alongside flowfirst-vip
+
+# Confirm HAProxy process is running
+sudo systemctl status haproxy --no-pager
+
+# Confirm HAProxy is listening on the expected ports
+sudo ss -tlnp | grep haproxy
+# Expected lines:
+#   0.0.0.0:8080    ← REST API frontend
+#   0.0.0.0:9000    ← stats dashboard
+#   192.168.1.100:3306  ← MariaDB (VIP only, on the node holding the VIP)
+#   192.168.1.100:5672  ← RabbitMQ (VIP only)
+
+# Confirm stats page is reachable via the VIP
+curl -s -u admin:admin123 http://192.168.1.100:9000/stats | grep -c "pxname"
+# Expected: non-zero (one line per backend server)
+
+# Review HAProxy logs if anything looks wrong
+sudo journalctl -u haproxy -n 30 --no-pager
+```
 
 ---
 

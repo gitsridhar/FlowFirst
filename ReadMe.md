@@ -523,7 +523,7 @@ sudo journalctl -u haproxy -n 30 --no-pager
 
 #### HAProxy Troubleshooting Reference
 
-Three distinct root causes produce `haproxy.service: start job failed`. Each has a different fix:
+Five distinct root causes produce `haproxy.service: start job failed`. Each has a different fix:
 
 ---
 
@@ -601,6 +601,66 @@ getsebool haproxy_connect_any
 
 # Restart HAProxy
 sudo systemctl restart haproxy
+```
+
+---
+
+**Failure 4 — `option forwardfor` in TCP frontends**
+
+`forwardfor` is an HTTP-only directive. Placing it in the `defaults` block causes
+HAProxy to reject the config when any TCP frontend or backend inherits it.
+
+Symptom:
+```
+[WARNING] config : 'option forwardfor' ignored for frontend mariadb_galera_front
+           as it requires HTTP mode.
+[WARNING] config : 'option forwardfor' ignored for backend mariadb_galera_back
+           as it requires HTTP mode.
+```
+
+Fix (already corrected in `haproxy.cfg.template`):
+`forwardfor` must be removed from `defaults` and placed only inside the HTTP
+frontend (`flowfirst_api_front`) and HTTP backend (`flowfirst_api_back`).
+Re-run setup to regenerate the config:
+
+```bash
+cd /opt/flowfirst
+sudo ./haproxy/setup_haproxy.sh
+```
+
+---
+
+**Failure 5 — `bind *:3306` / `bind *:5672` — port already in use**
+
+HAProxy binds TCP frontends for MariaDB (3306) and RabbitMQ (5672) to `0.0.0.0`,
+but MariaDB and RabbitMQ are already listening on those ports on every cluster node.
+Two processes cannot share the same `0.0.0.0:<port>` binding.
+
+Symptom:
+```
+[ALERT] : Starting frontend mariadb_galera_front: cannot bind socket
+          [0.0.0.0:3306]: Address already in use
+[ALERT] : Starting frontend rabbitmq_amqp_front: cannot bind socket
+          [0.0.0.0:5672]: Address already in use
+```
+
+Fix (already corrected in `haproxy.cfg.template`):
+The TCP frontends now bind to the **VIP address only** (`__VIP__:3306` /
+`__VIP__:5672`). The VIP is held by exactly one node at a time (Pacemaker).
+MariaDB and RabbitMQ listen on the node's own IP; HAProxy listens on the VIP — no
+collision is possible. Re-run setup to regenerate the config:
+
+```bash
+cd /opt/flowfirst
+sudo ./haproxy/setup_haproxy.sh
+
+# Confirm the TCP frontends bind to the VIP, not *
+grep "bind" /etc/haproxy/haproxy.cfg
+# Expected:
+#   bind *:8080               ← REST API (OK to use * — no conflict)
+#   bind *:9000               ← stats
+#   bind 192.168.1.100:3306   ← MariaDB (VIP only)
+#   bind 192.168.1.100:5672   ← RabbitMQ (VIP only)
 ```
 
 ---

@@ -20,7 +20,6 @@ defaults
     option                  httplog
     option                  dontlognull
     option                  http-server-close
-    option forwardfor       except 127.0.0.0/8
     option                  redispatch
     retries                 3
     timeout http-request    10s
@@ -51,6 +50,7 @@ frontend flowfirst_api_front
     bind *:__API_PORT__
     mode http
     option httplog
+    option forwardfor except 127.0.0.0/8
     default_backend flowfirst_api_back
 
 #---------------------------------------------------------------------
@@ -59,6 +59,7 @@ frontend flowfirst_api_front
 backend flowfirst_api_back
     mode http
     balance roundrobin
+    option forwardfor except 127.0.0.0/8
     option httpchk GET /health
     http-check expect status 200
     default-server inter 3s fall 2 rise 2
@@ -71,8 +72,12 @@ backend flowfirst_api_back
 #---------------------------------------------------------------------
 # Load balancing & Failover for MariaDB Galera Cluster (Port 3306)
 #---------------------------------------------------------------------
+# Bind to VIP only — MariaDB and RabbitMQ already own their ports on 0.0.0.0
+# on every cluster node.  Binding to the VIP address avoids the "address already
+# in use" conflict: the real services listen on the node IP, HAProxy listens on
+# the VIP (which Pacemaker assigns to exactly one node at a time).
 frontend mariadb_galera_front
-    bind *:__MARIADB_PORT__
+    bind __VIP__:__MARIADB_PORT__
     mode tcp
     option tcplog
     default_backend mariadb_galera_back
@@ -91,7 +96,7 @@ backend mariadb_galera_back
 # Load balancing for RabbitMQ AMQP (Port 5672)
 #---------------------------------------------------------------------
 frontend rabbitmq_amqp_front
-    bind *:__RABBITMQ_PORT__
+    bind __VIP__:__RABBITMQ_PORT__
     mode tcp
     option tcplog
     default_backend rabbitmq_amqp_back

@@ -125,6 +125,7 @@ sed \
     -e "s/__NODE2_IP__/${NODE2_IP}/g" \
     -e "s/__NODE3_NAME__/${NODE3_NAME}/g" \
     -e "s/__NODE3_IP__/${NODE3_IP}/g" \
+    -e "s/__VIP__/${VIP}/g" \
     -e "s/__API_PORT__/${API_PORT}/g" \
     -e "s/__MARIADB_PORT__/${MARIADB_PORT}/g" \
     -e "s/__RABBITMQ_PORT__/${RABBITMQ_PORT}/g" \

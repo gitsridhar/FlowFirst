@@ -110,13 +110,21 @@ ALL_QUEUES = [
 
 
 def get_connection():
-    """Create and return a blocking connection to RabbitMQ with multi-node failover support."""
+    """Create and return a blocking connection to RabbitMQ with multi-node failover support.
+
+    When a list of ConnectionParameters is passed to BlockingConnection (multi-host
+    path), pika picks the first reachable broker but does NOT expose a public .params
+    attribute on the returned connection object — accessing .params raises AttributeError.
+    To allow callers to log the connected address without depending on pika internals,
+    this function attaches a plain `_connected_to` string attribute to the connection
+    before returning it.
+    """
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
 
-    # If hosts are supplied, try them in order or pick active VIP
+    # If hosts are supplied, try them in order (pika picks the first reachable one)
     if RABBITMQ_HOSTS:
         hosts = [h.strip() for h in RABBITMQ_HOSTS.split(",") if h.strip()]
-        params = [
+        params_list = [
             pika.ConnectionParameters(
                 host=h.split(":")[0],
                 port=int(h.split(":")[1]) if ":" in h else RABBITMQ_PORT,
@@ -126,7 +134,14 @@ def get_connection():
             )
             for h in hosts
         ]
-        return pika.BlockingConnection(params)
+        conn = pika.BlockingConnection(params_list)
+        # pika internally stores the winning params on the impl layer; surface it safely
+        resolved = getattr(getattr(conn, "_impl", None), "params", None)
+        if resolved is not None:
+            conn._connected_to = f"{resolved.host}:{resolved.port}"
+        else:
+            conn._connected_to = RABBITMQ_HOSTS  # fallback: show the whole list
+        return conn
 
     parameters = pika.ConnectionParameters(
         host=RABBITMQ_HOST,
@@ -135,7 +150,9 @@ def get_connection():
         heartbeat=60,
         blocked_connection_timeout=300,
     )
-    return pika.BlockingConnection(parameters)
+    conn = pika.BlockingConnection(parameters)
+    conn._connected_to = f"{RABBITMQ_HOST}:{RABBITMQ_PORT}"
+    return conn
 
 
 def setup_queues(channel):

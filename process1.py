@@ -27,7 +27,7 @@ def init_rabbitmq():
     rabbitmq_connection = get_connection()
     rabbitmq_channel = rabbitmq_connection.channel()
     setup_queues(rabbitmq_channel)
-    print(f"[Process 1 API] Connected to RabbitMQ at {rabbitmq_connection.params.host}:{rabbitmq_connection.params.port}")
+    print(f"[Process 1 API] Connected to RabbitMQ at {rabbitmq_connection._connected_to}")
 
 
 def ensure_channel():

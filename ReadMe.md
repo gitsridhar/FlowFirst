@@ -1273,7 +1273,7 @@ mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} 
 
 ---
 
-### Scenario 31: Galera IST — Incremental State Transfer
+### Scenario 5: Galera IST — Incremental State Transfer
 
 #### What IST is and when it is used
 
@@ -1293,7 +1293,7 @@ gcache ring buffer on donor:
          gap = 150 write-sets  ← fits in gcache → IST
 ```
 
-#### 31.1 — Confirm gcache.size in the running cluster
+#### 5.1 — Confirm gcache.size in the running cluster
 
 ```bash
 # On any node
@@ -1304,7 +1304,7 @@ sudo mysql -u root -p -e "SHOW VARIABLES LIKE 'wsrep_provider_options'\G" \
 wsrep_provider_options: ... gcache.size = 536870912; ...   ← 512 MB
 ```
 
-#### 31.2 — Trigger a short outage and force IST
+#### 5.2 — Trigger a short outage and force IST
 
 ```bash
 # Step 1: Stop node3
@@ -1335,7 +1335,7 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_last_committed';"
 +---------------------+-------+
 ```
 
-#### 31.3 — Restart node3 and watch IST execute
+#### 5.3 — Restart node3 and watch IST execute
 
 ```bash
 # On node3
@@ -1391,7 +1391,7 @@ sudo grep -i "IST\|incremental" /var/log/mariadb/mariadb.log | tail -5
 
 ---
 
-### Scenario 32: Galera SST — State Snapshot Transfer
+### Scenario 6: Galera SST — State Snapshot Transfer
 
 #### What SST is and when it is used
 
@@ -1409,7 +1409,7 @@ gcache ring buffer on donor:
   joiner last seqno = 200  ← outside gcache window → SST required
 ```
 
-#### 32.1 — Set wsrep_sst_method (choose rsync or mariabackup)
+#### 6.1 — Set wsrep_sst_method (choose rsync or mariabackup)
 
 **rsync** (default — no extra packages required):
 ```bash
@@ -1431,7 +1431,7 @@ After changing `wsrep_sst_method`, restart MariaDB on all nodes **one at a time*
 sudo systemctl restart mariadb   # on node3 first, then node2, then node1
 ```
 
-#### 32.2 — Force SST by making the joiner fall outside the gcache window
+#### 6.2 — Force SST by making the joiner fall outside the gcache window
 
 To reliably trigger SST (rather than IST), set `gcache.size` to a very small value **before** the outage so the cache fills quickly:
 
@@ -1465,7 +1465,7 @@ seqno:   -1      ← forces Galera to request SST on next start
 safe_to_bootstrap: 0
 ```
 
-#### 32.3 — Start node3 and observe SST
+#### 6.3 — Start node3 and observe SST
 
 ```bash
 sudo systemctl start mariadb   # on node3
@@ -1520,7 +1520,7 @@ sudo watch -n2 "ps aux | grep mariadb-backup | grep -v grep"
 
 ---
 
-### Scenario 33: `gcache.size` Impact on IST vs SST
+### Scenario 7: `gcache.size` Impact on IST vs SST
 
 #### How gcache.size determines IST or SST
 
@@ -1545,7 +1545,7 @@ sudo watch -n2 "ps aux | grep mariadb-backup | grep -v grep"
 - `joiner_seqno >= oldest_seqno_in_gcache` → **IST** (fast, donor stays online)
 - `joiner_seqno <  oldest_seqno_in_gcache` → **SST** (slow, full copy)
 
-#### 33.1 — Effect of different gcache.size values
+#### 7.1 — Effect of different gcache.size values
 
 The table below shows how `gcache.size` affects the maximum tolerable outage before SST becomes required, assuming a moderate write rate of **~500 write-sets/second** (typical for the FlowFirst pipeline under load):
 
@@ -1559,7 +1559,7 @@ The table below shows how `gcache.size` affects the maximum tolerable outage bef
 
 > **Rule of thumb:** set `gcache.size` to cover at least your longest expected maintenance window multiplied by your peak write-set rate.
 
-#### 33.2 — Change gcache.size live vs. at startup
+#### 7.2 — Change gcache.size live vs. at startup
 
 `gcache.size` is a Galera provider option. It takes effect **at MariaDB startup** — a running cluster cannot resize gcache live without a restart.
 
@@ -1602,7 +1602,7 @@ ls -lh /var/lib/mysql/galera.cache
 -rw-r--r-- 1 mysql mysql 2.0G Jun 9 12:05 /var/lib/mysql/galera.cache
 ```
 
-#### 33.3 — Demonstrate IST succeeding with adequate gcache
+#### 7.3 — Demonstrate IST succeeding with adequate gcache
 
 ```bash
 # gcache.size=512M on all nodes (current config)
@@ -1628,7 +1628,7 @@ sudo grep -E "IST|Received IST|write-sets" /var/log/mariadb/mariadb.log | tail -
 [Note] WSREP: IST received
 ```
 
-#### 33.4 — Demonstrate SST triggered by undersized gcache
+#### 7.4 — Demonstrate SST triggered by undersized gcache
 
 ```bash
 # Temporarily set gcache to 1M on all nodes to guarantee overflow
@@ -1660,7 +1660,7 @@ sudo mysql -u root -p -e \
 # Then do a rolling restart to persist the change in galera.cnf
 ```
 
-#### 33.5 — Monitor gcache usage in real time
+#### 7.5 — Monitor gcache usage in real time
 
 ```bash
 # Check current gcache occupancy and pool size
@@ -1684,7 +1684,7 @@ SHOW STATUS WHERE Variable_name IN (
 );" 2>/dev/null
 ```
 
-#### 33.6 — gcache.size Decision Guide
+#### 7.6 — gcache.size Decision Guide
 
 ```
                     ┌─────────────────────────────────────┐
@@ -1713,7 +1713,7 @@ SHOW STATUS WHERE Variable_name IN (
 
 ---
 
-### Scenario 5: Node Failure & Virtual IP (VIP) Failover
+### Scenario 8: Node Failure & Virtual IP (VIP) Failover
 
 1. **Put Node 1 into standby mode:**
    ```bash
@@ -1735,7 +1735,7 @@ SHOW STATUS WHERE Variable_name IN (
 
 ---
 
-### Scenario 6: HAProxy Real-Time Statistics Dashboard
+### Scenario 9: HAProxy Real-Time Statistics Dashboard
 
 Access the live stats dashboard to view real-time frontend and backend health metrics for both the REST API and MariaDB Galera cluster:
 - **URL:** `http://${FLOWFIRST_VIP}:${HAPROXY_STATS_PORT:-9000}` (from `.env`)
@@ -1744,13 +1744,13 @@ Access the live stats dashboard to view real-time frontend and backend health me
 
 ---
 
-### Scenario 7: Pacemaker Cluster Validation with `crm_mon` & `crm_resource`
+### Scenario 10: Pacemaker Cluster Validation with `crm_mon` & `crm_resource`
 
 Use these commands on **any cluster node** to confirm that all Pacemaker resources are running, correctly distributed, and healthy.
 
 ---
 
-#### 7.1 — Full One-Shot Cluster Status (`crm_mon -1Ar`)
+#### 10.1 — Full One-Shot Cluster Status (`crm_mon -1Ar`)
 
 ```bash
 sudo crm_mon -1Ar
@@ -1790,18 +1790,18 @@ Active Resources:
 
 ---
 
-#### 7.2 — Continuous Live Monitor (`crm_mon -Ar`)
+#### 10.2 — Continuous Live Monitor (`crm_mon -Ar`)
 
 ```bash
 sudo crm_mon -Ar          # Refreshes every 15 seconds; press Ctrl-C to exit
 sudo crm_mon -Ar -i 5     # Refresh every 5 seconds
 ```
 
-This is the interactive equivalent and is ideal for watching resource migration in real time during a failover test (Scenario 5).
+This is the interactive equivalent and is ideal for watching resource migration in real time during a failover test (Scenario 8).
 
 ---
 
-#### 7.3 — Resource Constraint & Location Refresh (`crm_resource -C`)
+#### 10.3 — Resource Constraint & Location Refresh (`crm_resource -C`)
 
 The `-C` flag clears all **failed-action history** and **location constraints** that Pacemaker accumulated when resources failed or were manually migrated. Run this after recovering a node that was put into standby:
 
@@ -1822,7 +1822,7 @@ sudo crm_resource -r flowfirst-p1-clone -C
 
 ---
 
-#### 7.4 — Per-Resource Status (`crm_resource --resource … --locate`)
+#### 10.4 — Per-Resource Status (`crm_resource --resource … --locate`)
 
 ```bash
 # Where is the VIP currently running?
@@ -1842,7 +1842,7 @@ resource flowfirst-p1-clone is running on: node1  node2  node3
 
 ---
 
-#### 7.5 — Move VIP to a Specific Node
+#### 10.5 — Move VIP to a Specific Node
 
 ```bash
 # Force VIP (and HAProxy group) to node2
@@ -1861,7 +1861,7 @@ sudo crm_resource --resource vip-haproxy-group --clear
 
 ---
 
-#### 7.6 — Node Standby & Recovery (VIP Failover Validation)
+#### 10.6 — Node Standby & Recovery (VIP Failover Validation)
 
 ```bash
 # 1. Put node1 into standby (simulates node outage)
@@ -1899,7 +1899,7 @@ sudo crm_mon -1Ar | grep "Online:"
 
 ---
 
-#### 7.7 — Check for Failed Actions
+#### 10.7 — Check for Failed Actions
 
 ```bash
 sudo pcs status | grep -A5 "Failed"
@@ -1921,7 +1921,7 @@ sudo pcs resource refresh flowfirst-p1-clone
 
 ---
 
-#### 7.8 — Full `pcs status` Reference Output (All Healthy)
+#### 10.8 — Full `pcs status` Reference Output (All Healthy)
 
 ```bash
 sudo pcs status
@@ -1974,7 +1974,7 @@ These scenarios cover stopping and starting individual pipeline services, groups
 
 ---
 
-### Scenario 8: Stop & Start a Single Pipeline Process on One Node
+### Scenario 11: Stop & Start a Single Pipeline Process on One Node
 
 This is the surgical approach: stop one process instance on one node while the clones on the other two nodes continue to serve traffic.
 
@@ -2006,9 +2006,9 @@ sudo crm_mon -1Ar | grep p2
 
 ---
 
-### Scenario 9: Stop & Start All Four Pipeline Processes (Cluster-Wide)
+### Scenario 12: Stop & Start All Four Pipeline Processes (Cluster-Wide)
 
-#### 9.1 — Stop all pipeline processes on all nodes
+#### 12.1 — Stop all pipeline processes on all nodes
 
 ```bash
 sudo pcs resource disable flowfirst-p1-clone
@@ -2032,7 +2032,7 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
     * Stopped: [ node1 node2 node3 ]
 ```
 
-#### 9.2 — Start all pipeline processes cluster-wide
+#### 12.2 — Start all pipeline processes cluster-wide
 
 Re-enable in dependency order: persistence first, then reflectors, then examiner, then producer.
 
@@ -2055,7 +2055,7 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
     * Started: [ node1 node2 node3 ]
 ```
 
-#### 9.3 — Validate the REST API is serving traffic
+#### 12.3 — Validate the REST API is serving traffic
 
 ```bash
 curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
@@ -2069,9 +2069,9 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 
 ---
 
-### Scenario 10: Stop & Start RabbitMQ on a Single Node
+### Scenario 13: Stop & Start RabbitMQ on a Single Node
 
-#### 10.1 — Stop RabbitMQ on node3
+#### 13.1 — Stop RabbitMQ on node3
 
 ```bash
 # On node3
@@ -2090,7 +2090,7 @@ Alarms: (none)
 
 The pipeline processes use `pika` multi-host connection parameters and will automatically reconnect to `node1` or `node2`.
 
-#### 10.2 — Restart RabbitMQ on node3 and verify it rejoins
+#### 13.2 — Restart RabbitMQ on node3 and verify it rejoins
 
 ```bash
 # On node3
@@ -2104,9 +2104,9 @@ Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
 
 ---
 
-### Scenario 11: Stop & Start MariaDB Galera on a Single Node
+### Scenario 14: Stop & Start MariaDB Galera on a Single Node
 
-#### 11.1 — Stop MariaDB on node2
+#### 14.1 — Stop MariaDB on node2
 
 ```bash
 # On node2
@@ -2123,7 +2123,7 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 +--------------------+-------+
 ```
 
-#### 11.2 — Restart MariaDB on node2 (normal rejoin — NOT a bootstrap)
+#### 14.2 — Restart MariaDB on node2 (normal rejoin — NOT a bootstrap)
 
 ```bash
 # On node2
@@ -2155,11 +2155,11 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"
 
 ---
 
-### Scenario 12: Stop & Start HAProxy on a Single Node
+### Scenario 15: Stop & Start HAProxy on a Single Node
 
 HAProxy runs under Pacemaker as part of `vip-haproxy-group`. Do **not** manipulate it directly with `systemctl` — use `pcs resource` so Pacemaker stays in control.
 
-#### 12.1 — Disable the VIP + HAProxy group (stops on current node, migrates to another)
+#### 15.1 — Disable the VIP + HAProxy group (stops on current node, migrates to another)
 
 ```bash
 # Move the group away from node1 to node2
@@ -2172,7 +2172,7 @@ sudo crm_mon -1Ar | grep -E "vip|haproxy"
     * haproxy    (systemd:haproxy):               Started node2
 ```
 
-#### 12.2 — Confirm HAProxy stats endpoint responds on the new node
+#### 15.2 — Confirm HAProxy stats endpoint responds on the new node
 
 ```bash
 curl -s http://${NODE2_IP}:9000/stats -o /dev/null -w "%{http_code}"
@@ -2181,7 +2181,7 @@ curl -s http://${NODE2_IP}:9000/stats -o /dev/null -w "%{http_code}"
 200
 ```
 
-#### 12.3 — Clear the forced constraint and let Pacemaker decide
+#### 15.3 — Clear the forced constraint and let Pacemaker decide
 
 ```bash
 sudo pcs resource clear vip-haproxy-group
@@ -2195,11 +2195,11 @@ These scenarios cover rebooting individual nodes, all nodes sequentially, and al
 
 ---
 
-### Scenario 13: Reboot a Single Node (Node3) — Zero Pipeline Downtime
+### Scenario 16: Reboot a Single Node (Node3) — Zero Pipeline Downtime
 
 The cluster retains quorum (2 of 3 nodes remain) and all cloned resources continue on the surviving nodes.
 
-#### 13.1 — Pre-reboot state check
+#### 16.1 — Pre-reboot state check
 
 ```bash
 # From node1 — record the baseline
@@ -2210,14 +2210,14 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 
 Expected: 3 nodes online, 3 RabbitMQ nodes running, `wsrep_cluster_size = 3`.
 
-#### 13.2 — Reboot node3
+#### 16.2 — Reboot node3
 
 ```bash
 # On node3
 sudo reboot
 ```
 
-#### 13.3 — While node3 is rebooting — verify cluster continuity
+#### 16.3 — While node3 is rebooting — verify cluster continuity
 
 From **node1** or **node2**:
 ```bash
@@ -2246,7 +2246,7 @@ sudo crm_mon -1Ar | grep "Clone Set"
     * Stopped: [ node3 ]
 ```
 
-#### 13.4 — Post-reboot: validate node3 rejoins automatically
+#### 16.4 — Post-reboot: validate node3 rejoins automatically
 
 After node3 finishes booting (typically 60–90 seconds), Corosync and Pacemaker services start automatically (`enabled` in systemd), and Galera performs IST re-sync.
 
@@ -2292,11 +2292,11 @@ sudo crm_resource -C
 
 ---
 
-### Scenario 14: Reboot the Node Hosting the VIP (Node1) — Forced Failover
+### Scenario 17: Reboot the Node Hosting the VIP (Node1) — Forced Failover
 
 This is the highest-impact single-node reboot: the Virtual IP, HAProxy, and all process clones on node1 must migrate before node1 goes offline.
 
-#### 14.1 — Identify the current VIP holder
+#### 17.1 — Identify the current VIP holder
 
 ```bash
 sudo crm_resource --resource vip --locate
@@ -2305,7 +2305,7 @@ sudo crm_resource --resource vip --locate
 resource vip is running on: node1
 ```
 
-#### 14.2 — Gracefully evacuate node1 before rebooting (recommended)
+#### 17.2 — Gracefully evacuate node1 before rebooting (recommended)
 
 ```bash
 # Put node1 into standby — Pacemaker migrates VIP to node2 or node3 before reboot
@@ -2329,7 +2329,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq .handled_by_node
 "node2"
 ```
 
-#### 14.3 — Reboot node1
+#### 17.3 — Reboot node1
 
 ```bash
 # On node1
@@ -2337,7 +2337,7 @@ sudo pcs node unstandby node1   # (optional — Pacemaker will handle rejoin on 
 sudo reboot
 ```
 
-#### 14.4 — Post-reboot validation on node2 or node3
+#### 17.4 — Post-reboot validation on node2 or node3
 
 ```bash
 # Wait for node1 to come back (60–120 s), then:
@@ -2364,7 +2364,7 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 
 ---
 
-### Scenario 15: Sequential Rolling Reboot of All Three Nodes
+### Scenario 18: Sequential Rolling Reboot of All Three Nodes
 
 Reboot one node at a time, waiting for full rejoin before rebooting the next. Quorum is maintained throughout.
 
@@ -2437,13 +2437,13 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq .                     # expect 
 
 ---
 
-### Scenario 16: Simultaneous Reboot of All Three Nodes (Cluster Cold Start)
+### Scenario 19: Simultaneous Reboot of All Three Nodes (Cluster Cold Start)
 
 A complete power-cycle or simultaneous OS reboot causes the Galera cluster to lose quorum. Galera **requires a manual bootstrap** of the primary component on whichever node has the most up-to-date data before the other nodes can rejoin.
 
 > ⚠️ **Warning:** Do not run `systemctl start mariadb` on all nodes simultaneously after a cold start — this will result in a split-brain condition. Bootstrap exactly one node first.
 
-#### 16.1 — Identify the most up-to-date Galera node before rebooting
+#### 19.1 — Identify the most up-to-date Galera node before rebooting
 
 ```bash
 # On each node before the reboot, note the seqno:
@@ -2459,14 +2459,14 @@ safe_to_bootstrap: 1   ← Galera sets this on the last node to leave the cluste
 
 The node with `safe_to_bootstrap: 1` (or the highest `seqno`) is the **bootstrap node**.
 
-#### 16.2 — Reboot all three nodes simultaneously
+#### 19.2 — Reboot all three nodes simultaneously
 
 ```bash
 # On each node (or via out-of-band IPMI/iDRAC):
 sudo reboot
 ```
 
-#### 16.3 — Bootstrap the primary Galera node (run on bootstrap node only)
+#### 19.3 — Bootstrap the primary Galera node (run on bootstrap node only)
 
 After all nodes have finished booting, bring up Galera on the bootstrap node **first**:
 
@@ -2485,7 +2485,7 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 +--------------------+-------+
 ```
 
-#### 16.4 — Rejoin node2 and node3 (normal start — NOT bootstrap)
+#### 19.4 — Rejoin node2 and node3 (normal start — NOT bootstrap)
 
 ```bash
 # On node2
@@ -2508,7 +2508,7 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 +--------------------+-------+
 ```
 
-#### 16.5 — Restart Pacemaker cluster after cold start
+#### 19.5 — Restart Pacemaker cluster after cold start
 
 After a simultaneous reboot, Pacemaker may be waiting for quorum. Start the cluster on all nodes:
 
@@ -2526,7 +2526,7 @@ sudo pcs status | grep -E "Online:|quorum"
   * Online: [ node1 node2 node3 ]
 ```
 
-#### 16.6 — Re-enable and validate all pipeline resources
+#### 19.6 — Re-enable and validate all pipeline resources
 
 Pacemaker remembers resource state from before the cold start. If resources are still enabled, they will auto-start once quorum is restored. Verify:
 
@@ -2558,7 +2558,7 @@ sudo pcs resource enable flowfirst-p1-clone
 sudo crm_resource -C
 ```
 
-#### 16.7 — End-to-end pipeline smoke test after cold start
+#### 19.7 — End-to-end pipeline smoke test after cold start
 
 ```bash
 # Send one message through each flow and verify DB persistence
@@ -2613,11 +2613,11 @@ All faults are **temporary and fully reversible**. Every sub-scenario includes t
 
 ---
 
-### Scenario 17: Soft Network Degradation — Latency & Packet Loss (`tc netem`)
+### Scenario 20: Soft Network Degradation — Latency & Packet Loss (`tc netem`)
 
 This simulates a flaky inter-node network link: high latency and packet loss that keeps the node reachable but causes Corosync token timeouts, Galera replication lag, and RabbitMQ connection retries.
 
-#### 17.1 — Inject 300 ms delay + 10 % packet loss on node2's cluster interface
+#### 20.1 — Inject 300 ms delay + 10 % packet loss on node2's cluster interface
 
 ```bash
 # On node2 — identify the cluster-facing interface
@@ -2638,7 +2638,7 @@ qdisc netem 8001: root refcnt 2 limit 1000
     delay 300ms  50ms  loss 10%
 ```
 
-#### 17.2 — Observe Corosync detecting the degraded link
+#### 20.2 — Observe Corosync detecting the degraded link
 
 From **node1** (within 30–60 s Corosync token timeout):
 ```bash
@@ -2663,7 +2663,7 @@ corosync[1234]: [TOTEM ] A processor failed, forming a new configuration
 corosync[1234]: [TOTEM ] token was lost, forming a new configuration
 ```
 
-#### 17.3 — Observe Pacemaker response
+#### 20.3 — Observe Pacemaker response
 
 ```bash
 sudo crm_mon -1Ar | grep -E "Online|OFFLINE|Stopped"
@@ -2684,7 +2684,7 @@ If the loss is severe enough to cross the token timeout repeatedly, node2 may be
     * Stopped: [ node2 ]
 ```
 
-#### 17.4 — Check Galera replication lag on node2
+#### 20.4 — Check Galera replication lag on node2
 
 ```bash
 # On node2
@@ -2701,7 +2701,7 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_flow_control_paused';"
 +---------------------------+-------+
 ```
 
-#### 17.5 — Check RabbitMQ connection state
+#### 20.5 — Check RabbitMQ connection state
 
 ```bash
 # On node2
@@ -2720,7 +2720,7 @@ sudo rabbitmqctl list_connections peer_host send_pend | grep -v "^Listing"
 192.168.1.103   312
 ```
 
-#### 17.6 — Verify the pipeline is still processing
+#### 20.6 — Verify the pipeline is still processing
 
 ```bash
 curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
@@ -2730,7 +2730,7 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 ```
 Messages may be processed more slowly but the pipeline continues — HAProxy routes around the degraded node2.
 
-#### 17.7 — Remove the degradation (cleanup)
+#### 20.7 — Remove the degradation (cleanup)
 
 ```bash
 # On node2
@@ -2756,9 +2756,9 @@ sudo crm_mon -1Ar | grep "Online:"
 
 ---
 
-### Scenario 18: High Bandwidth Throttling — Simulating a Saturated Link
+### Scenario 21: High Bandwidth Throttling — Simulating a Saturated Link
 
-#### 18.1 — Limit node3's cluster interface to 1 Mbit/s
+#### 21.1 — Limit node3's cluster interface to 1 Mbit/s
 
 ```bash
 # On node3
@@ -2772,7 +2772,7 @@ sudo tc qdisc show dev ${IFACE}
 qdisc tbf 8001: root refcnt 2 rate 1Mbit burst 32Kb lat 400ms
 ```
 
-#### 18.2 — Monitor Galera SST/IST behaviour under bandwidth constraint
+#### 21.2 — Monitor Galera SST/IST behaviour under bandwidth constraint
 
 ```bash
 # On node3 — watch wsrep state
@@ -2784,7 +2784,7 @@ watch -n2 "sudo mysql -u root -p -e \"SHOW STATUS LIKE 'wsrep_local_state_commen
 +---------------------------+---------------+
 ```
 
-#### 18.3 — Inject simultaneous packet corruption (2 %)
+#### 21.3 — Inject simultaneous packet corruption (2 %)
 
 ```bash
 # On node3 — add corruption on top of the throttle
@@ -2798,7 +2798,7 @@ flow1_queue              12     ← messages backing up — node3 consumers stru
 flow1_reflected_queue    8
 ```
 
-#### 18.4 — Cleanup
+#### 21.4 — Cleanup
 
 ```bash
 # On node3
@@ -2808,11 +2808,11 @@ sudo crm_resource -C
 
 ---
 
-### Scenario 19: Hard Network Partition — `iptables` DROP Between Two Nodes
+### Scenario 22: Hard Network Partition — `iptables` DROP Between Two Nodes
 
 This is the most dangerous fault: node2 can reach node1 and node3, but node1 and node3 **cannot reach each other**. This creates a split-brain candidate situation where Corosync must fence one side.
 
-#### 19.1 — Understand the topology before partitioning
+#### 22.1 — Understand the topology before partitioning
 
 ```bash
 sudo crm_mon -1Ar | grep "Online:"
@@ -2829,7 +2829,7 @@ sudo pcs status | grep "Current DC"
   * Current DC: node1 (version 2.1.6-8.el9) - partition with quorum
 ```
 
-#### 19.2 — Drop all cluster traffic between node1 and node3 (both directions)
+#### 22.2 — Drop all cluster traffic between node1 and node3 (both directions)
 
 ```bash
 # On node1 — drop all packets TO node3
@@ -2846,7 +2846,7 @@ sudo iptables -I OUTPUT -d ${NODE1_IP} -j DROP
 > - **Side B**: node3 (can reach node2 only)
 > - **node2**: can reach both — it holds quorum
 
-#### 19.3 — Observe Corosync partition detection (within 10–30 s)
+#### 22.3 — Observe Corosync partition detection (within 10–30 s)
 
 ```bash
 # From node2 — watch Corosync reconfigure
@@ -2860,7 +2860,7 @@ corosync[1234]: [QUORUM] This node is within the primary component
 
 Corosync uses a **two-node majority rule**: each side has 2 of 3 nodes (node1+node2 and node2+node3). node2 will be in both partitions' majority. The partition that includes node2 **retains quorum**.
 
-#### 19.4 — Observe Pacemaker fencing decision
+#### 22.4 — Observe Pacemaker fencing decision
 
 ```bash
 # From node2 (within 30–60 s)
@@ -2892,7 +2892,7 @@ Fencing History:
 
 > If STONITH is not configured, Pacemaker will refuse to fence and the cluster will show a warning but resources continue on the quorum side.
 
-#### 19.5 — Verify VIP and pipeline are still serving
+#### 22.5 — Verify VIP and pipeline are still serving
 
 ```bash
 # From node1 — API must still respond via VIP
@@ -2922,7 +2922,7 @@ sudo rabbitmqctl cluster_status | grep "Running Nodes"
 Running Nodes: rabbit@node1  rabbit@node2
 ```
 
-#### 19.6 — Restore network connectivity (cleanup)
+#### 22.6 — Restore network connectivity (cleanup)
 
 ```bash
 # On node1 — remove DROP rules
@@ -2934,7 +2934,7 @@ sudo iptables -D INPUT  -s ${NODE1_IP} -j DROP
 sudo iptables -D OUTPUT -d ${NODE1_IP} -j DROP
 ```
 
-#### 19.7 — Re-integrate node3 into the cluster
+#### 22.7 — Re-integrate node3 into the cluster
 
 ```bash
 # On node3 — restart cluster services (Pacemaker may have shut them down after fencing)
@@ -2988,11 +2988,11 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 
 ---
 
-### Scenario 20: Selective Port-Level Block — Corosync Ring Only
+### Scenario 23: Selective Port-Level Block — Corosync Ring Only
 
 Rather than dropping all traffic, this scenario blocks **only Corosync's UDP port 5405** between two nodes — simulating a misconfigured firewall rule that leaves SSH/HTTP/MariaDB/RabbitMQ intact but severs cluster heartbeats.
 
-#### 20.1 — Block Corosync UDP 5405 between node1 and node2
+#### 23.1 — Block Corosync UDP 5405 between node1 and node2
 
 ```bash
 # On node1 — block Corosync heartbeats to/from node2
@@ -3004,7 +3004,7 @@ sudo iptables -I INPUT  -s ${NODE1_IP} -p udp --dport 5405 -j DROP
 sudo iptables -I OUTPUT -d ${NODE1_IP} -p udp --dport 5405 -j DROP
 ```
 
-#### 20.2 — Observe: Corosync loses heartbeat but application traffic flows
+#### 23.2 — Observe: Corosync loses heartbeat but application traffic flows
 
 ```bash
 # Corosync ring shows fault (from node1)
@@ -3039,7 +3039,7 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 +--------------------+-------+
 ```
 
-#### 20.3 — Pacemaker detects node2 as OFFLINE
+#### 23.3 — Pacemaker detects node2 as OFFLINE
 
 ```bash
 sudo crm_mon -1Ar | grep -E "Online|OFFLINE"
@@ -3051,7 +3051,7 @@ sudo crm_mon -1Ar | grep -E "Online|OFFLINE"
 
 Pacemaker clones on node2 stop; node2's VIP (if held) migrates to node1 or node3. Pipeline continues on 2/3 nodes.
 
-#### 20.4 — Cleanup
+#### 23.4 — Cleanup
 
 ```bash
 # On node1
@@ -3074,11 +3074,11 @@ sudo crm_mon -1Ar | grep "Online:"
 
 ---
 
-### Scenario 21: Selective Port-Level Block — Galera Replication Only
+### Scenario 24: Selective Port-Level Block — Galera Replication Only
 
 Block Galera's wsrep replication port (4567) between two nodes while leaving Corosync and RabbitMQ intact.
 
-#### 21.1 — Block Galera replication between node1 and node3
+#### 24.1 — Block Galera replication between node1 and node3
 
 ```bash
 # On node1
@@ -3094,7 +3094,7 @@ sudo iptables -I INPUT  -s ${NODE1_IP} -p udp --dport 4567 -j DROP
 sudo iptables -I OUTPUT -d ${NODE1_IP} -p udp --dport 4567 -j DROP
 ```
 
-#### 21.2 — Observe Galera degradation while Corosync stays healthy
+#### 24.2 — Observe Galera degradation while Corosync stays healthy
 
 ```bash
 # Pacemaker cluster is unaffected — all 3 nodes still online
@@ -3120,7 +3120,7 @@ sudo mysql -u root -p -h ${NODE3_IP} -e \
 
 Galera routes writes through node2 as an intermediary — degraded but functional.
 
-#### 21.3 — Observe write latency increase
+#### 24.3 — Observe write latency increase
 
 ```bash
 # Time a write through the HAProxy VIP
@@ -3132,7 +3132,7 @@ time mysql -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -h ${FLOWFIRST_VIP} ${MARI
 real    0m0.847s     ← normally ~10ms; elevated due to Galera flow control
 ```
 
-#### 21.4 — Cleanup
+#### 24.4 — Cleanup
 
 ```bash
 # On node1
@@ -3152,11 +3152,11 @@ sudo crm_resource -C
 
 ---
 
-### Scenario 22: Selective Port-Level Block — RabbitMQ AMQP Only
+### Scenario 25: Selective Port-Level Block — RabbitMQ AMQP Only
 
 Block AMQP port 5672 on node2 — RabbitMQ stops accepting connections but Corosync and Galera remain intact.
 
-#### 22.1 — Block AMQP traffic to/from node2
+#### 25.1 — Block AMQP traffic to/from node2
 
 ```bash
 # On node2
@@ -3164,7 +3164,7 @@ sudo iptables -I INPUT  -p tcp --dport 5672 -j DROP
 sudo iptables -I OUTPUT -p tcp --sport 5672 -j DROP
 ```
 
-#### 22.2 — Observe `pika` client reconnection
+#### 25.2 — Observe `pika` client reconnection
 
 The pipeline processes use multi-host `ConnectionParameters`. Within `pika`'s heartbeat interval (default 60 s), or immediately on the next connection attempt, they will fail over to `node1` or `node3`.
 
@@ -3177,7 +3177,7 @@ process2: Connection to 192.168.1.102:5672 failed, trying next host
 process2: Connected to 192.168.1.101:5672
 ```
 
-#### 22.3 — Verify RabbitMQ cluster view
+#### 25.3 — Verify RabbitMQ cluster view
 
 ```bash
 # From node1 — node2 still in cluster config but not accepting AMQP connections
@@ -3189,7 +3189,7 @@ Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
 ```
 > RabbitMQ cluster inter-node communication (port 25672) is separate from AMQP client connections (5672). The RabbitMQ cluster stays intact even though AMQP clients cannot connect to node2.
 
-#### 22.4 — Verify pipeline queues are still being consumed
+#### 25.4 — Verify pipeline queues are still being consumed
 
 ```bash
 sudo rabbitmqctl list_queues name messages consumers
@@ -3200,7 +3200,7 @@ flow2_queue              0    2
 flow2_examined_queue     0    2
 ```
 
-#### 22.5 — Cleanup
+#### 25.5 — Cleanup
 
 ```bash
 # On node2
@@ -3219,11 +3219,11 @@ flow2_examined_queue     0    3
 
 ---
 
-### Scenario 23: Intermittent Flapping — Periodic Network Glitch
+### Scenario 26: Intermittent Flapping — Periodic Network Glitch
 
 Simulate a network interface that glitches every 30 seconds — typical of a bad cable or switch port.
 
-#### 23.1 — Start a background glitch loop on node3
+#### 26.1 — Start a background glitch loop on node3
 
 ```bash
 # On node3 — toggle 5% loss on/off every 30 seconds for 5 cycles
@@ -3243,7 +3243,7 @@ done
 echo "Flapping simulation complete"
 ```
 
-#### 23.2 — Watch Pacemaker react on node1 (run in a separate terminal)
+#### 26.2 — Watch Pacemaker react on node1 (run in a separate terminal)
 
 ```bash
 # Continuous monitor — watch node3 flap
@@ -3257,7 +3257,7 @@ Expected oscillation:
   * Online: [ node1 node2 node3 ]           ← glitch cleared, node3 rejoins
 ```
 
-#### 23.3 — Check Pacemaker failure counters building up
+#### 26.3 — Check Pacemaker failure counters building up
 
 ```bash
 sudo pcs resource failcount show flowfirst-p1-clone
@@ -3277,7 +3277,7 @@ sudo crm_resource -r flowfirst-p3-clone -C
 sudo crm_resource -r flowfirst-p4-clone -C
 ```
 
-#### 23.4 — Cleanup
+#### 26.4 — Cleanup
 
 ```bash
 # Ensure netem is cleared
@@ -3382,9 +3382,9 @@ A helper script [`scripts/tcpdump_flows.sh`](scripts/tcpdump_flows.sh) automates
 
 ---
 
-### Scenario 24: Capture Setup — Identify Interfaces and Start Captures
+### Scenario 27: Capture Setup — Identify Interfaces and Start Captures
 
-#### 24.1 — Identify the cluster-facing network interface on each node
+#### 27.1 — Identify the cluster-facing network interface on each node
 
 ```bash
 # Run on each node — find the interface on the cluster subnet
@@ -3404,7 +3404,7 @@ Set a shell variable for all subsequent commands:
 IFACE=eth0
 ```
 
-#### 24.2 — Start background captures on all three nodes simultaneously
+#### 27.2 — Start background captures on all three nodes simultaneously
 
 Open **three SSH sessions** (one per node) and run on each:
 
@@ -3442,7 +3442,7 @@ sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node3_$(date +%Y%m%d_%H%M%S).pcap \
 TCPDUMP_PID=$!
 ```
 
-#### 24.3 — Verify captures are running
+#### 27.3 — Verify captures are running
 
 ```bash
 sudo tcpdump -D    # list interfaces
@@ -3454,11 +3454,11 @@ ls -lh ${PCAP_DIR}/   # confirm pcap files are growing
 
 ---
 
-### Scenario 25: AMQP Round-Trip — Flow1 & Flow2 Pipeline Execution
+### Scenario 28: AMQP Round-Trip — Flow1 & Flow2 Pipeline Execution
 
-With captures running from Scenario 24, trigger both pipeline flows and then examine the AMQP handshake and message delivery round-trips.
+With captures running from Scenario 27, trigger both pipeline flows and then examine the AMQP handshake and message delivery round-trips.
 
-#### 25.1 — Execute both flows via the VIP
+#### 28.1 — Execute both flows via the VIP
 
 ```bash
 # From any workstation or cluster node
@@ -3467,14 +3467,14 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 | jq .
 sleep 10    # allow full pipeline traversal
 ```
 
-#### 25.2 — Stop captures and examine AMQP traffic
+#### 28.2 — Stop captures and examine AMQP traffic
 
 ```bash
 sudo kill ${TCPDUMP_PID}    # stop capture on each node
 PCAP=$(ls -t /var/log/flowfirst/pcap/node1_*.pcap | head -1)
 ```
 
-#### 25.3 — Verify TCP three-way handshake for AMQP connections
+#### 28.3 — Verify TCP three-way handshake for AMQP connections
 
 ```bash
 sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep -E "Flags \[S\]|Flags \[S\.\]|Flags \[\.\]" | head -20
@@ -3487,7 +3487,7 @@ sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep -E "Flags \[S\]|Flags \[S\.\]|Fla
 
 > ✅ **SYN → SYN-ACK → ACK** sequence confirms a successful TCP three-way handshake. Every AMQP connection must show this triplet.
 
-#### 25.4 — Verify AMQP 0-9-1 protocol banner
+#### 28.4 — Verify AMQP 0-9-1 protocol banner
 
 ```bash
 sudo tcpdump -r ${PCAP} -nn -A 'port 5672' | grep -E "AMQP|amqp" | head -10
@@ -3496,7 +3496,7 @@ sudo tcpdump -r ${PCAP} -nn -A 'port 5672' | grep -E "AMQP|amqp" | head -10
 12:00:01.124100 ... "AMQP" 0 0 9 1    ← AMQP 0-9-1 protocol header sent by client
 ```
 
-#### 25.5 — Examine AMQP frame sequence with `tshark`
+#### 28.5 — Examine AMQP frame sequence with `tshark`
 
 ```bash
 sudo tshark -r ${PCAP} -d tcp.port==5672,amqp \
@@ -3527,7 +3527,7 @@ sudo tshark -r ${PCAP} -d tcp.port==5672,amqp \
 
 > ✅ **Full AMQP round-trip confirmed**: `connection.start` → `open-ok` → `basic.publish` → `basic.deliver` → `basic.ack` for each hop in the pipeline.
 
-#### 25.6 — Confirm message payload mutation across hops
+#### 28.6 — Confirm message payload mutation across hops
 
 ```bash
 # Extract AMQP payload content (ASCII printable)
@@ -3539,7 +3539,7 @@ sudo tcpdump -r ${PCAP} -nn -A 'port 5672' \
 
 Look for the `hop_count` field incrementing and `modified_by` being updated at each process — confirming the data mutation design is visible at the wire level.
 
-#### 25.7 — Verify clean TCP connection teardown (FIN-ACK)
+#### 28.7 — Verify clean TCP connection teardown (FIN-ACK)
 
 ```bash
 sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep "Flags \[F" | head -10
@@ -3553,9 +3553,9 @@ sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep "Flags \[F" | head -10
 
 ---
 
-### Scenario 26: REST API / HAProxy Round-Trip Verification
+### Scenario 29: REST API / HAProxy Round-Trip Verification
 
-#### 26.1 — Capture REST API traffic while sending requests
+#### 29.1 — Capture REST API traffic while sending requests
 
 ```bash
 # On the node currently holding the VIP (e.g., node1)
@@ -3573,7 +3573,7 @@ done
 sudo kill ${TCPDUMP_PID}
 ```
 
-#### 26.2 — Verify HTTP request/response round-trip
+#### 29.2 — Verify HTTP request/response round-trip
 
 ```bash
 sudo tcpdump -r /tmp/rest_api.pcap -nn -A 'tcp port 8080' \
@@ -3589,7 +3589,7 @@ sudo tcpdump -r /tmp/rest_api.pcap -nn -A 'tcp port 8080' \
 
 > ✅ HTTP `POST` request and `200 OK` response confirm REST API round-trip.
 
-#### 26.3 — Confirm HAProxy load-balancing across 3 nodes
+#### 29.3 — Confirm HAProxy load-balancing across 3 nodes
 
 Send 9 requests (3 per node via round-robin) and capture the `handled_by_node` field:
 ```bash
@@ -3622,7 +3622,7 @@ sudo tcpdump -r /tmp/rest_api.pcap -nn 'dst port 8080' \
 
 > ✅ Even distribution confirms HAProxy round-robin is functioning.
 
-#### 26.4 — Verify TCP SYN-SYN/ACK-ACK for every HTTP connection
+#### 29.4 — Verify TCP SYN-SYN/ACK-ACK for every HTTP connection
 
 ```bash
 sudo tshark -r /tmp/rest_api.pcap \
@@ -3639,9 +3639,9 @@ sudo tshark -r /tmp/rest_api.pcap \
 
 ---
 
-### Scenario 27: Corosync Heartbeat Round-Trip Verification
+### Scenario 30: Corosync Heartbeat Round-Trip Verification
 
-#### 27.1 — Capture Corosync UDP heartbeats
+#### 30.1 — Capture Corosync UDP heartbeats
 
 ```bash
 # On node1 — capture only Corosync UDP 5405
@@ -3654,7 +3654,7 @@ sleep 30
 sudo kill ${TCPDUMP_PID}
 ```
 
-#### 27.2 — Count token messages per source node
+#### 30.2 — Count token messages per source node
 
 ```bash
 sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
@@ -3668,7 +3668,7 @@ sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
 
 > ✅ Roughly equal message counts from all 3 nodes confirms active token-ring participation by every node.
 
-#### 27.3 — Verify bidirectional flow between every node pair
+#### 30.3 — Verify bidirectional flow between every node pair
 
 ```bash
 sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
@@ -3687,7 +3687,7 @@ sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
 
 > ✅ All 6 directed pairs present — every node is communicating with every other node in the ring.
 
-#### 27.4 — Measure Corosync token inter-arrival time (heartbeat interval)
+#### 30.4 — Measure Corosync token inter-arrival time (heartbeat interval)
 
 ```bash
 sudo tcpdump -r /tmp/corosync.pcap -nn -tt 'udp port 5405 and src ${NODE1_IP}' \
@@ -3703,9 +3703,9 @@ avg=999.8ms  n=147     ← token circulates approximately every 1 second (Corosy
 
 ---
 
-### Scenario 28: Galera wsrep Replication Round-Trip Verification
+### Scenario 31: Galera wsrep Replication Round-Trip Verification
 
-#### 28.1 — Capture Galera replication traffic during a DB write
+#### 31.1 — Capture Galera replication traffic during a DB write
 
 ```bash
 # On node1 — capture Galera ports
@@ -3721,7 +3721,7 @@ sleep 5
 sudo kill ${TCPDUMP_PID}
 ```
 
-#### 28.2 — Verify Galera TCP connections established on port 4567
+#### 31.2 — Verify Galera TCP connections established on port 4567
 
 ```bash
 sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 4567 and tcp[tcpflags] & tcp-syn != 0' \
@@ -3735,7 +3735,7 @@ sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 4567 and tcp[tcpflags] & tcp-syn 
 
 > ✅ TCP handshake on Galera wsrep port 4567.
 
-#### 28.3 — Count Galera writeset packets per node pair
+#### 31.3 — Count Galera writeset packets per node pair
 
 ```bash
 sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 4567 and not tcp[tcpflags] & tcp-syn != 0' \
@@ -3754,7 +3754,7 @@ sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 4567 and not tcp[tcpflags] & tcp-
 
 > ✅ Bidirectional writeset replication between all node pairs confirms Galera multi-master is active.
 
-#### 28.4 — Correlate Galera replication with MariaDB query volume
+#### 31.4 — Correlate Galera replication with MariaDB query volume
 
 ```bash
 # Count MariaDB client queries captured alongside Galera replication
@@ -3764,7 +3764,7 @@ sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 3306' | wc -l
 24     ← 24 TCP segments on port 3306 (query + result + EOF packets)
 ```
 
-#### 28.5 — Examine MariaDB protocol greeting and query round-trip
+#### 31.5 — Examine MariaDB protocol greeting and query round-trip
 
 ```bash
 # Run a separate short capture focused on port 3306
@@ -3808,11 +3808,11 @@ sudo tshark -r /tmp/mysql.pcap -d tcp.port==3306,mysql \
 
 ---
 
-### Scenario 29: Network Round-Trip During Glitch — Before/During/After Comparison
+### Scenario 32: Network Round-Trip During Glitch — Before/During/After Comparison
 
-This scenario combines Scenario 17 (latency injection) with live tcpdump to measure the actual impact of a network glitch on every protocol's round-trip time (RTT).
+This scenario combines Scenario 20 (latency injection) with live tcpdump to measure the actual impact of a network glitch on every protocol's round-trip time (RTT).
 
-#### 29.1 — Establish baseline RTTs (clean network)
+#### 32.1 — Establish baseline RTTs (clean network)
 
 ```bash
 # On node1 — capture all protocols for 30 seconds baseline
@@ -3835,7 +3835,7 @@ sudo tshark -r /tmp/baseline.pcap -Y 'tcp.analysis.initial_rtt and tcp.port==567
 avg RTT: 0.312ms (n=6)     ← sub-millisecond baseline
 ```
 
-#### 29.2 — Inject latency on node2 and capture during glitch
+#### 32.2 — Inject latency on node2 and capture during glitch
 
 ```bash
 # On node2 — inject 200ms delay
@@ -3852,7 +3852,7 @@ sleep 20
 sudo kill ${TCPDUMP_PID}
 ```
 
-#### 29.3 — Compare RTTs baseline vs. glitch
+#### 32.3 — Compare RTTs baseline vs. glitch
 
 ```bash
 # AMQP RTT during glitch
@@ -3866,7 +3866,7 @@ avg RTT: 201.4ms (n=4)     ← 200ms injected delay is clearly visible
 ```
 
 ```bash
-# Corosync token timing during glitch — compare with Scenario 27.4 baseline
+# Corosync token timing during glitch — compare with Scenario 30.4 baseline
 echo "=== Glitch Corosync token inter-arrival ==="
 sudo tcpdump -r /tmp/glitch.pcap -nn -tt 'udp port 5405 and src ${NODE2_IP}' \
     | awk '{print $1}' \
@@ -3880,7 +3880,7 @@ sudo tcpdump -r /tmp/glitch.pcap -nn -tt 'udp port 5405 and src ${NODE2_IP}' \
 
 > ✅ `tcpdump` directly measures the 200 ms injected delay in both AMQP and Corosync protocols.
 
-#### 29.4 — Cleanup and verify RTT returns to baseline
+#### 32.4 — Cleanup and verify RTT returns to baseline
 
 ```bash
 # On node2 — remove latency injection
@@ -3906,11 +3906,11 @@ avg RTT: 0.308ms (n=6)     ← back to sub-millisecond baseline
 
 ---
 
-### Scenario 30: tcpdump-Based Full Pipeline Flow Trace
+### Scenario 33: tcpdump-Based Full Pipeline Flow Trace
 
 This scenario captures a single Flow 1 message from HTTP POST all the way to MariaDB INSERT and traces every network hop in the pcap files.
 
-#### 30.1 — Start captures on all 3 nodes simultaneously
+#### 33.1 — Start captures on all 3 nodes simultaneously
 
 ```bash
 # Run this on node1, node2, node3 in parallel (3 SSH sessions)
@@ -3924,7 +3924,7 @@ sudo tcpdump -i ${IFACE} -s 0 \
 echo "Capture started on ${NODE}, PID=$!"
 ```
 
-#### 30.2 — Trigger one Flow 1 message
+#### 33.2 — Trigger one Flow 1 message
 
 ```bash
 # From node1 or workstation
@@ -3933,7 +3933,7 @@ echo "Tracking message: ${MSG_ID}"
 sleep 8    # allow full pipeline: P1→P2→P3→P4→DB
 ```
 
-#### 30.3 — Stop captures and locate the message in pcaps
+#### 33.3 — Stop captures and locate the message in pcaps
 
 ```bash
 # Stop on all nodes
@@ -3955,7 +3955,7 @@ done
 2     ← final delivery to process4 and DB write
 ```
 
-#### 30.4 — Reconstruct the full hop timeline
+#### 33.4 — Reconstruct the full hop timeline
 
 ```bash
 # On each node — extract timestamps for this message_id
@@ -3977,7 +3977,7 @@ done | sort -n
 
 > ✅ The full pipeline message journey — from REST POST to DB INSERT — is traced at the packet level with sub-millisecond timestamps.
 
-#### 30.5 — Verify DB INSERT round-trip in the pcap
+#### 33.5 — Verify DB INSERT round-trip in the pcap
 
 ```bash
 PCAP=$(ls /var/log/flowfirst/pcap/node3_flow_trace*.pcap | head -1)

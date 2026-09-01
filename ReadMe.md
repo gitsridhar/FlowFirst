@@ -559,7 +559,12 @@ done
 
 #### ZooKeeper znode tree
 
-The pipeline creates this znode hierarchy on first startup:
+> **Note on timing:** The `/flowfirst` znode hierarchy is **not** created by `setup_zookeeper.sh`.
+> It is lazily initialised by the Python pipeline (`zk.py`) the **very first time any FlowFirst process (`process1` – `process4`) connects to ZooKeeper** (in Phase 5 / Scenario 1).
+>
+> If you connect with `zkCli.sh` immediately after installing ZooKeeper in Phase 1b, `/flowfirst` does not exist yet (`ls /` will only show `[zookeeper]`). This is expected.
+
+The full znode tree populated once the pipeline processes start:
 
 ```
 /flowfirst
@@ -590,12 +595,32 @@ The pipeline creates this znode hierarchy on first startup:
 
 #### Inspect the znode tree with zkCli
 
+**Option A — Check ZooKeeper connectivity right now (Phase 1b):**
+
 ```bash
 # Connect to the local ZooKeeper node
 /opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181
 
-# Inside the shell:
+# Inside zkCli (fresh install before pipeline start):
+ls /
+# Output: [zookeeper]  (this confirms ZooKeeper is healthy and responding)
+
+quit
+```
+
+**Option B — Inspect `/flowfirst` znodes (run AFTER pipeline processes start in Phase 5 / Scenario 1):**
+
+```bash
+# Connect to the ZooKeeper ensemble
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181
+
+# Inside zkCli (once processes are running):
+ls /
+# Output: [flowfirst, zookeeper]
+
 ls /flowfirst
+# Output: [config, dedup, election, health, registry]
+
 ls /flowfirst/election/process1
 get /flowfirst/config/flow2_high_threshold
 ls /flowfirst/registry/process1
@@ -603,6 +628,16 @@ get /flowfirst/registry/process1/node1
 ls /flowfirst/health/process1
 get /flowfirst/health/process1/node1
 quit
+```
+
+*(Optional) Pre-seed `/flowfirst` znodes now before starting the pipeline:*
+
+If you want to manually create and seed the base znodes and default config before starting the pipeline:
+
+```bash
+cd /opt/flowfirst
+source .venv/bin/activate
+python3 -c "import zk; zk.get_client(); print('Base znodes and default config seeded successfully.')"
 ```
 
 #### ZooKeeper Troubleshooting Reference

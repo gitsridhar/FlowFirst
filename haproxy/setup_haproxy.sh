@@ -18,12 +18,22 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
 fi
 
 NODE1_NAME="${NODE1_NAME:-node1}"
-NODE1_IP="${1:-${NODE1_IP:-192.168.1.101}}"
+NODE1_IP="${1:-${NODE1_IP:-}}"
 NODE2_NAME="${NODE2_NAME:-node2}"
-NODE2_IP="${2:-${NODE2_IP:-192.168.1.102}}"
+NODE2_IP="${2:-${NODE2_IP:-}}"
 NODE3_NAME="${NODE3_NAME:-node3}"
-NODE3_IP="${3:-${NODE3_IP:-192.168.1.103}}"
-VIP="${4:-${FLOWFIRST_VIP:-192.168.1.100}}"
+NODE3_IP="${3:-${NODE3_IP:-}}"
+VIP="${4:-${FLOWFIRST_VIP:-}}"
+
+# Validate required IP variables are set (must come from .env)
+for _var in NODE1_IP NODE2_IP NODE3_IP FLOWFIRST_VIP; do
+    _val="${!_var:-}"
+    if [[ -z "${_val}" ]] || [[ "${_val}" =~ ^\$\{ ]]; then
+        echo "ERROR: ${_var} is not set. Set it in /opt/flowfirst/.env and re-run."
+        exit 1
+    fi
+done
+VIP="${VIP:-${FLOWFIRST_VIP}}"
 VIP_NIC="${VIP_NIC:-}"           # set in .env — see pre-flight check below
 API_PORT="${API_PORT:-8080}"
 MARIADB_PORT="${MARIADB_PORT:-3306}"

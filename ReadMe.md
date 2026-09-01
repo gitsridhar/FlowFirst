@@ -13,19 +13,19 @@ This project implements an enterprise-grade, distributed inter-process communica
 ## Multi-Node Cluster Architecture & Network Topology
 
 ### Cluster Nodes Configuration
-- **Node 1 (`node1`)**: `192.168.1.101` (Galera Node 1 / API Node 1 / RabbitMQ)
-- **Node 2 (`node2`)**: `192.168.1.102` (Galera Node 2 / API Node 2 / RabbitMQ)
-- **Node 3 (`node3`)**: `192.168.1.103` (Galera Node 3 / API Node 3 / RabbitMQ)
-- **Virtual IP (VIP)**: `192.168.1.100` (Managed by Pacemaker)
+- **Node 1 (`node1`)**: `${NODE1_IP}` (Galera Node 1 / API Node 1 / RabbitMQ)
+- **Node 2 (`node2`)**: `${NODE2_IP}` (Galera Node 2 / API Node 2 / RabbitMQ)
+- **Node 3 (`node3`)**: `${NODE3_IP}` (Galera Node 3 / API Node 3 / RabbitMQ)
+- **Virtual IP (VIP)**: `${FLOWFIRST_VIP}` (Managed by Pacemaker)
 
 ```mermaid
 graph TD
-    Client["Client / curl Commands<br/>(Target: http://192.168.1.100:8080)"] -->|Virtual IP 192.168.1.100:8080| VIP["Pacemaker Virtual IP (VIP)<br/>192.168.1.100"]
+    Client["Client / curl Commands<br/>(Target: http://FLOWFIRST_VIP:8080)"] -->|Virtual IP FLOWFIRST_VIP:8080| VIP["Pacemaker Virtual IP (VIP)<br/>FLOWFIRST_VIP"]
 
     subgraph Cluster ["Pacemaker High Availability Cluster (flowfirst_cluster)"]
         VIP --> HAProxy["HAProxy Load Balancer<br/>- REST API: :8080 (Round-Robin)<br/>- MariaDB Galera: :3306 (Multi-Master)"]
 
-        subgraph Node1 ["Node 1 (192.168.1.101)"]
+        subgraph Node1 ["Node 1 (NODE1_IP)"]
             P1_N1["Process 1: REST API (:8080)"]
             P2_N1["Process 2: Examiner / Reflector"]
             P3_N1["Process 3: Reflector / Forwarder"]
@@ -34,7 +34,7 @@ graph TD
             GAL_N1[("MariaDB Galera Node 1")]
         end
 
-        subgraph Node2 ["Node 2 (192.168.1.102)"]
+        subgraph Node2 ["Node 2 (NODE2_IP)"]
             P1_N2["Process 1: REST API (:8080)"]
             P2_N2["Process 2: Examiner / Reflector"]
             P3_N2["Process 3: Reflector / Forwarder"]
@@ -43,7 +43,7 @@ graph TD
             GAL_N2[("MariaDB Galera Node 2")]
         end
 
-        subgraph Node3 ["Node 3 (192.168.1.103)"]
+        subgraph Node3 ["Node 3 (NODE3_IP)"]
             P1_N3["Process 1: REST API (:8080)"]
             P2_N3["Process 2: Examiner / Reflector"]
             P3_N3["Process 3: Reflector / Forwarder"]
@@ -88,7 +88,7 @@ graph TD
 sequenceDiagram
     autonumber
     actor Client as HTTP Client (curl)
-    participant VIP as Virtual IP (192.168.1.100)
+    participant VIP as Virtual IP (FLOWFIRST_VIP)
     participant HAP as HAProxy Load Balancer
     participant P1 as Process 1 (Node 1/2/3 REST API)
     participant Q12 as RabbitMQ (flow1_p1_to_p2)
@@ -102,7 +102,7 @@ sequenceDiagram
     participant GAL3 as Galera Node 3 (MariaDB)
 
     Note over Client, GAL3: === 1. REST API INVOCATION VIA VIRTUAL IP ===
-    Client->>VIP: POST http://192.168.1.100:8080/api/flow1
+    Client->>VIP: POST http://FLOWFIRST_VIP:8080/api/flow1
     VIP->>HAP: Forward request to HAProxy (:8080)
     HAP->>P1: Route to Node 1/2/3 via Round-Robin
     P1->>Q12: Publish message to queue flow1_p1_to_p2
@@ -133,7 +133,7 @@ sequenceDiagram
 ## Step-by-Step Data Flows
 
 ### Flow 1: Intermediate Reflection at Process 2 & Galera Persistence
-1. **Client (`curl`)**: Sends `POST /api/flow1` to the Virtual IP `http://192.168.1.100:8080`.
+1. **Client (`curl`)**: Sends `POST /api/flow1` to the Virtual IP `http://${FLOWFIRST_VIP}:8080`.
 2. **HAProxy**: Delivers request to `Process 1` on one of the active cluster nodes (Round-Robin).
 3. **Process 1 ([`process1.py`](process1.py:1))**: Generates payload with UUID, publishes to `flow1_p1_to_p2`.
 4. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, modifies counter (`+10`), logs audit entry, and **reflects** it to `flow1_p2_to_p3`.
@@ -143,7 +143,7 @@ sequenceDiagram
 ---
 
 ### Flow 2: Threshold Examination at Process 2 & Reflection at Process 3
-1. **Client (`curl`)**: Sends `POST /api/flow2` to `http://192.168.1.100:8080`.
+1. **Client (`curl`)**: Sends `POST /api/flow2` to `http://${FLOWFIRST_VIP}:8080`.
 2. **HAProxy**: Delivers request to `Process 1` on one of the active cluster nodes (Round-Robin).
 3. **Process 1 ([`process1.py`](process1.py:1))**: Generates metric payload, publishes to `flow2_p1_to_p2`.
 4. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, evaluates threshold status (`HIGH`/`NORMAL`), applies 15% scaling factor, and forwards to `flow2_p2_to_p3`.
@@ -210,9 +210,10 @@ setup script **after** the repo is cloned in Phase 0b:
 ```bash
 # After Phase 0b — re-configure with a custom server if needed
 cd /opt/flowfirst
-sudo ./scripts/setup_chronyd.sh 192.168.1.1    # local NTP server
-# or
-sudo ./scripts/setup_chronyd.sh time.google.com
+# Pass your internal NTP server IP or use CHRONY_NTP_SERVER from .env:
+sudo ./scripts/setup_chronyd.sh "${CHRONY_NTP_SERVER:-time.google.com}"
+# Example with an explicit local NTP server IP:
+# sudo ./scripts/setup_chronyd.sh <your-ntp-server-ip>
 ```
 
 The full `setup_chronyd.sh` script performs these steps automatically:
@@ -232,7 +233,7 @@ chronyc tracking
 #   Leap status   — must say "Normal"
 
 # Quick one-liner for all three nodes:
-for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
     echo "=== ${node} ==="
     ssh "${node}" "chronyc tracking | grep -E 'Reference|System time|Leap'"
 done
@@ -244,7 +245,8 @@ If all three nodes use the same internal NTP server, add this to `/opt/flowfirst
 so `setup_chronyd.sh` picks it up automatically without a command-line argument:
 
 ```ini
-CHRONY_NTP_SERVER=192.168.1.1
+# Set to your internal NTP server IP (leave blank to use pool.ntp.org)
+CHRONY_NTP_SERVER=<your-ntp-server-ip>
 ```
 
 #### Chrony Troubleshooting Reference
@@ -329,22 +331,22 @@ Then **edit `.env`** on each node. The rules are simple:
 | Variable | node1 | node2 | node3 | What it means |
 |---|---|---|---|---|
 | `NODE_NAME` | `node1` | `node2` | `node3` | The hostname **of this node** — must match `/etc/hostname` and the name passed to `pcs cluster setup` |
-| `CURRENT_NODE_IP` | `192.168.1.101` | `192.168.1.102` | `192.168.1.103` | The cluster-interface IP **of this node** — used by Galera's `wsrep_node_address` and Corosync bind address |
+| `CURRENT_NODE_IP` | `${NODE1_IP}` | `${NODE2_IP}` | `${NODE3_IP}` | The cluster-interface IP **of this node** — used by Galera's `wsrep_node_address` and Corosync bind address |
 
 #### Shared variables (identical on all three nodes)
 
 | Variable | Value | Notes |
 |---|---|---|
 | `CLUSTER_NAME` | `flowfirst_cluster` | Same on every node |
-| `NODE1_IP` | `192.168.1.101` | **Always the IP of node1**, regardless of which node the file is on |
-| `NODE2_IP` | `192.168.1.102` | **Always the IP of node2** |
-| `NODE3_IP` | `192.168.1.103` | **Always the IP of node3** |
-| `FLOWFIRST_VIP` | `192.168.1.100` | Pacemaker Virtual IP — same on all nodes |
-| `RABBITMQ_HOST` | `192.168.1.100` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
-| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `192.168.1.101:5672,192.168.1.102:5672,192.168.1.103:5672` at runtime from `NODE*_IP`. |
+| `NODE1_IP` | `${NODE1_IP}` | **Always the IP of node1**, regardless of which node the file is on |
+| `NODE2_IP` | `${NODE2_IP}` | **Always the IP of node2** |
+| `NODE3_IP` | `${NODE3_IP}` | **Always the IP of node3** |
+| `FLOWFIRST_VIP` | `${FLOWFIRST_VIP}` | Pacemaker Virtual IP — same on all nodes |
+| `RABBITMQ_HOST` | `${FLOWFIRST_VIP}` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
+| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `${NODE1_IP}:5672,${NODE2_IP}:5672,${NODE3_IP}:5672` at runtime from `NODE*_IP`. |
 | `RABBITMQ_PORT` | `5672` | Literal integer |
-| `MARIADB_HOST` | `192.168.1.100` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
-| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `192.168.1.101,192.168.1.102,192.168.1.103` at runtime. |
+| `MARIADB_HOST` | `${FLOWFIRST_VIP}` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
+| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `${NODE1_IP},${NODE2_IP},${NODE3_IP}` at runtime. |
 | `MARIADB_PORT` | `3306` | Literal integer |
 
 #### Concrete `.env` for each node
@@ -470,7 +472,7 @@ echo mntr | nc 127.0.0.1 2181 | grep zk_synced_followers
 # Expected: zk_synced_followers   2
 
 # Full ensemble status
-for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
     echo -n "${node}: "
     echo mntr | nc -w2 "${node}" 2181 | grep zk_server_state || echo "unreachable"
 done
@@ -708,7 +710,7 @@ The script performs these steps automatically:
 
 ```bash
 # Option 1: auto-detect via routing table (recommended)
-ip route get 192.168.1.100 | awk '{print $5; exit}'
+ip route get ${FLOWFIRST_VIP} | awk '{print $5; exit}'
 # Example output:  ens3
 
 # Option 2: list all non-loopback interfaces
@@ -761,8 +763,8 @@ grep "bind" /etc/haproxy/haproxy.cfg
 # Expected:
 #   bind *:8080               ← REST API
 #   bind *:9000               ← stats
-#   bind 192.168.1.100:3306   ← MariaDB (VIP only — no port conflict)
-#   bind 192.168.1.100:5672   ← RabbitMQ (VIP only — no port conflict)
+#   bind ${FLOWFIRST_VIP}:3306   ← MariaDB (VIP only — no port conflict)
+#   bind ${FLOWFIRST_VIP}:5672   ← RabbitMQ (VIP only — no port conflict)
 ```
 
 HAProxy will be started automatically by Pacemaker in Phase 5 when the VIP is
@@ -908,8 +910,8 @@ grep "bind" /etc/haproxy/haproxy.cfg
 # Expected:
 #   bind *:8080               ← REST API (OK to use * — no conflict)
 #   bind *:9000               ← stats
-#   bind 192.168.1.100:3306   ← MariaDB (VIP only)
-#   bind 192.168.1.100:5672   ← RabbitMQ (VIP only)
+#   bind ${FLOWFIRST_VIP}:3306   ← MariaDB (VIP only)
+#   bind ${FLOWFIRST_VIP}:5672   ← RabbitMQ (VIP only)
 ```
 
 ---
@@ -1005,11 +1007,11 @@ sudo ss -tlnp | grep haproxy
 # Expected lines:
 #   0.0.0.0:8080    ← REST API frontend
 #   0.0.0.0:9000    ← stats dashboard
-#   192.168.1.100:3306  ← MariaDB (VIP only, on the node holding the VIP)
-#   192.168.1.100:5672  ← RabbitMQ (VIP only)
+#   ${FLOWFIRST_VIP}:3306  ← MariaDB (VIP only, on the node holding the VIP)
+#   ${FLOWFIRST_VIP}:5672  ← RabbitMQ (VIP only)
 
 # Confirm stats page is reachable via the VIP
-curl -s -u admin:admin123 http://192.168.1.100:9000/stats | grep -c "pxname"
+curl -s -u "${HAPROXY_STATS_USER}:${HAPROXY_STATS_PASS}" http://${FLOWFIRST_VIP}:${HAPROXY_STATS_PORT:-9000}/stats | grep -c "pxname"
 # Expected: non-zero (one line per backend server)
 
 # Review HAProxy logs if anything looks wrong
@@ -1020,18 +1022,33 @@ sudo journalctl -u haproxy -n 30 --no-pager
 
 ## Verification & Real-World Usage Scenarios
 
+> **All commands in this section use shell variables that are defined in your `.env` file.**
+> Source your `.env` once in the shell where you run these commands:
+>
+> ```bash
+> cd /opt/flowfirst
+> set -a && source .env && set +a
+>
+> # Confirm the key variables are loaded:
+> echo "VIP=${FLOWFIRST_VIP}  NODE1=${NODE1_IP}  NODE2=${NODE2_IP}  NODE3=${NODE3_IP}"
+> ```
+>
+> Every `${FLOWFIRST_VIP}`, `${NODE1_IP}`, `${NODE2_IP}`, `${NODE3_IP}`,
+> `${MARIADB_USER}`, `${MARIADB_PASSWORD}`, `${MARIADB_DB}` reference below
+> resolves from that single `.env` — **no IP addresses are hardcoded**.
+
 ### Scenario 1: Invoke REST API via Virtual IP & Verify Round-Robin Load Balancing
 
-Send requests directly to the **Virtual IP (`192.168.1.100:8080`)**:
+Send requests directly to the **Virtual IP (`${FLOWFIRST_VIP}:${API_PORT:-8080}`)**:
 
 #### A. Health Check via VIP
 ```bash
-curl -s http://192.168.1.100:8080/health | jq .
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 ```
 
 #### B. Trigger Flow 1 via VIP
 ```bash
-curl -X POST http://192.168.1.100:8080/api/flow1 \
+curl -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
   -H "Content-Type: application/json" \
   -d '{
     "item_id": 101,
@@ -1042,7 +1059,7 @@ curl -X POST http://192.168.1.100:8080/api/flow1 \
 
 #### C. Trigger Flow 2 via VIP
 ```bash
-curl -X POST http://192.168.1.100:8080/api/flow2 \
+curl -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 \
   -H "Content-Type: application/json" \
   -d '{
     "item_id": 202,
@@ -1054,7 +1071,7 @@ curl -X POST http://192.168.1.100:8080/api/flow2 \
 #### D. Verify Round-Robin Load Balancing
 ```bash
 for i in {1..6}; do
-  curl -s -X POST http://192.168.1.100:8080/api/flow1 -d "{\"item_id\": $i}" | jq -r '.handled_by_node'
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -d "{\"item_id\": $i}" | jq -r '.handled_by_node'
 done
 ```
 *Output demonstrates traffic distributed across all 3 nodes:*
@@ -1083,7 +1100,7 @@ This scenario executes Flow 1 and Flow 2 through the REST API, follows the messa
 
 ##### Step 1: Trigger Flow 1 (Initial Counter: 500)
 ```bash
-curl -s -X POST http://${FLOWFIRST_VIP:-192.168.1.100}:8080/api/flow1 \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
   -H "Content-Type: application/json" \
   -d '{
     "item_id": 101,
@@ -1094,7 +1111,7 @@ curl -s -X POST http://${FLOWFIRST_VIP:-192.168.1.100}:8080/api/flow1 \
 
 ##### Step 2: Trigger Flow 2 (Initial Metric: 35.00)
 ```bash
-curl -s -X POST http://${FLOWFIRST_VIP:-192.168.1.100}:8080/api/flow2 \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 \
   -H "Content-Type: application/json" \
   -d '{
     "item_id": 202,
@@ -1105,7 +1122,7 @@ curl -s -X POST http://${FLOWFIRST_VIP:-192.168.1.100}:8080/api/flow2 \
 
 ##### Step 3: Inspect Summary Table in MariaDB
 ```bash
-mariadb -h ${FLOWFIRST_VIP:-192.168.1.100} -u flowuser -pflowpassword flowfirst_db --table -e "
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} --table -e "
 SELECT
     id,
     flow_id,
@@ -1132,7 +1149,7 @@ LIMIT 5;
 
 ##### Step 4: Inspect Flow 1 Audit Trail & Transformation History
 ```bash
-mariadb -h ${FLOWFIRST_VIP:-192.168.1.100} -u flowuser -pflowpassword flowfirst_db -e "
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "
 SELECT
     message_id,
     initial_data,
@@ -1172,7 +1189,7 @@ ORDER BY id DESC LIMIT 1\G
 
 ##### Step 5: Inspect Flow 2 Audit Trail (Threshold Examination & Scaling)
 ```bash
-mariadb -h ${FLOWFIRST_VIP:-192.168.1.100} -u flowuser -pflowpassword flowfirst_db -e "
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "
 SELECT
     message_id,
     initial_data,
@@ -1221,13 +1238,13 @@ Query **Node 1**, **Node 2**, and **Node 3** directly to confirm that writes fro
 
 ```bash
 # Check on Node 1:
-mariadb -h ${NODE1_IP:-192.168.1.101} -u flowuser -pflowpassword flowfirst_db -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
+mariadb -h ${NODE1_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 
 # Check on Node 2:
-mariadb -h ${NODE2_IP:-192.168.1.102} -u flowuser -pflowpassword flowfirst_db -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
+mariadb -h ${NODE2_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 
 # Check on Node 3:
-mariadb -h ${NODE3_IP:-192.168.1.103} -u flowuser -pflowpassword flowfirst_db -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
+mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 ```
 *All three databases return identical records in real time.*
 
@@ -1246,7 +1263,7 @@ mariadb -h ${NODE3_IP:-192.168.1.103} -u flowuser -pflowpassword flowfirst_db -e
    *Result:* `wsrep_cluster_size` is now `2`, cluster status remains `Primary`.
 3. **Execute new API requests:**
    ```bash
-   curl -X POST http://192.168.1.100:8080/api/flow1 -d '{"item_id": 555}'
+   curl -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -d '{"item_id": 555}'
    ```
 4. **Restart Node 3 and observe Automatic State Transfer (IST/SST):**
    ```bash
@@ -1295,7 +1312,7 @@ sudo systemctl stop mariadb   # on node3
 
 # Step 2: Generate a small amount of write traffic (stays inside gcache window)
 for i in $(seq 1 20); do
-  curl -s -X POST http://192.168.1.100:8080/api/flow1 > /dev/null
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 > /dev/null
 done
 sleep 3
 
@@ -1594,7 +1611,7 @@ sudo systemctl stop mariadb   # node3
 
 # Generate 10,000 write-sets (well under 512M capacity)
 for i in $(seq 1 500); do
-  curl -s -X POST http://192.168.1.100:8080/api/flow1 > /dev/null &
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 > /dev/null &
 done
 wait
 sleep 5
@@ -1622,7 +1639,7 @@ sudo mysql -u root -p -e \
 # Stop node3, generate heavy traffic, then restart
 sudo systemctl stop mariadb   # node3
 for i in $(seq 1 5000); do
-  curl -s -X POST http://192.168.1.100:8080/api/flow2 > /dev/null
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 > /dev/null
 done
 sleep 5
 sudo systemctl start mariadb   # node3
@@ -1709,7 +1726,7 @@ SHOW STATUS WHERE Variable_name IN (
    *Result:* `vip-haproxy-group` is now `Started node2`.
 3. **Issue `curl` requests with zero downtime:**
    ```bash
-   curl -s http://192.168.1.100:8080/health | jq .
+   curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
    ```
 4. **Restore Node 1:**
    ```bash
@@ -1721,9 +1738,9 @@ SHOW STATUS WHERE Variable_name IN (
 ### Scenario 6: HAProxy Real-Time Statistics Dashboard
 
 Access the live stats dashboard to view real-time frontend and backend health metrics for both the REST API and MariaDB Galera cluster:
-- **URL:** `http://192.168.1.100:9000`
-- **Username:** `admin`
-- **Password:** `admin123`
+- **URL:** `http://${FLOWFIRST_VIP}:${HAPROXY_STATS_PORT:-9000}` (from `.env`)
+- **Username:** `${HAPROXY_STATS_USER}` (from `.env`, default: `admin`)
+- **Password:** `${HAPROXY_STATS_PASS}` (from `.env`, default: `admin123`)
 
 ---
 
@@ -1860,7 +1877,7 @@ sudo crm_mon -1Ar | grep -E "vip|haproxy"
 
 ```bash
 # 3. Confirm API still reachable via VIP — no downtime
-curl -s http://192.168.1.100:8080/health | jq .handled_by_node
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq .handled_by_node
 ```
 ```
 "node2"
@@ -2041,7 +2058,7 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 #### 9.3 — Validate the REST API is serving traffic
 
 ```bash
-curl -s http://192.168.1.100:8080/health | jq .
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 ```
 ```json
 {
@@ -2158,7 +2175,7 @@ sudo crm_mon -1Ar | grep -E "vip|haproxy"
 #### 12.2 — Confirm HAProxy stats endpoint responds on the new node
 
 ```bash
-curl -s http://192.168.1.102:9000/stats -o /dev/null -w "%{http_code}"
+curl -s http://${NODE2_IP}:9000/stats -o /dev/null -w "%{http_code}"
 ```
 ```
 200
@@ -2213,7 +2230,7 @@ sudo crm_mon -1Ar | grep "Online:"
 
 ```bash
 # Confirm VIP still up (it was not on node3)
-curl -s http://192.168.1.100:8080/health | jq .
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 ```
 ```json
 { "status": "ok", "handled_by_node": "node1" }
@@ -2306,7 +2323,7 @@ sudo crm_mon -1Ar | grep -E "vip|haproxy|Online"
 
 ```bash
 # Confirm zero downtime during migration
-curl -s http://192.168.1.100:8080/health | jq .handled_by_node
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq .handled_by_node
 ```
 ```
 "node2"
@@ -2342,7 +2359,7 @@ sudo crm_mon -1Ar
 sudo crm_resource -C
 
 # Trigger a test flow to confirm end-to-end pipeline health
-curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 ```
 
 ---
@@ -2415,7 +2432,7 @@ sudo crm_mon -1Ar
 # Full infrastructure health sweep
 sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"  # expect 3
 sudo rabbitmqctl cluster_status | grep "Running Nodes"              # expect all 3
-curl -s http://192.168.1.100:8080/health | jq .                     # expect ok
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq .                     # expect ok
 ```
 
 ---
@@ -2545,13 +2562,13 @@ sudo crm_resource -C
 
 ```bash
 # Send one message through each flow and verify DB persistence
-curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
-curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 | jq .
 
 sleep 5   # allow messages to traverse the pipeline
 
 # Check the last 4 rows in the database (from any node via VIP)
-mysql -u flowuser -p'flowpassword' -h 192.168.1.100 flowfirst_db \
+mysql -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -h ${FLOWFIRST_VIP} ${MARIADB_DB} \
   -e "SELECT id, flow_type, source_process, JSON_PRETTY(history_trail) \
       FROM processed_messages ORDER BY id DESC LIMIT 4\G"
 ```
@@ -2604,7 +2621,7 @@ This simulates a flaky inter-node network link: high latency and packet loss tha
 
 ```bash
 # On node2 — identify the cluster-facing interface
-ip route get 192.168.1.101 | awk '{print $5; exit}'
+ip route get ${NODE1_IP} | awk '{print $5; exit}'
 # Example output: eth0
 IFACE=eth0
 
@@ -2706,7 +2723,7 @@ sudo rabbitmqctl list_connections peer_host send_pend | grep -v "^Listing"
 #### 17.6 — Verify the pipeline is still processing
 
 ```bash
-curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 ```
 ```json
 { "status": "queued", "flow": "flow1", "message_id": "abc123", "handled_by_node": "node1" }
@@ -2816,12 +2833,12 @@ sudo pcs status | grep "Current DC"
 
 ```bash
 # On node1 — drop all packets TO node3
-sudo iptables -I INPUT  -s 192.168.1.103 -j DROP
-sudo iptables -I OUTPUT -d 192.168.1.103 -j DROP
+sudo iptables -I INPUT  -s ${NODE3_IP} -j DROP
+sudo iptables -I OUTPUT -d ${NODE3_IP} -j DROP
 
 # On node3 — drop all packets TO node1
-sudo iptables -I INPUT  -s 192.168.1.101 -j DROP
-sudo iptables -I OUTPUT -d 192.168.1.101 -j DROP
+sudo iptables -I INPUT  -s ${NODE1_IP} -j DROP
+sudo iptables -I OUTPUT -d ${NODE1_IP} -j DROP
 ```
 
 > The cluster now has two sides:
@@ -2879,7 +2896,7 @@ Fencing History:
 
 ```bash
 # From node1 — API must still respond via VIP
-curl -s http://192.168.1.100:8080/health | jq .
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 ```
 ```json
 { "status": "ok", "handled_by_node": "node1" }
@@ -2909,12 +2926,12 @@ Running Nodes: rabbit@node1  rabbit@node2
 
 ```bash
 # On node1 — remove DROP rules
-sudo iptables -D INPUT  -s 192.168.1.103 -j DROP
-sudo iptables -D OUTPUT -d 192.168.1.103 -j DROP
+sudo iptables -D INPUT  -s ${NODE3_IP} -j DROP
+sudo iptables -D OUTPUT -d ${NODE3_IP} -j DROP
 
 # On node3 — remove DROP rules
-sudo iptables -D INPUT  -s 192.168.1.101 -j DROP
-sudo iptables -D OUTPUT -d 192.168.1.101 -j DROP
+sudo iptables -D INPUT  -s ${NODE1_IP} -j DROP
+sudo iptables -D OUTPUT -d ${NODE1_IP} -j DROP
 ```
 
 #### 19.7 — Re-integrate node3 into the cluster
@@ -2979,12 +2996,12 @@ Rather than dropping all traffic, this scenario blocks **only Corosync's UDP por
 
 ```bash
 # On node1 — block Corosync heartbeats to/from node2
-sudo iptables -I INPUT  -s 192.168.1.102 -p udp --dport 5405 -j DROP
-sudo iptables -I OUTPUT -d 192.168.1.102 -p udp --dport 5405 -j DROP
+sudo iptables -I INPUT  -s ${NODE2_IP} -p udp --dport 5405 -j DROP
+sudo iptables -I OUTPUT -d ${NODE2_IP} -p udp --dport 5405 -j DROP
 
 # On node2 — mirror the block
-sudo iptables -I INPUT  -s 192.168.1.101 -p udp --dport 5405 -j DROP
-sudo iptables -I OUTPUT -d 192.168.1.101 -p udp --dport 5405 -j DROP
+sudo iptables -I INPUT  -s ${NODE1_IP} -p udp --dport 5405 -j DROP
+sudo iptables -I OUTPUT -d ${NODE1_IP} -p udp --dport 5405 -j DROP
 ```
 
 #### 20.2 — Observe: Corosync loses heartbeat but application traffic flows
@@ -3004,7 +3021,7 @@ RING ID 0
 
 ```bash
 # But RabbitMQ still connects to node2 (AMQP 5672 is not blocked)
-sudo rabbitmqctl list_connections peer_host state | grep 192.168.1.102
+sudo rabbitmqctl list_connections peer_host state | grep ${NODE2_IP}
 ```
 ```
 192.168.1.102   running
@@ -3038,12 +3055,12 @@ Pacemaker clones on node2 stop; node2's VIP (if held) migrates to node1 or node3
 
 ```bash
 # On node1
-sudo iptables -D INPUT  -s 192.168.1.102 -p udp --dport 5405 -j DROP
-sudo iptables -D OUTPUT -d 192.168.1.102 -p udp --dport 5405 -j DROP
+sudo iptables -D INPUT  -s ${NODE2_IP} -p udp --dport 5405 -j DROP
+sudo iptables -D OUTPUT -d ${NODE2_IP} -p udp --dport 5405 -j DROP
 
 # On node2
-sudo iptables -D INPUT  -s 192.168.1.101 -p udp --dport 5405 -j DROP
-sudo iptables -D OUTPUT -d 192.168.1.101 -p udp --dport 5405 -j DROP
+sudo iptables -D INPUT  -s ${NODE1_IP} -p udp --dport 5405 -j DROP
+sudo iptables -D OUTPUT -d ${NODE1_IP} -p udp --dport 5405 -j DROP
 
 # Restart cluster on node2
 sudo pcs cluster start
@@ -3065,16 +3082,16 @@ Block Galera's wsrep replication port (4567) between two nodes while leaving Cor
 
 ```bash
 # On node1
-sudo iptables -I INPUT  -s 192.168.1.103 -p tcp --dport 4567 -j DROP
-sudo iptables -I OUTPUT -d 192.168.1.103 -p tcp --dport 4567 -j DROP
-sudo iptables -I INPUT  -s 192.168.1.103 -p udp --dport 4567 -j DROP
-sudo iptables -I OUTPUT -d 192.168.1.103 -p udp --dport 4567 -j DROP
+sudo iptables -I INPUT  -s ${NODE3_IP} -p tcp --dport 4567 -j DROP
+sudo iptables -I OUTPUT -d ${NODE3_IP} -p tcp --dport 4567 -j DROP
+sudo iptables -I INPUT  -s ${NODE3_IP} -p udp --dport 4567 -j DROP
+sudo iptables -I OUTPUT -d ${NODE3_IP} -p udp --dport 4567 -j DROP
 
 # On node3 — mirror
-sudo iptables -I INPUT  -s 192.168.1.101 -p tcp --dport 4567 -j DROP
-sudo iptables -I OUTPUT -d 192.168.1.101 -p tcp --dport 4567 -j DROP
-sudo iptables -I INPUT  -s 192.168.1.101 -p udp --dport 4567 -j DROP
-sudo iptables -I OUTPUT -d 192.168.1.101 -p udp --dport 4567 -j DROP
+sudo iptables -I INPUT  -s ${NODE1_IP} -p tcp --dport 4567 -j DROP
+sudo iptables -I OUTPUT -d ${NODE1_IP} -p tcp --dport 4567 -j DROP
+sudo iptables -I INPUT  -s ${NODE1_IP} -p udp --dport 4567 -j DROP
+sudo iptables -I OUTPUT -d ${NODE1_IP} -p udp --dport 4567 -j DROP
 ```
 
 #### 21.2 — Observe Galera degradation while Corosync stays healthy
@@ -3089,7 +3106,7 @@ sudo crm_mon -1Ar | grep "Online:"
 
 ```bash
 # But Galera flow control activates on node3
-sudo mysql -u root -p -h 192.168.1.103 -e \
+sudo mysql -u root -p -h ${NODE3_IP} -e \
   "SHOW STATUS WHERE Variable_name IN
    ('wsrep_cluster_size','wsrep_local_state_comment','wsrep_flow_control_paused');"
 ```
@@ -3107,7 +3124,7 @@ Galera routes writes through node2 as an intermediary — degraded but functiona
 
 ```bash
 # Time a write through the HAProxy VIP
-time mysql -u flowuser -p'flowpassword' -h 192.168.1.100 flowfirst_db \
+time mysql -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -h ${FLOWFIRST_VIP} ${MARIADB_DB} \
   -e "INSERT INTO processed_messages (flow_type,source_process,payload,history_trail)
       VALUES ('test','glitch_test','{}','[]');"
 ```
@@ -3120,14 +3137,14 @@ real    0m0.847s     ← normally ~10ms; elevated due to Galera flow control
 ```bash
 # On node1
 for proto in tcp udp; do
-  sudo iptables -D INPUT  -s 192.168.1.103 -p ${proto} --dport 4567 -j DROP
-  sudo iptables -D OUTPUT -d 192.168.1.103 -p ${proto} --dport 4567 -j DROP
+  sudo iptables -D INPUT  -s ${NODE3_IP} -p ${proto} --dport 4567 -j DROP
+  sudo iptables -D OUTPUT -d ${NODE3_IP} -p ${proto} --dport 4567 -j DROP
 done
 
 # On node3
 for proto in tcp udp; do
-  sudo iptables -D INPUT  -s 192.168.1.101 -p ${proto} --dport 4567 -j DROP
-  sudo iptables -D OUTPUT -d 192.168.1.101 -p ${proto} --dport 4567 -j DROP
+  sudo iptables -D INPUT  -s ${NODE1_IP} -p ${proto} --dport 4567 -j DROP
+  sudo iptables -D OUTPUT -d ${NODE1_IP} -p ${proto} --dport 4567 -j DROP
 done
 
 sudo crm_resource -C
@@ -3325,10 +3342,10 @@ sudo rabbitmqctl cluster_status | grep "Running Nodes"
 sudo rabbitmqctl list_queues name messages consumers
 
 # 7. End-to-end pipeline smoke test
-curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
-curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 | jq .
 sleep 5
-mysql -u flowuser -p'flowpassword' -h 192.168.1.100 flowfirst_db \
+mysql -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -h ${FLOWFIRST_VIP} ${MARIADB_DB} \
   -e "SELECT id, flow_type, source_process FROM processed_messages ORDER BY id DESC LIMIT 4;"
 ```
 
@@ -3337,6 +3354,8 @@ mysql -u flowuser -p'flowpassword' -h 192.168.1.100 flowfirst_db \
 ## Network Round-Trip Verification with `tcpdump`
 
 These scenarios capture live packets on the cluster interfaces while executing real pipeline use-cases, then analyse the captures to confirm that **every network protocol completes its full handshake and round-trip** — AMQP, Corosync, Galera wsrep, MariaDB, and REST/HTTP over HAProxy.
+
+> **Note on sample output:** the illustrative packet traces in this section show IP addresses in their raw form as they appear in `tcpdump`/`tshark` output — for example `${NODE1_IP}` appears as a real IP like `10.0.0.1`. These are **example outputs only** — your actual captures will show the IPs set in your `.env` (`${NODE1_IP}`, `${NODE2_IP}`, `${NODE3_IP}`, `${FLOWFIRST_VIP}`). All runnable commands use env vars.
 
 > **Prerequisites on every node:**
 > ```bash
@@ -3368,13 +3387,16 @@ A helper script [`scripts/tcpdump_flows.sh`](scripts/tcpdump_flows.sh) automates
 #### 24.1 — Identify the cluster-facing network interface on each node
 
 ```bash
-# Run on each node — find the interface on the 192.168.1.0/24 subnet
-ip -o addr show | awk '/192\.168\.1\./ {print $2, $4}'
+# Run on each node — find the interface on the cluster subnet
+# Filters by the node's own IP (NODE1_IP / NODE2_IP / NODE3_IP from .env)
+ip -o addr show | awk -v ip="${CURRENT_NODE_IP}" '$0 ~ ip {print $2, $4}'
+# Or list all non-loopback interfaces and their IPs:
+ip -o addr show | awk '$3 == "inet" && $2 != "lo" {print $2, $4}'
 ```
 ```
-eth0 192.168.1.101/24    # node1
-eth0 192.168.1.102/24    # node2
-eth0 192.168.1.103/24    # node3
+eth0 ${NODE1_IP}/24    # node1 — example output (IP from .env)
+eth0 ${NODE2_IP}/24    # node2
+eth0 ${NODE3_IP}/24    # node3
 ```
 
 Set a shell variable for all subsequent commands:
@@ -3440,8 +3462,8 @@ With captures running from Scenario 24, trigger both pipeline flows and then exa
 
 ```bash
 # From any workstation or cluster node
-curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
-curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 | jq .
 sleep 10    # allow full pipeline traversal
 ```
 
@@ -3544,7 +3566,7 @@ TCPDUMP_PID=$!
 
 # Send 3 requests to generate traffic
 for i in 1 2 3; do
-  curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .handled_by_node
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .handled_by_node
   sleep 1
 done
 
@@ -3572,7 +3594,7 @@ sudo tcpdump -r /tmp/rest_api.pcap -nn -A 'tcp port 8080' \
 Send 9 requests (3 per node via round-robin) and capture the `handled_by_node` field:
 ```bash
 for i in $(seq 1 9); do
-  curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq -r .handled_by_node
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq -r .handled_by_node
 done
 ```
 ```
@@ -3668,7 +3690,7 @@ sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
 #### 27.4 — Measure Corosync token inter-arrival time (heartbeat interval)
 
 ```bash
-sudo tcpdump -r /tmp/corosync.pcap -nn -tt 'udp port 5405 and src 192.168.1.101' \
+sudo tcpdump -r /tmp/corosync.pcap -nn -tt 'udp port 5405 and src ${NODE1_IP}' \
     | awk '{print $1}' \
     | awk 'NR>1{printf "%.3fms\n", ($1-prev)*1000} {prev=$1}' \
     | sort -n | awk 'BEGIN{n=0;s=0} {n++;s+=$1} END{printf "avg=%.1fms  n=%d\n",s/n,n}'
@@ -3692,8 +3714,8 @@ sudo tcpdump -i ${IFACE} -s 0 -w /tmp/galera.pcap \
 TCPDUMP_PID=$!
 
 # Trigger a write through the pipeline (process4 will INSERT into MariaDB)
-curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
-curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 | jq .
 sleep 5
 
 sudo kill ${TCPDUMP_PID}
@@ -3749,7 +3771,7 @@ sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 3306' | wc -l
 sudo tcpdump -i ${IFACE} -s 0 -w /tmp/mysql.pcap 'tcp port 3306' &
 TCPDUMP_PID=$!
 
-mysql -u flowuser -p'flowpassword' -h 192.168.1.100 flowfirst_db \
+mysql -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -h ${FLOWFIRST_VIP} ${MARIADB_DB} \
   -e "SELECT COUNT(*) FROM processed_messages;"
 
 sudo kill ${TCPDUMP_PID}
@@ -3798,8 +3820,8 @@ sudo tcpdump -i ${IFACE} -s 0 -w /tmp/baseline.pcap \
     'port 5672 or port 5405 or port 4567 or port 3306 or port 8080' &
 TCPDUMP_PID=$!
 
-curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
-curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 | jq .
 sleep 20
 
 sudo kill ${TCPDUMP_PID}
@@ -3824,7 +3846,7 @@ sudo tcpdump -i ${IFACE} -s 0 -w /tmp/glitch.pcap \
     'port 5672 or port 5405 or port 4567 or port 3306 or port 8080' &
 TCPDUMP_PID=$!
 
-curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 sleep 20
 
 sudo kill ${TCPDUMP_PID}
@@ -3846,7 +3868,7 @@ avg RTT: 201.4ms (n=4)     ← 200ms injected delay is clearly visible
 ```bash
 # Corosync token timing during glitch — compare with Scenario 27.4 baseline
 echo "=== Glitch Corosync token inter-arrival ==="
-sudo tcpdump -r /tmp/glitch.pcap -nn -tt 'udp port 5405 and src 192.168.1.102' \
+sudo tcpdump -r /tmp/glitch.pcap -nn -tt 'udp port 5405 and src ${NODE2_IP}' \
     | awk '{print $1}' \
     | awk 'NR>1{printf "%.1fms\n",($1-prev)*1000}{prev=$1}' \
     | sort -n | tail -5
@@ -3869,7 +3891,7 @@ sudo tcpdump -i ${IFACE} -s 0 -w /tmp/post_glitch.pcap \
     'port 5672 or port 8080' &
 TCPDUMP_PID=$!
 
-curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 sleep 10
 
 sudo kill ${TCPDUMP_PID}
@@ -3906,7 +3928,7 @@ echo "Capture started on ${NODE}, PID=$!"
 
 ```bash
 # From node1 or workstation
-MSG_ID=$(curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq -r .message_id)
+MSG_ID=$(curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq -r .message_id)
 echo "Tracking message: ${MSG_ID}"
 sleep 8    # allow full pipeline: P1→P2→P3→P4→DB
 ```
@@ -4189,7 +4211,7 @@ echo ruok | nc -w2 127.0.0.1 2181
 # Expected: imok
 
 # MariaDB
-mysql -h 127.0.0.1 -u flowuser -pflowpassword -e "SELECT 1;"
+mysql -h 127.0.0.1 -u "${MARIADB_USER}" -p"${MARIADB_PASSWORD}" -e "SELECT 1;"
 # Expected: row with 1
 ```
 
@@ -4265,14 +4287,14 @@ curl -s http://localhost:8080/zk/config | jq .
 
 ```bash
 # Summary of last 10 processed messages
-mysql -h 127.0.0.1 -u flowuser -pflowpassword flowfirst_db \
+mysql -h 127.0.0.1 -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT id, flow_id, item_id, counter_value, metric_value,
              examined_status, verified_by, created_at
       FROM processed_messages
       ORDER BY id DESC LIMIT 10;"
 
 # Full audit trail for a Flow 2 message
-mysql -h 127.0.0.1 -u flowuser -pflowpassword flowfirst_db -e "
+mysql -h 127.0.0.1 -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "
 SELECT message_id, metric_value, examined_status, verified_by,
        JSON_PRETTY(history_trail) AS audit_trail
 FROM processed_messages
@@ -4303,28 +4325,28 @@ Verify the ensemble is healthy and identify which node holds the ZooKeeper leade
 
 ```bash
 # 1. Check each node responds "imok"
-for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
     echo -n "${node}: "
     echo ruok | nc -w2 "${node}" 2181 || echo "NO RESPONSE"
 done
 # Expected: all three print "imok"
 
 # 2. Identify the ZooKeeper leader
-for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
     state=$(echo mntr | nc -w2 "${node}" 2181 | grep zk_server_state | awk '{print $2}')
     echo "${node}: ${state}"
 done
 # Expected: one "leader", two "follower"
 
 # 3. Confirm quorum (synced followers = 2)
-ZK_LEADER=$(for n in 192.168.1.101 192.168.1.102 192.168.1.103; do
+ZK_LEADER=$(for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
     echo mntr | nc -w2 "$n" 2181 | grep -q "zk_server_state.*leader" && echo "$n"
 done)
 echo mntr | nc -w2 "${ZK_LEADER}" 2181 | grep zk_synced_followers
 # Expected: zk_synced_followers   2
 
 # 4. Check pipeline leader elections via REST API
-curl -s http://192.168.1.100:8080/zk/health | jq .pipeline_health
+curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health
 # Expected: each process shows one node as "leader", others as "follower"
 ```
 
@@ -4350,7 +4372,7 @@ Process 2 instances pick up the change within seconds without any restart.
 #### A. Inspect current config
 
 ```bash
-curl -s http://192.168.1.100:8080/zk/config | jq .
+curl -s http://${FLOWFIRST_VIP}:8080/zk/config | jq .
 # Expected:
 # {
 #   "zk_config": {
@@ -4364,7 +4386,7 @@ curl -s http://192.168.1.100:8080/zk/config | jq .
 #### B. Lower the HIGH threshold to 20.0
 
 ```bash
-curl -s -X POST http://192.168.1.100:8080/zk/config \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config \
   -H "Content-Type: application/json" \
   -d '{"key": "flow2_high_threshold", "value": 20.0}' | jq .
 ```
@@ -4372,7 +4394,7 @@ curl -s -X POST http://192.168.1.100:8080/zk/config \
 #### C. Send a Flow 2 message with a value of 25.0 (was NORMAL, now HIGH)
 
 ```bash
-curl -s -X POST http://192.168.1.100:8080/api/flow2 \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 \
   -H "Content-Type: application/json" \
   -d '{"item_id": 901, "value": 25.0, "initial_data": "ZK config test"}' | jq .
 ```
@@ -4387,7 +4409,7 @@ sudo journalctl -u flowfirst-process2 -f --no-pager | grep "status=\|threshold="
 #### D. Increase the counter step to 50
 
 ```bash
-curl -s -X POST http://192.168.1.100:8080/zk/config \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config \
   -H "Content-Type: application/json" \
   -d '{"key": "flow1_counter_step", "value": 50}' | jq .
 ```
@@ -4395,21 +4417,21 @@ curl -s -X POST http://192.168.1.100:8080/zk/config \
 Send a Flow 1 message and verify the counter increment in the MariaDB audit trail:
 
 ```bash
-curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
   -H "Content-Type: application/json" \
   -d '{"item_id": 902, "counter": 100}' | jq .
 
 # Counter after Process 2: should be 100 + 50 = 150
-mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT item_id, counter_value, history_trail FROM processed_messages WHERE item_id=902\G"
 ```
 
 #### E. Restore defaults
 
 ```bash
-curl -s -X POST http://192.168.1.100:8080/zk/config -H "Content-Type: application/json" \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config -H "Content-Type: application/json" \
   -d '{"key": "flow2_high_threshold", "value": 30.0}' | jq .
-curl -s -X POST http://192.168.1.100:8080/zk/config -H "Content-Type: application/json" \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config -H "Content-Type: application/json" \
   -d '{"key": "flow1_counter_step", "value": 10}' | jq .
 ```
 
@@ -4431,7 +4453,7 @@ on another node automatically wins and takes over consuming without message loss
 #### A. Identify the current Process 2 leader
 
 ```bash
-curl -s http://192.168.1.100:8080/zk/health | jq '.pipeline_health.process2'
+curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process2'
 # Note which node shows "state": "leader" — assume it is node2
 ```
 
@@ -4439,7 +4461,7 @@ curl -s http://192.168.1.100:8080/zk/health | jq '.pipeline_health.process2'
 
 ```bash
 for i in $(seq 1 5); do
-  curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
     -H "Content-Type: application/json" \
     -d "{\"item_id\": $((2000 + i)), \"initial_data\": \"leader-failover-test\"}" | jq -r .payload.message_id
 done
@@ -4449,9 +4471,9 @@ done
 
 ```bash
 # On node2 — stop only process2
-ssh 192.168.1.102 "sudo pcs resource ban flowfirst-p2-res-clone node2"
+ssh ${NODE2_IP} "sudo pcs resource ban flowfirst-p2-res-clone node2"
 # Or forcefully kill the process:
-ssh 192.168.1.102 "sudo systemctl stop flowfirst-process2"
+ssh ${NODE2_IP} "sudo systemctl stop flowfirst-process2"
 ```
 
 #### D. Watch the ZK election on node1 or node3
@@ -4466,7 +4488,7 @@ sudo journalctl -u flowfirst-process2 -f --no-pager | grep "LEADER\|election\|Re
 #### E. Verify all 5 messages were processed (no loss, no duplicates)
 
 ```bash
-mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT item_id, counter_value, history_trail
       FROM processed_messages
       WHERE item_id BETWEEN 2001 AND 2005
@@ -4478,8 +4500,8 @@ mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
 #### F. Restore the banned node
 
 ```bash
-ssh 192.168.1.102 "sudo pcs resource clear flowfirst-p2-res-clone"
-curl -s http://192.168.1.100:8080/zk/health | jq '.pipeline_health.process2'
+ssh ${NODE2_IP} "sudo pcs resource clear flowfirst-p2-res-clone"
+curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process2'
 # All three nodes now show registered (leader on one, follower on the others)
 ```
 
@@ -4493,7 +4515,7 @@ Process 4 and verify the ZooKeeper dedup barrier prevents a duplicate MariaDB ro
 #### A. Record a message_id that was already processed
 
 ```bash
-PROCESSED_ID=$(mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+PROCESSED_ID=$(mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -sNe "SELECT message_id FROM processed_messages ORDER BY id DESC LIMIT 1;")
 echo "Already processed: ${PROCESSED_ID}"
 ```
@@ -4502,11 +4524,11 @@ echo "Already processed: ${PROCESSED_ID}"
 
 ```bash
 # Get the raw payload that was already stored
-RAW=$(mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+RAW=$(mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -sNe "SELECT raw_payload FROM processed_messages WHERE message_id='${PROCESSED_ID}';")
 
 # Re-publish it directly to the flow1_p3_to_p4 queue using rabbitmqadmin
-sudo rabbitmqadmin -u flowuser -p flowpassword publish \
+sudo rabbitmqadmin -u "${RABBITMQ_USER}" -p "${RABBITMQ_PASSWORD}" publish \
   exchange='' routing_key='flow1_p3_to_p4' \
   properties='{"content_type":"application/json"}' \
   payload="${RAW}"
@@ -4523,7 +4545,7 @@ sudo journalctl -u flowfirst-process4 -f --no-pager | grep -i "dedup\|duplicate"
 #### D. Verify no duplicate row was inserted
 
 ```bash
-mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT COUNT(*) as row_count FROM processed_messages WHERE message_id='${PROCESSED_ID}';"
 # Expected: row_count = 1  (not 2)
 ```
@@ -4550,7 +4572,7 @@ Verify the ephemeral service registry updates in real time as processes start an
 
 ```bash
 # Via REST API (Process 1 exposes live registry in /health)
-curl -s http://192.168.1.100:8080/health | jq .zk_registered_workers
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq .zk_registered_workers
 # Expected: all 4 processes, all 3 nodes listed
 
 # Via zkCli
@@ -4567,7 +4589,7 @@ EOF
 
 ```bash
 # Stop process3 on node2
-ssh 192.168.1.102 "sudo systemctl stop flowfirst-process3"
+ssh ${NODE2_IP} "sudo systemctl stop flowfirst-process3"
 
 # Watch the registry — node2 should disappear within the ZK session timeout (~10s)
 sleep 12
@@ -4576,14 +4598,14 @@ sleep 12
 # Expected: [node1, node3]  — node2 is gone
 
 # Confirm via REST
-curl -s http://192.168.1.100:8080/health | jq '.zk_registered_workers.process3'
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq '.zk_registered_workers.process3'
 # Expected: ["node1", "node3"]
 ```
 
 #### C. Restart Process 3 on node2 and watch it re-register
 
 ```bash
-ssh 192.168.1.102 "sudo systemctl start flowfirst-process3"
+ssh ${NODE2_IP} "sudo systemctl start flowfirst-process3"
 sleep 3
 
 /opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
@@ -4599,7 +4621,7 @@ sleep 3
 #### D. Verify the pipeline health dashboard reflects the re-registration
 
 ```bash
-curl -s http://192.168.1.100:8080/zk/health | jq '.pipeline_health.process3'
+curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process3'
 # Expected: node2 back with "state": "follower" (or "leader" if it won election)
 ```
 
@@ -4613,7 +4635,7 @@ Confirm all expected greenthreads are running in each process immediately after 
 
 ```bash
 # 1. Check Process 1 greenthread status via the new /gt/status endpoint
-curl -s http://192.168.1.100:8080/gt/status | jq .
+curl -s http://${FLOWFIRST_VIP}:8080/gt/status | jq .
 ```
 
 *Expected response:*
@@ -4636,7 +4658,7 @@ curl -s http://192.168.1.100:8080/gt/status | jq .
 
 ```bash
 # 2. Check /health — now includes greenthread list and metrics
-curl -s http://192.168.1.100:8080/health | jq '{node: .node, greenthreads: .greenthreads, metrics: .metrics}'
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq '{node: .node, greenthreads: .greenthreads, metrics: .metrics}'
 ```
 
 ```bash
@@ -4669,7 +4691,7 @@ throughput improvement.
 #### A. Sequential baseline (single message timing)
 
 ```bash
-time curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+time curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
   -H "Content-Type: application/json" \
   -d '{"item_id": 1, "initial_data": "gt-timing-test"}' > /dev/null
 # Note the elapsed time — this is single-message latency
@@ -4678,7 +4700,7 @@ time curl -s -X POST http://192.168.1.100:8080/api/flow1 \
 #### B. Concurrent batch of 20 messages (greenthread parallelism)
 
 ```bash
-time curl -s -X POST http://192.168.1.100:8080/api/batch \
+time curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/batch \
   -H "Content-Type: application/json" \
   -d '{"count": 20}' | jq '{flow1_count: (.flow1_messages | length), flow2_count: (.flow2_messages | length)}'
 # Expected: flow1_count=20, flow2_count=20
@@ -4692,7 +4714,7 @@ time curl -s -X POST http://192.168.1.100:8080/api/batch \
 sudo rabbitmqctl list_queues name messages | grep flow1_p1_to_p2
 
 # Check metrics counter on Process 1
-curl -s http://192.168.1.100:8080/gt/status | jq .metrics.flow1_published
+curl -s http://${FLOWFIRST_VIP}:8080/gt/status | jq .metrics.flow1_published
 # Expected: ≥ 20
 ```
 
@@ -4702,7 +4724,7 @@ curl -s http://192.168.1.100:8080/gt/status | jq .metrics.flow1_published
 # Wait a few seconds for the pipeline to drain
 sleep 5
 
-mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT COUNT(*) as total, MAX(created_at) as latest
       FROM processed_messages
       WHERE flow_id = 1
@@ -4733,7 +4755,7 @@ connection.  A slow or blocked Flow 1 handler should not delay Flow 2 messages.
 
 ```bash
 # Set counter_step to a value that causes visible processing (ZK config, live)
-curl -s -X POST http://192.168.1.100:8080/zk/config \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config \
   -H "Content-Type: application/json" \
   -d '{"key": "flow1_counter_step", "value": 999}' | jq .
 ```
@@ -4744,7 +4766,7 @@ curl -s -X POST http://192.168.1.100:8080/zk/config \
 # Send all 20 in parallel from the client side
 for flow in flow1 flow2; do
     for i in $(seq 1 10); do
-        curl -s -X POST "http://192.168.1.100:8080/api/${flow}" \
+        curl -s -X POST "http://${FLOWFIRST_VIP}:8080/api/${flow}" \
           -H "Content-Type: application/json" \
           -d "{\"item_id\": $((3000 + i)), \"initial_data\": \"greenthread-independence-test\"}" \
           > /dev/null &
@@ -4773,7 +4795,7 @@ watch -n1 "sudo rabbitmqctl list_queues name messages | grep -E 'flow[12]_p1_to_
 #### E. Restore default counter step
 
 ```bash
-curl -s -X POST http://192.168.1.100:8080/zk/config \
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config \
   -H "Content-Type: application/json" \
   -d '{"key": "flow1_counter_step", "value": 10}' | jq .
 ```
@@ -4790,14 +4812,14 @@ after 2 seconds without operator intervention or process restart.
 
 ```bash
 sudo journalctl -u flowfirst-process2 -n 20 --no-pager | grep "Connected to RabbitMQ"
-# Example: [gt] [p2-flow1] RabbitMQ connected at 192.168.1.102:5672
+# Example: [gt] [p2-flow1] RabbitMQ connected at ${NODE2_IP}:5672
 ```
 
 #### B. Force-drop the RabbitMQ connection on that node
 
 ```bash
 # On the node Process 2 connected to (e.g. node2) — close all connections from node1
-ssh 192.168.1.102 "sudo rabbitmqctl close_all_connections 'greenthread restart test'"
+ssh ${NODE2_IP} "sudo rabbitmqctl close_all_connections 'greenthread restart test'"
 ```
 
 #### C. Watch Process 2 on node1 detect the drop and auto-restart consumers
@@ -4808,7 +4830,7 @@ sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "restart|Reconnect
 # [gt] Greenthread 'p2_flow1_consumer' raised: <connection error>
 # [gt] Restarting 'p2_flow1_consumer' in 2s...
 # [gt] [p2-flow1] RabbitMQ not ready (attempt 1/20): ... — retrying in 5s...
-# [gt] [p2-flow1] RabbitMQ connected at 192.168.1.102:5672
+# [gt] [p2-flow1] RabbitMQ connected at ${NODE2_IP}:5672
 # [P2][gt] flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
 ```
 
@@ -4817,7 +4839,7 @@ sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "restart|Reconnect
 ```bash
 # Send 5 Flow 1 messages while the restart is in progress
 for i in $(seq 4001 4005); do
-    curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+    curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
       -H "Content-Type: application/json" \
       -d "{\"item_id\": ${i}, \"initial_data\": \"auto-restart-test\"}" | jq -r .payload.message_id
 done
@@ -4825,7 +4847,7 @@ done
 # Wait for pipeline to drain
 sleep 15
 
-mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT item_id, counter_value FROM processed_messages
       WHERE item_id BETWEEN 4001 AND 4005 ORDER BY item_id;"
 # Expected: all 5 rows present (messages queued in RabbitMQ during restart window,
@@ -4844,9 +4866,9 @@ Each process emits a structured throughput report every `GT_METRICS_INTERVAL_S` 
 ```bash
 # This requires restarting the processes since GT_METRICS_INTERVAL_S is read at startup.
 # On each node, update .env and restart via Pacemaker:
-ssh 192.168.1.101 "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=15/' /opt/flowfirst/.env"
-ssh 192.168.1.102 "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=15/' /opt/flowfirst/.env"
-ssh 192.168.1.103 "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=15/' /opt/flowfirst/.env"
+ssh ${NODE1_IP} "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=15/' /opt/flowfirst/.env"
+ssh ${NODE2_IP} "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=15/' /opt/flowfirst/.env"
+ssh ${NODE3_IP} "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=15/' /opt/flowfirst/.env"
 
 sudo pcs resource restart flowfirst-p1-res-clone
 sudo pcs resource restart flowfirst-p2-res-clone
@@ -4859,10 +4881,10 @@ sudo pcs resource restart flowfirst-p4-res-clone
 ```bash
 # Send 50 messages across both flows
 for i in $(seq 1 25); do
-    curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+    curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
       -H "Content-Type: application/json" \
       -d "{\"item_id\": $((5000 + i)), \"initial_data\": \"metrics-test\"}" > /dev/null
-    curl -s -X POST http://192.168.1.100:8080/api/flow2 \
+    curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 \
       -H "Content-Type: application/json" \
       -d "{\"item_id\": $((5000 + i)), \"value\": 28.5}" > /dev/null
 done
@@ -4875,7 +4897,7 @@ echo "50 messages sent"
 # Wait for metrics interval
 sleep 16
 
-curl -s http://192.168.1.100:8080/gt/status | jq .metrics
+curl -s http://${FLOWFIRST_VIP}:8080/gt/status | jq .metrics
 # Expected:
 # {
 #   "flow1_published": 25,
@@ -4904,7 +4926,7 @@ sudo journalctl -u flowfirst-process4 --since "1 minute ago" --no-pager \
 #### E. Restore metrics interval to default
 
 ```bash
-for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
     ssh "${node}" "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=60/' /opt/flowfirst/.env"
 done
 sudo pcs resource restart flowfirst-p1-res-clone

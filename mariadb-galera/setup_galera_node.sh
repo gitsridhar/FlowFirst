@@ -18,10 +18,19 @@ if [ -f "${ROOT_DIR}/.env" ]; then
 fi
 
 CURRENT_NODE_NAME="${1:-${NODE_NAME:-node1}}"
-CURRENT_NODE_IP="${2:-${CURRENT_NODE_IP:-192.168.1.101}}"
-NODE1_IP="${3:-${NODE1_IP:-192.168.1.101}}"
-NODE2_IP="${4:-${NODE2_IP:-192.168.1.102}}"
-NODE3_IP="${5:-${NODE3_IP:-192.168.1.103}}"
+CURRENT_NODE_IP="${2:-${CURRENT_NODE_IP:-}}"
+NODE1_IP="${3:-${NODE1_IP:-}}"
+NODE2_IP="${4:-${NODE2_IP:-}}"
+NODE3_IP="${5:-${NODE3_IP:-}}"
+
+# Validate required IP variables (must come from .env — no hardcoded fallbacks)
+for _var in CURRENT_NODE_IP NODE1_IP NODE2_IP NODE3_IP; do
+    _val="${!_var:-}"
+    if [ -z "${_val}" ]; then
+        echo "ERROR: ${_var} is not set. Set it in /opt/flowfirst/.env and re-run."
+        exit 1
+    fi
+done
 MARIADB_PORT="${MARIADB_PORT:-3306}"
 MARIADB_GALERA_CLUSTER_NAME="${MARIADB_GALERA_CLUSTER_NAME:-flowfirst_galera_cluster}"
 MARIADB_GALERA_WSREP_PROVIDER="${MARIADB_GALERA_WSREP_PROVIDER:-/usr/lib64/galera-4/libgalera_smm.so}"

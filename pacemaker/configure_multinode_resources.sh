@@ -17,9 +17,15 @@ if [ -f "${ROOT_DIR}/.env" ]; then
     set +a
 fi
 
-VIP="${1:-${FLOWFIRST_VIP:-192.168.1.100}}"
-VIP_NIC="${2:-${VIP_NIC:-eth0}}"
+VIP="${1:-${FLOWFIRST_VIP:-}}"
+VIP_NIC="${2:-${VIP_NIC:-}}"
 VIP_CIDR_NETMASK="${3:-${VIP_CIDR_NETMASK:-24}}"
+
+# Validate VIP is set (must come from .env)
+if [[ -z "${VIP}" ]] || [[ "${VIP}" =~ ^\$\{ ]]; then
+    echo "ERROR: FLOWFIRST_VIP is not set. Set it in /opt/flowfirst/.env and re-run."
+    exit 1
+fi
 
 echo "=================================================================="
 echo " Configuring Multi-Node Pacemaker Resources"

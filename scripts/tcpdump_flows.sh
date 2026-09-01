@@ -8,15 +8,37 @@
 #   sudo ./scripts/tcpdump_flows.sh analyse [pcap_file]       Print round-trip summary for all protocols
 #   sudo ./scripts/tcpdump_flows.sh all    [iface] [vip_ip]   start + run-flows + stop + analyse
 #
+# VIP and interface are read from /opt/flowfirst/.env (FLOWFIRST_VIP, VIP_NIC).
+# Pass them as positional arguments to override.
+#
 # Requires: tcpdump, tshark (wireshark-cli), curl, jq, awk, sed
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Source .env so FLOWFIRST_VIP and VIP_NIC are available
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${ROOT_DIR}/.env"
+    set +a
+fi
+
 PROG="$(basename "$0")"
 PCAP_DIR=/var/log/flowfirst/pcap
 PID_FILE=/var/run/tcpdump_flowfirst.pid
-DEFAULT_IFACE=eth0
-DEFAULT_VIP=192.168.1.100
+
+# Defaults come from .env; positional args override for one-off use
+DEFAULT_IFACE="${VIP_NIC:-eth0}"
+DEFAULT_VIP="${FLOWFIRST_VIP:-}"
+
+if [[ -z "${DEFAULT_VIP}" ]]; then
+    echo "ERROR: FLOWFIRST_VIP is not set in .env."
+    echo "  Set FLOWFIRST_VIP=<your-vip-ip> in /opt/flowfirst/.env"
+    exit 1
+fi
 
 # Capture filter covering all FlowFirst cluster protocols
 CAPTURE_FILTER='port 5672 or port 25672 or port 5405 or port 4567 or port 4568 or port 4444 or port 3306 or port 8080 or port 9000'

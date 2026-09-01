@@ -40,10 +40,19 @@ ZK_ELECTION_PORT="${ZK_ELECTION_PORT:-3888}"
 ZK_USER="zookeeper"
 ZK_HEAP_MB="${ZK_HEAP_MB:-256}"
 
-NODE1_IP="${NODE1_IP:-192.168.1.101}"
-NODE2_IP="${NODE2_IP:-192.168.1.102}"
-NODE3_IP="${NODE3_IP:-192.168.1.103}"
+NODE1_IP="${NODE1_IP:-}"
+NODE2_IP="${NODE2_IP:-}"
+NODE3_IP="${NODE3_IP:-}"
 CURRENT_NODE_IP="${CURRENT_NODE_IP:-}"
+
+# Validate required IP variables (must come from .env — no hardcoded fallbacks)
+for _var in NODE1_IP NODE2_IP NODE3_IP CURRENT_NODE_IP; do
+    _val="${!_var:-}"
+    if [[ -z "${_val}" ]] || [[ "${_val}" =~ ^\$\{ ]]; then
+        echo "ERROR: ${_var} is not set. Set it in /opt/flowfirst/.env and re-run."
+        exit 1
+    fi
+done
 
 # Derive this node's myid (1, 2, or 3) from its IP
 if [ "${CURRENT_NODE_IP}" = "${NODE1_IP}" ]; then

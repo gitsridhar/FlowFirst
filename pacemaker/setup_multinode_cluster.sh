@@ -29,12 +29,21 @@ fi
 
 CLUSTER_NAME="${CLUSTER_NAME:-flowfirst_cluster}"
 NODE1_NAME="${NODE1_NAME:-node1}"
-NODE1_IP="${NODE1_IP:-192.168.1.101}"
+NODE1_IP="${NODE1_IP:-}"
 NODE2_NAME="${NODE2_NAME:-node2}"
-NODE2_IP="${NODE2_IP:-192.168.1.102}"
+NODE2_IP="${NODE2_IP:-}"
 NODE3_NAME="${NODE3_NAME:-node3}"
-NODE3_IP="${NODE3_IP:-192.168.1.103}"
+NODE3_IP="${NODE3_IP:-}"
 HACLUSTER_PASS="${HACLUSTER_PASS:-hacluster123}"
+
+# Validate required IP variables (must come from .env — no hardcoded fallbacks)
+for _var in NODE1_IP NODE2_IP NODE3_IP; do
+    _val="${!_var:-}"
+    if [[ -z "${_val}" ]] || [[ "${_val}" =~ ^\$\{ ]]; then
+        echo "ERROR: ${_var} is not set. Set it in /opt/flowfirst/.env and re-run."
+        exit 1
+    fi
+done
 
 # Cluster ports that must be open on every node
 # 2224/tcp  pcsd REST API  (pcs host auth)

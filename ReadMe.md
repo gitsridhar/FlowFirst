@@ -20,64 +20,51 @@ This project implements an enterprise-grade, distributed inter-process communica
 
 ```mermaid
 graph TD
-    Client["Client / curl Commands<br/>(Target: http://FLOWFIRST_VIP:8080)"] -->|Virtual IP FLOWFIRST_VIP:8080| VIP["Pacemaker Virtual IP (VIP)<br/>FLOWFIRST_VIP"]
+    Client["Client / curl"] -->|"VIP:8080"| VIP["Pacemaker VIP"]
+    VIP --> HAProxy["HAProxy\nREST :8080 round-robin\nSQL :3306 load-balanced"]
 
-    subgraph Cluster ["Pacemaker High Availability Cluster (flowfirst_cluster)"]
-        VIP --> HAProxy["HAProxy Load Balancer<br/>- REST API: :8080 (Round-Robin)<br/>- MariaDB Galera: :3306 (Multi-Master)"]
-
-        subgraph Node1 ["Node 1 (NODE1_IP)"]
-            P1_N1["Process 1: REST API (:8080)"]
-            P2_N1["Process 2: Examiner / Reflector"]
-            P3_N1["Process 3: Reflector / Forwarder"]
-            P4_N1["Process 4: DB Persister"]
-            RMQ_N1[("RabbitMQ Node 1")]
-            GAL_N1[("MariaDB Galera Node 1")]
-        end
-
-        subgraph Node2 ["Node 2 (NODE2_IP)"]
-            P1_N2["Process 1: REST API (:8080)"]
-            P2_N2["Process 2: Examiner / Reflector"]
-            P3_N2["Process 3: Reflector / Forwarder"]
-            P4_N2["Process 4: DB Persister"]
-            RMQ_N2[("RabbitMQ Node 2")]
-            GAL_N2[("MariaDB Galera Node 2")]
-        end
-
-        subgraph Node3 ["Node 3 (NODE3_IP)"]
-            P1_N3["Process 1: REST API (:8080)"]
-            P2_N3["Process 2: Examiner / Reflector"]
-            P3_N3["Process 3: Reflector / Forwarder"]
-            P4_N3["Process 4: DB Persister"]
-            RMQ_N3[("RabbitMQ Node 3")]
-            GAL_N3[("MariaDB Galera Node 3")]
-        end
-
-        HAProxy -->|Round-Robin API| P1_N1
-        HAProxy -->|Round-Robin API| P1_N2
-        HAProxy -->|Round-Robin API| P1_N3
-
-        P4_N1 -.->|SQL INSERT| HAProxy
-        P4_N2 -.->|SQL INSERT| HAProxy
-        P4_N3 -.->|SQL INSERT| HAProxy
-
-        HAProxy -->|SQL Load Balance| GAL_N1
-        HAProxy -->|SQL Load Balance| GAL_N2
-        HAProxy -->|SQL Load Balance| GAL_N3
-
-        GAL_N1 <===>|Galera wsrep Sync 4567/tcp| GAL_N2
-        GAL_N2 <===>|Galera wsrep Sync 4567/tcp| GAL_N3
-        GAL_N1 <===>|Galera wsrep Sync 4567/tcp| GAL_N3
+    subgraph Node1[Node 1]
+        P1a["P1: REST API"]
+        P2a["P2: Examiner"]
+        P3a["P3: Reflector"]
+        P4a["P4: DB Persister"]
+        RMQ1[("RabbitMQ")]
+        GAL1[("Galera Node 1")]
     end
 
-    style Client fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px
-    style VIP fill:#ffecb3,stroke:#ff8f00,stroke-width:3px
-    style HAProxy fill:#e0f2f1,stroke:#00897b,stroke-width:2px
-    style Node1 fill:#f9fbe7,stroke:#9e9d24,stroke-width:2px
-    style Node2 fill:#f9fbe7,stroke:#9e9d24,stroke-width:2px
-    style Node3 fill:#f9fbe7,stroke:#9e9d24,stroke-width:2px
-    style GAL_N1 fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px
-    style GAL_N2 fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px
-    style GAL_N3 fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px
+    subgraph Node2[Node 2]
+        P1b["P1: REST API"]
+        P2b["P2: Examiner"]
+        P3b["P3: Reflector"]
+        P4b["P4: DB Persister"]
+        RMQ2[("RabbitMQ")]
+        GAL2[("Galera Node 2")]
+    end
+
+    subgraph Node3[Node 3]
+        P1c["P1: REST API"]
+        P2c["P2: Examiner"]
+        P3c["P3: Reflector"]
+        P4c["P4: DB Persister"]
+        RMQ3[("RabbitMQ")]
+        GAL3[("Galera Node 3")]
+    end
+
+    HAProxy -->|"Round-Robin"| P1a
+    HAProxy -->|"Round-Robin"| P1b
+    HAProxy -->|"Round-Robin"| P1c
+
+    P4a -.->|"SQL"| HAProxy
+    P4b -.->|"SQL"| HAProxy
+    P4c -.->|"SQL"| HAProxy
+
+    HAProxy -->|"SQL"| GAL1
+    HAProxy -->|"SQL"| GAL2
+    HAProxy -->|"SQL"| GAL3
+
+    GAL1 <-->|"wsrep"| GAL2
+    GAL2 <-->|"wsrep"| GAL3
+    GAL1 <-->|"wsrep"| GAL3
 ```
 
 ---
@@ -87,45 +74,43 @@ graph TD
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as HTTP Client (curl)
-    participant VIP as Virtual IP (FLOWFIRST_VIP)
-    participant HAP as HAProxy Load Balancer
-    participant P1 as Process 1 (Node 1/2/3 REST API)
-    participant Q12 as RabbitMQ (flow1_p1_to_p2)
-    participant P2 as Process 2 (Examiner / Reflector)
-    participant Q23 as RabbitMQ (flow1_p2_to_p3)
-    participant P3 as Process 3 (Reflector / Forwarder)
-    participant Q34 as RabbitMQ (flow1_p3_to_p4)
-    participant P4 as Process 4 (DB Persister)
-    participant GAL1 as Galera Node 1 (MariaDB)
-    participant GAL2 as Galera Node 2 (MariaDB)
-    participant GAL3 as Galera Node 3 (MariaDB)
+    actor Client as curl Client
+    participant VIP as Pacemaker VIP
+    participant HAP as HAProxy
+    participant P1 as Process 1
+    participant RMQ as RabbitMQ
+    participant P2 as Process 2
+    participant P3 as Process 3
+    participant P4 as Process 4
+    participant DB as Galera Cluster
 
-    Note over Client, GAL3: === 1. REST API INVOCATION VIA VIRTUAL IP ===
-    Client->>VIP: POST http://FLOWFIRST_VIP:8080/api/flow1
-    VIP->>HAP: Forward request to HAProxy (:8080)
-    HAP->>P1: Route to Node 1/2/3 via Round-Robin
-    P1->>Q12: Publish message to queue flow1_p1_to_p2
-    P1-->>Client: HTTP 200 OK (includes handled_by_node & message_id)
+    rect rgb(240, 245, 255)
+        Note over Client,P1: Phase 1 - REST API via Virtual IP
+        Client->>VIP: POST /api/flow1
+        VIP->>HAP: forward to port 8080
+        HAP->>P1: round-robin to one node
+        P1->>RMQ: publish to flow1_p1_to_p2
+        P1-->>Client: HTTP 200 OK
+    end
 
-    Note over Q12, P4: === 2. ASYNCHRONOUS PIPELINE TRANSFORMATION ===
-    Q12->>P2: Consume Flow 1 message
-    Note over P2: Modify data: counter += 10, append history audit
-    P2->>Q23: Reflect modified message to flow1_p2_to_p3
-    Q23->>P3: Consume reflected message
-    Note over P3: Attach forward audit stage
-    P3->>Q34: Forward to flow1_p3_to_p4
-    Q34->>P4: Consume message
+    rect rgb(240, 255, 245)
+        Note over RMQ,P4: Phase 2 - Async Pipeline Transformation
+        RMQ->>P2: consume message
+        Note over P2: counter += step, append audit entry
+        P2->>RMQ: reflect to flow1_p2_to_p3
+        RMQ->>P3: consume reflected message
+        Note over P3: attach forward audit stage
+        P3->>RMQ: forward to flow1_p3_to_p4
+        RMQ->>P4: consume final message
+    end
 
-    Note over P4, GAL3: === 3. PERSISTENCE & GALERA SYNCHRONOUS REPLICATION ===
-    P4->>HAP: SQL INSERT into processed_messages (port 3306)
-    HAP->>GAL1: Write to active Galera node (e.g. Node 1)
-    Note over GAL1, GAL3: Galera wsrep multi-master synchronous replication
-    GAL1-->>GAL2: Replicate write-set (port 4567)
-    GAL1-->>GAL3: Replicate write-set (port 4567)
-    GAL2-->>GAL1: Certification ACK
-    GAL3-->>GAL1: Certification ACK
-    GAL1-->>P4: SQL Commit Success (All 3 nodes synchronized)
+    rect rgb(255, 245, 240)
+        Note over P4,DB: Phase 3 - Persist and Galera Replication
+        P4->>HAP: SQL INSERT via port 3306
+        HAP->>DB: write to active Galera node
+        DB-->>DB: wsrep certification across all 3 nodes
+        DB-->>P4: commit success
+    end
 ```
 
 ---

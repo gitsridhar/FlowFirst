@@ -174,6 +174,77 @@ erDiagram
 
 ---
 
+## Quick Reference
+
+### Installation Phases
+
+| Phase | Runs on | Description | Key script / command |
+|---|---|---|---|
+| **0a** | All nodes | Time synchronisation — install & configure Chrony | `dnf install -y chrony` → `chronyc makestep` |
+| **0b** | All nodes | Clone repo, create Python venv, copy `.env` | `git clone` → `python3 -m venv .venv` → `pip install -r requirements.txt` |
+| **1** | All nodes | MariaDB Galera cluster setup | `mariadb-galera/setup_galera_node.sh` |
+| **1 bootstrap** | Node 1 only | Bootstrap the primary Galera node | `mariadb-galera/bootstrap_galera.sh` |
+| **1b** | All nodes | ZooKeeper ensemble (leader election, config watch, dedup) | `zookeeper/setup_zookeeper.sh` |
+| **1c** | All nodes | Raise OS file-descriptor limit for eventlet greenthreads | `ulimit -n 65536` + `/etc/security/limits.d/flowfirst.conf` |
+| **2** | All nodes | RabbitMQ server & Erlang install | `scripts/install_rabbitmq_rhel9.sh` |
+| **3** | All nodes | Identify cluster NIC, set `VIP_NIC` in `.env`, generate HAProxy config | `haproxy/setup_haproxy.sh` |
+| **4** | All nodes | Install & disable systemd service units (Pacemaker manages lifecycle) | `systemd/install_services.sh` |
+| **5a** | All nodes | Prepare each node for Pacemaker (packages, `pcsd`, firewall, `/etc/hosts`) | `pacemaker/setup_multinode_cluster.sh --prepare-node` |
+| **5b** | Node 1 only | Initialise cluster, authenticate nodes, deploy VIP + HAProxy + process clones | `pacemaker/setup_multinode_cluster.sh` → `pacemaker/configure_multinode_resources.sh` |
+| **5c** | Node 1 only | Verify HAProxy is running under Pacemaker after cluster start | `pcs status` → `ss -tlnp \| grep haproxy` |
+
+---
+
+### Scenarios Quick Reference
+
+| # | Title | Category | What it covers |
+|---|---|---|---|
+| [1](#scenario-1-invoke-rest-api-via-virtual-ip-verify-round-robin-load-balancing) | Invoke REST API via VIP & Verify Round-Robin | REST API | Health check, Flow 1 & Flow 2 curl, round-robin proof |
+| [2](#scenario-2-end-to-end-flow-execution-database-content-examination) | End-to-End Flow Execution & DB Examination | Pipeline | Trigger both flows, inspect MariaDB audit trails |
+| [3](#scenario-3-synchronous-multi-master-galera-replication-verification) | Synchronous Galera Replication Verification | Galera | Query all 3 nodes, confirm identical records |
+| [4](#scenario-4-galera-node-outage-automatic-quorum-resynchronization) | Galera Node Outage & Quorum Resync | Galera | Stop one node, verify 2-node quorum, rejoin |
+| [5](#scenario-5-galera-ist-incremental-state-transfer) | Galera IST — Incremental State Transfer | Galera | Trigger IST, watch `Joiner/Receiving IST` state |
+| [6](#scenario-6-galera-sst-state-snapshot-transfer) | Galera SST — State Snapshot Transfer | Galera | Force SST, watch `Donor/Desynced`, confirm full copy |
+| [7](#scenario-7-gcachesize-impact-on-ist-vs-sst) | `gcache.size` Impact on IST vs SST | Galera | Resize gcache, demonstrate IST/SST decision boundary |
+| [8](#scenario-8-node-failure-virtual-ip-vip-failover) | Node Failure & VIP Failover | Pacemaker | `pcs node standby`, VIP migrates, zero downtime |
+| [9](#scenario-9-haproxy-real-time-statistics-dashboard) | HAProxy Statistics Dashboard | HAProxy | Access live stats at `${FLOWFIRST_VIP}:${HAPROXY_STATS_PORT}` |
+| [10](#scenario-10-pacemaker-cluster-validation-with-crm_mon-crm_resource) | Pacemaker Validation (`crm_mon`) | Pacemaker | Full status, locate VIP, move resource, standby/recover |
+| [11](#scenario-11-stop-start-a-single-pipeline-process-on-one-node) | Stop & Start a Single Process (one node) | Service lifecycle | `pcs resource ban/clear` one clone on one node |
+| [12](#scenario-12-stop-start-all-four-pipeline-processes-cluster-wide) | Stop & Start All Processes (cluster-wide) | Service lifecycle | Disable/enable all 4 clones, validate API |
+| [13](#scenario-13-stop-start-rabbitmq-on-a-single-node) | Stop & Start RabbitMQ (one node) | Service lifecycle | Verify 2-node RMQ quorum, rejoin |
+| [14](#scenario-14-stop-start-mariadb-galera-on-a-single-node) | Stop & Start MariaDB (one node) | Service lifecycle | Verify 2-node Galera, normal rejoin |
+| [15](#scenario-15-stop-start-haproxy-on-a-single-node) | Stop & Start HAProxy (one node) | Service lifecycle | Move VIP group via `pcs resource move` |
+| [16](#scenario-16-reboot-a-single-node-node3-zero-pipeline-downtime) | Reboot One Node — Zero Downtime | OS reboot | Node3 reboot, cluster continuity, auto-rejoin |
+| [17](#scenario-17-reboot-the-node-hosting-the-vip-node1-forced-failover) | Reboot VIP-Holding Node — Forced Failover | OS reboot | Evacuate node1, reboot, confirm VIP migrated |
+| [18](#scenario-18-sequential-rolling-reboot-of-all-three-nodes) | Sequential Rolling Reboot (all 3 nodes) | OS reboot | Reboot one at a time, quorum maintained throughout |
+| [19](#scenario-19-simultaneous-reboot-of-all-three-nodes-cluster-cold-start) | Simultaneous Reboot — Cluster Cold Start | OS reboot | All 3 nodes down, Galera bootstrap, Pacemaker cold start |
+| [20](#scenario-20-soft-network-degradation-latency-packet-loss-tc-netem) | Soft Network Degradation (latency + loss) | Network glitch | `tc netem` 300 ms + 10% loss, observe Corosync/Galera/RMQ |
+| [21](#scenario-21-high-bandwidth-throttling-simulating-a-saturated-link) | High Bandwidth Throttling | Network glitch | 1 Mbit/s cap + 2% corruption, Galera IST behaviour |
+| [22](#scenario-22-hard-network-partition-iptables-drop-between-two-nodes) | Hard Network Partition (`iptables` DROP) | Network glitch | Full 2-node split, fencing decision, VIP stays up |
+| [23](#scenario-23-selective-port-level-block-corosync-ring-only) | Selective Block — Corosync Ring Only | Network glitch | Block UDP 5405, Pacemaker loses heartbeat, app flows |
+| [24](#scenario-24-selective-port-level-block-galera-replication-only) | Selective Block — Galera Replication Only | Network glitch | Block TCP 4567, Galera degrades, Corosync stays healthy |
+| [25](#scenario-25-selective-port-level-block-rabbitmq-amqp-only) | Selective Block — RabbitMQ AMQP Only | Network glitch | Block TCP 5672, pika reconnects to surviving node |
+| [26](#scenario-26-intermittent-flapping-periodic-network-glitch) | Intermittent Flapping — Periodic Glitch | Network glitch | Background glitch loop, Pacemaker failure counters |
+| [27](#scenario-27-capture-setup-identify-interfaces-and-start-captures) | Capture Setup — Identify Interfaces | tcpdump | Identify cluster NICs, start background `tcpdump` |
+| [28](#scenario-28-amqp-round-trip-flow1-flow2-pipeline-execution) | AMQP Round-Trip — Flow 1 & Flow 2 | tcpdump | TCP handshake, AMQP frames, publish/deliver/ack |
+| [29](#scenario-29-rest-api-haproxy-round-trip-verification) | REST API / HAProxy Round-Trip | tcpdump | POST→200 OK, HAProxy SYN→SYN-ACK round-trip |
+| [30](#scenario-30-corosync-heartbeat-round-trip-verification) | Corosync Heartbeat Round-Trip | tcpdump | UDP 5405 heartbeat counts, all 6 node pairs |
+| [31](#scenario-31-galera-wsrep-replication-round-trip-verification) | Galera wsrep Replication Round-Trip | tcpdump | TCP 4567 writesets, retransmission check |
+| [32](#scenario-32-network-round-trip-during-glitch-beforeduringafter-comparison) | Round-Trip During Glitch — Before/During/After | tcpdump | RTT baseline vs. injected latency comparison |
+| [33](#scenario-33-tcpdump-based-full-pipeline-flow-trace) | tcpdump-Based Full Pipeline Flow Trace | tcpdump | Trace one message hop-by-hop across all 3 pcap files |
+| [34](#scenario-34-zookeeper-ensemble-health-leader-election-verification) | ZooKeeper Ensemble Health & Leader Election | ZooKeeper | `ruok`/`mntr`, confirm leader/follower states |
+| [35](#scenario-35-live-config-change-via-zookeeper-no-restart-required) | Live Config Change via ZooKeeper | ZooKeeper | Update threshold/step at runtime, all nodes hot-reload |
+| [36](#scenario-36-zookeeper-leader-failover-kill-the-elected-leader-node) | ZooKeeper Leader Failover | ZooKeeper | Stop leader node, watch next candidate elected |
+| [37](#scenario-37-zookeeper-dedup-barrier-prevent-double-insert-on-failover) | ZooKeeper Dedup Barrier | ZooKeeper | Re-deliver message, confirm dedup znode blocks double-insert |
+| [38](#scenario-38-zookeeper-service-registry-observe-live-process-registration) | ZooKeeper Service Registry | ZooKeeper | Ephemeral znodes, stop process, confirm auto-deregister |
+| [39](#scenario-39-verify-greenthread-startup-pool-status) | Verify Greenthread Startup & Pool Status | Greenthreads | `GET /gt/status`, list named greenthreads, pool size |
+| [40](#scenario-40-concurrent-batch-publishing-greenthread-parallelism-in-process-1) | Concurrent Batch Publishing | Greenthreads | `POST /api/batch`, concurrent GreenPool publish |
+| [41](#scenario-41-per-queue-greenthread-independence-flow-1-blockage-does-not-stall-flow-2) | Per-Queue Greenthread Independence | Greenthreads | Slow one queue, confirm sibling greenthread unaffected |
+| [42](#scenario-42-greenthread-auto-restart-on-rabbitmq-consumer-failure) | Greenthread Auto-Restart on RMQ Failure | Greenthreads | Kill RMQ connection, greenthread reconnects automatically |
+| [43](#scenario-43-greenthread-metrics-reporter-throughput-monitoring) | Greenthread Metrics Reporter | Greenthreads | Read throughput counters from `/gt/status` and journal |
+
+---
+
 ## Complete Multi-Node Installation & Setup (RHEL 9.6)
 
 ---

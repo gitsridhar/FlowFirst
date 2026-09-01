@@ -37,6 +37,7 @@ ZK_LOG_DIR="${ZK_LOG_DIR:-/var/log/zookeeper}"
 ZK_CLIENT_PORT="${ZK_CLIENT_PORT:-2181}"
 ZK_PEER_PORT="${ZK_PEER_PORT:-2888}"
 ZK_ELECTION_PORT="${ZK_ELECTION_PORT:-3888}"
+ZK_ADMIN_PORT="${ZK_ADMIN_PORT:-8081}"
 ZK_USER="zookeeper"
 ZK_HEAP_MB="${ZK_HEAP_MB:-256}"
 
@@ -163,7 +164,7 @@ autopurge.purgeInterval=1
 
 # Admin server (ZK 3.5+)
 admin.enableServer=true
-admin.serverPort=8080
+admin.serverPort=${ZK_ADMIN_PORT}
 EOF
 
 # ---------------------------------------------------------------------------

@@ -99,6 +99,11 @@ QUEUE_FLOW2_P1_TO_P2 = "flow2_p1_to_p2"
 QUEUE_FLOW2_P2_TO_P3 = "flow2_p2_to_p3"
 QUEUE_FLOW2_P3_REFLECTED = "flow2_p3_reflected"
 
+# Greenthread (eventlet) settings
+GT_POOL_SIZE          = int(os.getenv("GT_POOL_SIZE",          "1000"))
+GT_WORKER_CONCURRENCY = int(os.getenv("GT_WORKER_CONCURRENCY", "4"))
+GT_METRICS_INTERVAL_S = int(os.getenv("GT_METRICS_INTERVAL_S", "60"))
+
 # ZooKeeper connection settings
 ZK_HOSTS = os.getenv(
     "ZK_HOSTS",

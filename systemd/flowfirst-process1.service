@@ -17,6 +17,8 @@ StandardError=journal
 SyslogIdentifier=flowfirst-p1
 
 # Security Sandbox options
+# Greenthread support: allow up to 65536 open file descriptors per process
+LimitNOFILE=65536
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only

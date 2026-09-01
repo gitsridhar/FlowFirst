@@ -1,9 +1,13 @@
+# IMPORTANT: monkey_patch() must be the very first call, before any other import.
+import gt
+gt.monkey_patch()
+
 import json
 import time
 import pika
+import eventlet
 from config import (
     NODE_NAME,
-    get_connection,
     setup_queues,
     QUEUE_FLOW1_P3_TO_P4,
     QUEUE_FLOW2_P3_REFLECTED,
@@ -12,147 +16,206 @@ from db import init_database, insert_processed_message
 import zk as zklib
 
 
-def on_flow1_message(ch, method, properties, body):
+def handle_flow1_message(ch, method, properties, body):
     """
-    Process 4 handler for Flow 1:
-    Receives forwarded message from Process 3.
-    Uses ZooKeeper dedup barrier to prevent double-inserts on Pacemaker failover.
-    Saves to MariaDB.
+    Flow 1 final handler — runs inside the flow1 consumer greenthread.
+    ZK dedup barrier prevents double-inserts on Pacemaker failover re-delivery.
     """
     try:
-        data = json.loads(body.decode("utf-8"))
+        data   = json.loads(body.decode("utf-8"))
         msg_id = data.get("message_id", "")
-        print(f"\n[Process 4] [Flow 1 FINAL RECEIVE] Consumed item #{data.get('item_id')} (message_id: {msg_id})")
+        print(f"\n[P4][gt] [Flow 1] Consumed item #{data.get('item_id')} (msg_id={msg_id})")
 
-        # --- ZooKeeper dedup barrier ---
+        # ZooKeeper dedup barrier (atomic create — first caller wins)
         if not zklib.check_and_mark_processed(msg_id):
-            print(f"[Process 4] [Flow 1] DUPLICATE detected via ZK dedup — skipping insert for {msg_id}")
+            print(f"[P4][gt] [Flow 1] DUPLICATE via ZK dedup — skipping insert for {msg_id}")
+            gt.metrics_counter["flow1_dedup_skipped"] += 1
             ch.basic_ack(delivery_tag=method.delivery_tag)
             return
 
-        data["history"].append(
-            {
-                "stage": "process4_saved_to_mariadb",
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "persisted_by": NODE_NAME,
-                "database_action": "INSERT/UPDATE processed_messages",
-            }
-        )
+        data["history"].append({
+            "stage": "process4_saved_to_mariadb",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "persisted_by": NODE_NAME,
+            "database_action": "INSERT/UPDATE processed_messages",
+        })
 
         row_id = insert_processed_message(data)
-        print(f"[Process 4] [Flow 1] Successfully persisted to MariaDB (row_id: {row_id})")
-        print(f"             Initial Data: {data.get('initial_data')}")
-        print(f"             Final Counter: {data.get('counter')}")
-        print(f"             Audit Steps: {len(data.get('history', []))} recorded")
-
+        gt.metrics_counter["flow1_persisted"] += 1
+        print(f"[P4][gt] [Flow 1] Persisted to MariaDB (row_id={row_id}, "
+              f"counter={data.get('counter')}, steps={len(data.get('history', []))})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
     except Exception as e:
-        print(f"[Process 4] [Flow 1] Database / Processing Error: {e}")
+        print(f"[P4][gt] [Flow 1] Error: {e}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
-def on_flow2_message(ch, method, properties, body):
+def handle_flow2_message(ch, method, properties, body):
     """
-    Process 4 handler for Flow 2:
-    Consumes reflected message from Process 3.
-    Uses ZooKeeper dedup barrier to prevent double-inserts on Pacemaker failover.
-    Persists into MariaDB.
+    Flow 2 final handler — runs inside the flow2 consumer greenthread.
+    ZK dedup barrier prevents double-inserts.
     """
     try:
-        data = json.loads(body.decode("utf-8"))
+        data   = json.loads(body.decode("utf-8"))
         msg_id = data.get("message_id", "")
-        print(f"\n[Process 4] [Flow 2 FINAL RECEIVE] Consumed reflected item #{data.get('item_id')} (message_id: {msg_id})")
+        print(f"\n[P4][gt] [Flow 2] Consumed item #{data.get('item_id')} (msg_id={msg_id})")
 
-        # --- ZooKeeper dedup barrier ---
         if not zklib.check_and_mark_processed(msg_id):
-            print(f"[Process 4] [Flow 2] DUPLICATE detected via ZK dedup — skipping insert for {msg_id}")
+            print(f"[P4][gt] [Flow 2] DUPLICATE via ZK dedup — skipping insert for {msg_id}")
+            gt.metrics_counter["flow2_dedup_skipped"] += 1
             ch.basic_ack(delivery_tag=method.delivery_tag)
             return
 
-        data["history"].append(
-            {
-                "stage": "process4_saved_to_mariadb",
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "persisted_by": NODE_NAME,
-                "database_action": "INSERT/UPDATE processed_messages",
-            }
-        )
+        data["history"].append({
+            "stage": "process4_saved_to_mariadb",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "persisted_by": NODE_NAME,
+            "database_action": "INSERT/UPDATE processed_messages",
+        })
 
         row_id = insert_processed_message(data)
-        print(f"[Process 4] [Flow 2] Successfully persisted to MariaDB (row_id: {row_id})")
-        print(f"             Status: {data.get('examined_status')}, Final Metric Value: {data.get('value')}")
-        print(f"             Audit Trail:")
+        gt.metrics_counter["flow2_persisted"] += 1
+        print(f"[P4][gt] [Flow 2] Persisted (row_id={row_id}, "
+              f"status={data.get('examined_status')}, value={data.get('value')})")
         for step in data.get("history", []):
             desc = step.get("modification") or step.get("status") or step.get("database_action")
-            print(f"               - [{step.get('stage')}] at {step.get('timestamp')}: {desc}")
-
+            print(f"  [{step.get('stage')}] @ {step.get('timestamp')}: {desc}")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
     except Exception as e:
-        print(f"[Process 4] [Flow 2] Database / Processing Error: {e}")
+        print(f"[P4][gt] [Flow 2] Error: {e}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
-def _consume(connection):
-    """Active consumer loop — runs only on the elected leader node."""
-    channel = connection.channel()
-    setup_queues(channel)
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue=QUEUE_FLOW1_P3_TO_P4,     on_message_callback=on_flow1_message, auto_ack=False)
-    channel.basic_consume(queue=QUEUE_FLOW2_P3_REFLECTED,  on_message_callback=on_flow2_message, auto_ack=False)
-
-    print(f"[Process 4] LEADER — consuming '{QUEUE_FLOW1_P3_TO_P4}' and '{QUEUE_FLOW2_P3_REFLECTED}'")
-    print("[Process 4] Ready to persist incoming messages into MariaDB 'processed_messages' table.")
+def _gt_consume_flow1():
+    """Greenthread: dedicated consumer for QUEUE_FLOW1_P3_TO_P4 (own connection)."""
+    conn = gt.get_rmq_connection_with_retry("p4-flow1")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue=QUEUE_FLOW1_P3_TO_P4, on_message_callback=handle_flow1_message, auto_ack=False)
+    print(f"[P4][gt] flow1-consumer greenthread started — consuming '{QUEUE_FLOW1_P3_TO_P4}'")
     try:
-        channel.start_consuming()
-    except KeyboardInterrupt:
-        print("\n[Process 4] Stopping consumer...")
-        channel.stop_consuming()
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
     finally:
-        connection.close()
-        print("[Process 4] RabbitMQ connection closed.")
+        conn.close()
+        print("[P4][gt] flow1-consumer greenthread stopped.")
+
+
+def _gt_consume_flow2():
+    """Greenthread: dedicated consumer for QUEUE_FLOW2_P3_REFLECTED (own connection)."""
+    conn = gt.get_rmq_connection_with_retry("p4-flow2")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue=QUEUE_FLOW2_P3_REFLECTED, on_message_callback=handle_flow2_message, auto_ack=False)
+    print(f"[P4][gt] flow2-consumer greenthread started — consuming '{QUEUE_FLOW2_P3_REFLECTED}'")
+    try:
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
+    finally:
+        conn.close()
+        print("[P4][gt] flow2-consumer greenthread stopped.")
+
+
+def _gt_zk_health_reporter():
+    while not gt.is_stopping():
+        try:
+            zklib._update_health("process4", NODE_NAME, "leader")
+        except Exception:
+            pass
+        gt.sleep(30)
+
+
+def _gt_dedup_reaper():
+    """
+    Greenthread: periodically cleans up old dedup znodes to keep ZooKeeper tidy.
+    Runs every GT_DEDUP_REAP_INTERVAL_S seconds (default 10 minutes).
+    Removes /flowfirst/dedup/* znodes older than ZK_DEDUP_TTL_MS milliseconds.
+    """
+    import os as _os
+    reap_interval = int(_os.getenv("GT_DEDUP_REAP_INTERVAL_S", "600"))
+    ttl_ms        = int(_os.getenv("ZK_DEDUP_TTL_MS", "300000"))
+
+    while not gt.is_stopping():
+        gt.sleep(reap_interval)
+        try:
+            zk_client = zklib.get_client()
+            children  = zk_client.get_children("/flowfirst/dedup")
+            now_ms    = int(time.time() * 1000)
+            reaped    = 0
+            for child in children:
+                path = f"/flowfirst/dedup/{child}"
+                try:
+                    _, stat = zk_client.get(path)
+                    age_ms  = now_ms - stat.ctime   # ctime is ms since epoch
+                    if age_ms > ttl_ms:
+                        zk_client.delete(path)
+                        reaped += 1
+                except Exception:
+                    pass
+            if reaped:
+                gt.metrics_counter["dedup_reaped"] += reaped
+                print(f"[P4][gt] dedup-reaper: removed {reaped} expired znodes "
+                      f"(ttl={ttl_ms}ms, interval={reap_interval}s)")
+        except Exception as e:
+            print(f"[P4][gt] dedup-reaper error: {e}")
+
+
+def _consume():
+    """Leader callback: launch all greenthreads for Process 4."""
+    gt.register_signal_handlers()
+
+    # Greenthread 1: Flow 1 consumer (own connection)
+    gt.spawn("p4_flow1_consumer", _gt_consume_flow1, restart_on_error=True)
+
+    # Greenthread 2: Flow 2 consumer (own connection)
+    gt.spawn("p4_flow2_consumer", _gt_consume_flow2, restart_on_error=True)
+
+    # Greenthread 3: ZooKeeper health reporter
+    gt.periodic("p4_zk_health", _gt_zk_health_reporter, 30)
+
+    # Greenthread 4: Dedup reaper (cleans stale ZK dedup znodes)
+    gt.spawn("p4_dedup_reaper", _gt_dedup_reaper, restart_on_error=True)
+
+    # Greenthread 5: Metrics reporter
+    gt.start_metrics_reporter("process4")
+
+    print(f"[P4][gt] All greenthreads started: {gt.list_greenthreads()}")
+
+    gt.stop_event.wait()
+    print("[P4][gt] Shutdown signal — waiting for greenthreads to finish...")
+    gt.wait_all()
 
 
 def main():
-    print("[Process 4] Initializing MariaDB schema and starting consumer...")
-    print(f"[Process 4] Node: {NODE_NAME} — connecting to ZooKeeper...")
+    print(f"[P4][gt] Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
 
-    # --- MariaDB schema init ---
+    # MariaDB schema init
     try:
         init_database()
-        print("[Process 4] MariaDB schema verified/ready.")
+        print("[P4][gt] MariaDB schema ready.")
     except Exception as e:
-        print(f"[Process 4] Warning: Could not auto-initialize MariaDB (is MariaDB running?): {e}")
+        print(f"[P4][gt] WARNING: MariaDB init failed ({e}).")
 
-    # --- ZooKeeper: connect and register ---
+    # ZooKeeper
     try:
         zklib.register_service("process4", NODE_NAME)
-        print(f"[Process 4] ZooKeeper service registered for node '{NODE_NAME}'")
+        print(f"[P4][gt] ZK service registered.")
     except Exception as e:
-        print(f"[Process 4] WARNING: ZooKeeper unavailable ({e}) — continuing without ZK features.")
+        print(f"[P4][gt] WARNING: ZK unavailable ({e}) — degraded mode.")
 
-    # --- RabbitMQ connection with retry ---
-    connection = None
-    for attempt in range(1, 11):
-        try:
-            connection = get_connection()
-            break
-        except Exception as e:
-            print(f"[Process 4] RabbitMQ not ready (attempt {attempt}/10): {e} — retrying in 5s...")
-            import time as _time; _time.sleep(5)
-    if connection is None:
-        print("[Process 4] Could not connect to RabbitMQ after 10 attempts. Exiting.")
-        raise SystemExit(1)
-
-    print(f"[Process 4] Connected to RabbitMQ at {connection._connected_to}")
-
-    # --- Leader election: only the elected leader consumes and persists ---
-    print(f"[Process 4] Entering ZooKeeper leader election...")
+    # Leader election
     try:
         election = zklib.LeaderElection("process4", NODE_NAME)
-        election.run(lambda: _consume(connection))
+        election.run(_consume)
     except Exception as e:
-        print(f"[Process 4] ZooKeeper election failed ({e}) — running without election (single-node mode).")
-        _consume(connection)
+        print(f"[P4][gt] ZK election failed ({e}) — single-node mode.")
+        _consume()
     finally:
         zklib.close_client()
 

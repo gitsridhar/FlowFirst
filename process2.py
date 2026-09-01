@@ -1,9 +1,13 @@
+# IMPORTANT: monkey_patch() must be the very first call, before any other import.
+import gt
+gt.monkey_patch()
+
 import json
 import time
 import pika
+import eventlet
 from config import (
     NODE_NAME,
-    get_connection,
     setup_queues,
     QUEUE_FLOW1_P1_TO_P2,
     QUEUE_FLOW1_P2_TO_P3,
@@ -16,149 +20,188 @@ import zk as zklib
 _config_watcher = None
 
 
-def on_flow1_message(ch, method, properties, body):
+# ---------------------------------------------------------------------------
+# Per-queue message handlers (called inside each queue's own greenthread)
+# ---------------------------------------------------------------------------
+
+def handle_flow1_message(ch, method, properties, body):
     """
-    Flow 1 handler:
-    Process 2 receives data from Process 1, modifies it (counter += step from ZK),
-    and reflects it to QUEUE_FLOW1_P2_TO_P3 for Process 3.
+    Flow 1 handler — runs inside the flow1 consumer greenthread.
+    Reads counter_step live from ZooKeeper config on every message.
     """
     try:
         data = json.loads(body.decode("utf-8"))
-        print(f"\n[Process 2] [Flow 1] Received from '{QUEUE_FLOW1_P1_TO_P2}': item #{data.get('item_id')}")
+        print(f"\n[P2][gt] [Flow 1] Received item #{data.get('item_id')} from '{QUEUE_FLOW1_P1_TO_P2}'")
 
-        # Read live counter step from ZooKeeper (hot-reloadable, default 10)
         counter_step = _config_watcher.get_int("flow1_counter_step") if _config_watcher else 10
 
         data["counter"] = data.get("counter", 0) + counter_step
         data["process2_flow1_reflected"] = True
-        data["history"].append(
-            {
-                "stage": "process2_reflected",
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "processed_by": NODE_NAME,
-                "modification": f"Added +{counter_step} to counter (step from ZK config)",
-            }
-        )
+        data["history"].append({
+            "stage": "process2_reflected",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "modification": f"Added +{counter_step} to counter (step from ZK config)",
+        })
 
-        reflected_body = json.dumps(data, indent=2)
         ch.basic_publish(
             exchange="",
             routing_key=QUEUE_FLOW1_P2_TO_P3,
-            body=reflected_body,
+            body=json.dumps(data, indent=2),
             properties=pika.BasicProperties(
                 delivery_mode=pika.DeliveryMode.Persistent,
                 content_type="application/json",
             ),
         )
-        print(f"[Process 2] [Flow 1] Reflected to '{QUEUE_FLOW1_P2_TO_P3}': (new counter={data['counter']}, step={counter_step})")
+        gt.metrics_counter["flow1_processed"] += 1
+        print(f"[P2][gt] [Flow 1] Reflected to '{QUEUE_FLOW1_P2_TO_P3}' (counter={data['counter']}, step={counter_step})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)   # yield — let other greenthreads run
     except Exception as e:
-        print(f"[Process 2] [Flow 1] Error processing message: {e}")
+        print(f"[P2][gt] [Flow 1] Error: {e}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
-def on_flow2_message(ch, method, properties, body):
+def handle_flow2_message(ch, method, properties, body):
     """
-    Flow 2 handler:
-    Process 2 examines the value against the ZK-configurable HIGH threshold,
-    applies the ZK-configurable scale factor, and forwards to QUEUE_FLOW2_P2_TO_P3.
+    Flow 2 handler — runs inside the flow2 consumer greenthread.
+    Reads high_threshold and scale_factor live from ZooKeeper config.
     """
     try:
         data = json.loads(body.decode("utf-8"))
-        val = data.get("value", 0.0)
-        print(f"\n[Process 2] [Flow 2] Received from '{QUEUE_FLOW2_P1_TO_P2}': item #{data.get('item_id')} (value={val})")
+        val  = data.get("value", 0.0)
+        print(f"\n[P2][gt] [Flow 2] Received item #{data.get('item_id')} (value={val})")
 
-        # Read live thresholds from ZooKeeper
         high_threshold = _config_watcher.get_float("flow2_high_threshold") if _config_watcher else 30.0
         scale_factor   = _config_watcher.get_float("flow2_scale_factor")   if _config_watcher else 1.15
 
-        status = "HIGH" if val > high_threshold else "NORMAL"
+        status          = "HIGH" if val > high_threshold else "NORMAL"
         data["examined_status"] = status
-        data["value"] = round(val * scale_factor, 2)
-        data["history"].append(
-            {
-                "stage": "process2_examined_and_forwarded",
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "processed_by": NODE_NAME,
-                "status_assigned": status,
-                "modification": f"Applied {scale_factor}x scale (threshold={high_threshold}, from ZK config)",
-            }
-        )
+        data["value"]           = round(val * scale_factor, 2)
+        data["history"].append({
+            "stage": "process2_examined_and_forwarded",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "status_assigned": status,
+            "modification": f"Applied {scale_factor}x scale (threshold={high_threshold}, from ZK config)",
+        })
 
-        forwarded_body = json.dumps(data, indent=2)
         ch.basic_publish(
             exchange="",
             routing_key=QUEUE_FLOW2_P2_TO_P3,
-            body=forwarded_body,
+            body=json.dumps(data, indent=2),
             properties=pika.BasicProperties(
                 delivery_mode=pika.DeliveryMode.Persistent,
                 content_type="application/json",
             ),
         )
-        print(f"[Process 2] [Flow 2] Forwarded to '{QUEUE_FLOW2_P2_TO_P3}': (status={status}, new_val={data['value']}, scale={scale_factor})")
+        gt.metrics_counter["flow2_processed"] += 1
+        print(f"[P2][gt] [Flow 2] Forwarded to '{QUEUE_FLOW2_P2_TO_P3}' (status={status}, val={data['value']}, scale={scale_factor})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)   # yield
     except Exception as e:
-        print(f"[Process 2] [Flow 2] Error processing message: {e}")
+        print(f"[P2][gt] [Flow 2] Error: {e}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
-def _consume(connection):
-    """Active consumer loop — runs only on the elected leader node."""
-    channel = connection.channel()
-    setup_queues(channel)
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue=QUEUE_FLOW1_P1_TO_P2, on_message_callback=on_flow1_message, auto_ack=False)
-    channel.basic_consume(queue=QUEUE_FLOW2_P1_TO_P2, on_message_callback=on_flow2_message, auto_ack=False)
+# ---------------------------------------------------------------------------
+# Per-queue consumer greenthreads — each owns its own pika connection+channel
+# ---------------------------------------------------------------------------
 
-    print(f"[Process 2] LEADER — consuming '{QUEUE_FLOW1_P1_TO_P2}' and '{QUEUE_FLOW2_P1_TO_P2}'")
+def _gt_consume_flow1():
+    """
+    Greenthread: dedicated consumer for QUEUE_FLOW1_P1_TO_P2.
+    Owns its own RabbitMQ connection — independent of the flow2 consumer.
+    Yields after each message so flow2 messages are also processed promptly.
+    """
+    conn = gt.get_rmq_connection_with_retry("p2-flow1")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue=QUEUE_FLOW1_P1_TO_P2, on_message_callback=handle_flow1_message, auto_ack=False)
+    print(f"[P2][gt] flow1-consumer greenthread started — consuming '{QUEUE_FLOW1_P1_TO_P2}'")
     try:
-        channel.start_consuming()
-    except KeyboardInterrupt:
-        print("\n[Process 2] Stopping consumer...")
-        channel.stop_consuming()
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)   # yield to sibling greenthreads
     finally:
-        connection.close()
-        print("[Process 2] Connection closed.")
+        conn.close()
+        print("[P2][gt] flow1-consumer greenthread stopped.")
+
+
+def _gt_consume_flow2():
+    """
+    Greenthread: dedicated consumer for QUEUE_FLOW2_P1_TO_P2.
+    Owns its own RabbitMQ connection — independent of the flow1 consumer.
+    """
+    conn = gt.get_rmq_connection_with_retry("p2-flow2")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue=QUEUE_FLOW2_P1_TO_P2, on_message_callback=handle_flow2_message, auto_ack=False)
+    print(f"[P2][gt] flow2-consumer greenthread started — consuming '{QUEUE_FLOW2_P1_TO_P2}'")
+    try:
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
+    finally:
+        conn.close()
+        print("[P2][gt] flow2-consumer greenthread stopped.")
+
+
+def _gt_zk_health_reporter():
+    while not gt.is_stopping():
+        try:
+            zklib._update_health("process2", NODE_NAME, "leader")
+        except Exception:
+            pass
+        gt.sleep(30)
+
+
+def _consume():
+    """Leader callback: launch all greenthreads for Process 2."""
+    gt.register_signal_handlers()
+
+    # Greenthread 1: Flow 1 consumer (own connection)
+    gt.spawn("p2_flow1_consumer", _gt_consume_flow1, restart_on_error=True)
+
+    # Greenthread 2: Flow 2 consumer (own connection)
+    gt.spawn("p2_flow2_consumer", _gt_consume_flow2, restart_on_error=True)
+
+    # Greenthread 3: ZooKeeper health reporter
+    gt.periodic("p2_zk_health", _gt_zk_health_reporter, 30)
+
+    # Greenthread 4: Metrics reporter
+    gt.start_metrics_reporter("process2")
+
+    print(f"[P2][gt] All greenthreads started: {gt.list_greenthreads()}")
+
+    gt.stop_event.wait()
+    print("[P2][gt] Shutdown signal — waiting for greenthreads to finish...")
+    gt.wait_all()
 
 
 def main():
     global _config_watcher
 
-    print("[Process 2] Starting consumer & processor...")
-    print(f"[Process 2] Node: {NODE_NAME} — connecting to ZooKeeper...")
+    print(f"[P2][gt] Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
 
-    # --- ZooKeeper: connect, register, watch config ---
+    # ZooKeeper: connect, register, config watch
     try:
         zklib.register_service("process2", NODE_NAME)
         _config_watcher = zklib.ConfigWatcher()
-        print(f"[Process 2] ZooKeeper ready. Live config: {_config_watcher.get_all()}")
+        print(f"[P2][gt] ZK ready. Config: {_config_watcher.get_all()}")
     except Exception as e:
-        print(f"[Process 2] WARNING: ZooKeeper unavailable ({e}) — continuing without ZK features.")
+        print(f"[P2][gt] WARNING: ZK unavailable ({e}) — degraded mode.")
         _config_watcher = None
 
-    # --- RabbitMQ connection with retry ---
-    connection = None
-    for attempt in range(1, 11):
-        try:
-            connection = get_connection()
-            break
-        except Exception as e:
-            print(f"[Process 2] RabbitMQ not ready (attempt {attempt}/10): {e} — retrying in 5s...")
-            import time as _time; _time.sleep(5)
-    if connection is None:
-        print("[Process 2] Could not connect to RabbitMQ after 10 attempts. Exiting.")
-        raise SystemExit(1)
-
-    print(f"[Process 2] Connected to RabbitMQ at {connection._connected_to}")
-
-    # --- Leader election: only the elected leader consumes ---
-    print(f"[Process 2] Entering ZooKeeper leader election...")
+    # Leader election
     try:
         election = zklib.LeaderElection("process2", NODE_NAME)
-        election.run(lambda: _consume(connection))
+        election.run(_consume)
     except Exception as e:
-        print(f"[Process 2] ZooKeeper election failed ({e}) — running without election (single-node mode).")
-        _consume(connection)
+        print(f"[P2][gt] ZK election failed ({e}) — single-node mode.")
+        _consume()
     finally:
         zklib.close_client()
 

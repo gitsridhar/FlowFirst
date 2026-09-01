@@ -574,6 +574,98 @@ sudo dnf install -y java-17-openjdk-headless
 
 ---
 
+### Phase 1c: Install Greenthread (eventlet) Dependencies on All 3 Nodes
+
+> **Install after ZooKeeper (Phase 1b) and before RabbitMQ (Phase 2).**
+> `eventlet` monkey-patches the Python stdlib so all I/O — pika, kazoo, pymysql,
+> and the HTTP server — becomes co-operatively concurrent within a single OS process.
+
+The `eventlet` and `dnspython` packages are installed automatically when you run
+`pip install -r requirements.txt` in Phase 0b. This phase covers the OS-level
+file descriptor limit that eventlet needs and verifies the installation.
+
+#### 1c-a — Raise the OS file descriptor limit (all nodes)
+
+Greenthreads use OS sockets and file handles.  Each process can run up to
+`GT_POOL_SIZE` (default 1000) concurrent greenthreads; each needs a file descriptor.
+The default RHEL 9 limit of 1024 is too low.
+
+```bash
+# Raise the system-wide limit permanently
+echo "flowuser soft nofile 65536" | sudo tee -a /etc/security/limits.d/flowfirst.conf
+echo "flowuser hard nofile 65536" | sudo tee -a /etc/security/limits.d/flowfirst.conf
+
+# Also set it for the current session to take effect immediately
+ulimit -n 65536
+
+# Verify
+ulimit -n
+# Expected: 65536
+```
+
+The systemd service units already include `LimitNOFILE=65536` so this is handled
+automatically when processes run under Pacemaker.
+
+#### 1c-b — Verify eventlet is installed correctly
+
+```bash
+cd /opt/flowfirst
+source .venv/bin/activate
+
+# Confirm version
+python -c "import eventlet; print('eventlet', eventlet.__version__)"
+# Expected: eventlet 0.37.x (or later)
+
+# Confirm monkey-patch works with pika
+python -c "
+import eventlet
+eventlet.monkey_patch()
+import pika
+print('monkey-patch OK — pika imported after patch')
+"
+
+# Confirm gt.py loads cleanly
+python -c "import gt; gt.monkey_patch(); print('gt.py OK, pool size:', gt.GT_POOL_SIZE)"
+```
+
+#### Greenthread `.env` variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `GT_POOL_SIZE` | `1000` | Max concurrent greenthreads per process |
+| `GT_WORKER_CONCURRENCY` | `4` | Concurrent HTTP handlers in Process 1 |
+| `GT_METRICS_INTERVAL_S` | `60` | Seconds between throughput log lines |
+| `GT_DEDUP_REAP_INTERVAL_S` | `600` | Seconds between ZK dedup znode reap runs |
+
+#### Greenthread layout per process
+
+| Process | Greenthreads | Purpose |
+|---|---|---|
+| **P1** | `p1_http_server` | eventlet GreenPool HTTP server (concurrent requests) |
+| | `p1_rmq_heartbeat` | keeps publish connection alive (process_data_events) |
+| | `p1_zk_health` | periodic ZooKeeper health reporter |
+| | `process1_metrics` | throughput counter logger |
+| **P2** | `p2_flow1_consumer` | dedicated pika consumer for `flow1_p1_to_p2` (own conn) |
+| | `p2_flow2_consumer` | dedicated pika consumer for `flow2_p1_to_p2` (own conn) |
+| | `p2_zk_health` | ZooKeeper health reporter |
+| | `process2_metrics` | throughput counter logger |
+| **P3** | `p3_flow1_consumer` | dedicated consumer for `flow1_p2_to_p3` (own conn) |
+| | `p3_flow2_consumer` | dedicated consumer for `flow2_p2_to_p3` (own conn) |
+| | `p3_zk_health` | ZooKeeper health reporter |
+| | `process3_metrics` | throughput counter logger |
+| **P4** | `p4_flow1_consumer` | dedicated consumer for `flow1_p3_to_p4` (own conn) |
+| | `p4_flow2_consumer` | dedicated consumer for `flow2_p3_reflected` (own conn) |
+| | `p4_zk_health` | ZooKeeper health reporter |
+| | `p4_dedup_reaper` | periodic ZK dedup znode cleanup |
+| | `process4_metrics` | throughput counter logger |
+
+> **Why a separate pika connection per greenthread?**
+> `pika.BlockingConnection` and its channels are not thread-safe (or greenthread-safe).
+> Each greenthread that consumes or publishes must own its own connection object.
+> This is the standard pattern for pika with any concurrency model.
+
+---
+
 ### Phase 2: Install RabbitMQ on All 3 Nodes
 
 > **Prerequisite:** Phase 0b (chrony time sync) must be complete on all nodes before running this.
@@ -2459,7 +2551,7 @@ curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
 sleep 5   # allow messages to traverse the pipeline
 
 # Check the last 4 rows in the database (from any node via VIP)
-mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
+mysql -u flowuser -p'flowpassword' -h 192.168.1.100 flowfirst_db \
   -e "SELECT id, flow_type, source_process, JSON_PRETTY(history_trail) \
       FROM processed_messages ORDER BY id DESC LIMIT 4\G"
 ```
@@ -3015,7 +3107,7 @@ Galera routes writes through node2 as an intermediary — degraded but functiona
 
 ```bash
 # Time a write through the HAProxy VIP
-time mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
+time mysql -u flowuser -p'flowpassword' -h 192.168.1.100 flowfirst_db \
   -e "INSERT INTO processed_messages (flow_type,source_process,payload,history_trail)
       VALUES ('test','glitch_test','{}','[]');"
 ```
@@ -3236,7 +3328,7 @@ sudo rabbitmqctl list_queues name messages consumers
 curl -s -X POST http://192.168.1.100:8080/api/flow1 | jq .
 curl -s -X POST http://192.168.1.100:8080/api/flow2 | jq .
 sleep 5
-mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
+mysql -u flowuser -p'flowpassword' -h 192.168.1.100 flowfirst_db \
   -e "SELECT id, flow_type, source_process FROM processed_messages ORDER BY id DESC LIMIT 4;"
 ```
 
@@ -3657,7 +3749,7 @@ sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 3306' | wc -l
 sudo tcpdump -i ${IFACE} -s 0 -w /tmp/mysql.pcap 'tcp port 3306' &
 TCPDUMP_PID=$!
 
-mysql -u flowuser -p'changeme' -h 192.168.1.100 flowfirst_db \
+mysql -u flowuser -p'flowpassword' -h 192.168.1.100 flowfirst_db \
   -e "SELECT COUNT(*) FROM processed_messages;"
 
 sudo kill ${TCPDUMP_PID}
@@ -4031,22 +4123,174 @@ sudo tshark -r ${PCAP} -Y 'tcp.analysis.retransmission and tcp.port==4567' \
 
 ## Local Single-Node / Development Mode (Docker Compose)
 
-For local testing without multi-node hardware:
+Run the full pipeline on a single developer machine using Docker Compose for
+RabbitMQ, MariaDB, and ZooKeeper — no cluster hardware required.
+
+> **Port note:** ZooKeeper's internal admin server runs on container port `8080`.
+> The `docker-compose.yml` maps it to host port **`8081`** to avoid collision with
+> Process 1's REST API which listens on host port `8080`.
+
+### Step 1 — Create a local `.env`
+
+Copy the example and override for localhost / Docker defaults:
 
 ```bash
-# Start RabbitMQ and MariaDB containers
+cp .env.example .env
+```
+
+Edit `.env` — change **only** these values for local dev (everything else stays
+as-is from `.env.example`):
+
+```ini
+# Per-node identity — use your local hostname
+NODE_NAME=dev
+CURRENT_NODE_IP=127.0.0.1
+
+# Point all three node IPs to localhost for single-node mode
+NODE1_IP=127.0.0.1
+NODE2_IP=127.0.0.1
+NODE3_IP=127.0.0.1
+
+# ZooKeeper — single local container
+ZK_HOSTS=127.0.0.1:2181
+
+# RabbitMQ — matches docker-compose.yml credentials
+RABBITMQ_HOST=127.0.0.1
+RABBITMQ_USER=flowuser
+RABBITMQ_PASSWORD=flowpassword
+
+# MariaDB — matches docker-compose.yml credentials
+MARIADB_HOST=127.0.0.1
+MARIADB_USER=flowuser
+MARIADB_PASSWORD=flowpassword
+MARIADB_DB=flowfirst_db
+```
+
+### Step 2 — Start infrastructure containers
+
+```bash
+# Start RabbitMQ, MariaDB, and ZooKeeper containers
 docker compose up -d
 
-# Run processes
-source .venv/bin/activate
-python process4.py &
-python process3.py &
-python process2.py &
-python process1.py &
+# Wait for all containers to be healthy (up to ~30 s)
+docker compose ps
+# All three services must show: health: healthy
+```
 
-# Send curl requests
-curl -X POST http://localhost:8080/api/flow1
-curl -X POST http://localhost:8080/api/flow2
+Verify each service is reachable:
+
+```bash
+# RabbitMQ management UI — http://localhost:15672 (flowuser / flowpassword)
+curl -s -o /dev/null -w "%{http_code}" http://localhost:15672
+# Expected: 200
+
+# ZooKeeper — single-node responds imok
+echo ruok | nc -w2 127.0.0.1 2181
+# Expected: imok
+
+# MariaDB
+mysql -h 127.0.0.1 -u flowuser -pflowpassword -e "SELECT 1;"
+# Expected: row with 1
+```
+
+### Step 3 — Activate the virtual environment
+
+```bash
+source .venv/bin/activate
+# If you haven't installed dependencies yet:
+pip install -r requirements.txt
+```
+
+### Step 4 — Start the four pipeline processes
+
+Start in reverse order (consumers before producers) so no messages are lost:
+
+```bash
+# Terminal 1 — Process 4 (final consumer / DB persister)
+python process4.py
+
+# Terminal 2 — Process 3 (reflector / forwarder)
+python process3.py
+
+# Terminal 3 — Process 2 (examiner / reflector)
+python process2.py
+
+# Terminal 4 — Process 1 (REST API producer)
+python process1.py
+```
+
+Or run all four in the background from a single terminal:
+
+```bash
+source .venv/bin/activate
+python process4.py > /tmp/p4.log 2>&1 &
+python process3.py > /tmp/p3.log 2>&1 &
+python process2.py > /tmp/p2.log 2>&1 &
+python process1.py > /tmp/p1.log 2>&1 &
+echo "All four processes started (PIDs: $(pgrep -f 'python process[1-4]' | tr '\n' ' '))"
+```
+
+### Step 5 — Send test messages
+
+```bash
+# Health check
+curl -s http://localhost:8080/health | jq .
+
+# Flow 1: P1 → P2 (counter +10, reflected) → P3 (ack) → P4 (DB persist)
+curl -s -X POST http://localhost:8080/api/flow1 \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 1, "counter": 100, "initial_data": "local dev test"}' | jq .
+
+# Flow 2: P1 → P2 (threshold examine + 1.15x scale) → P3 (verification seal) → P4
+curl -s -X POST http://localhost:8080/api/flow2 \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 2, "value": 35.0, "initial_data": "high temp alert"}' | jq .
+
+# Batch: publish 3 messages to both flows concurrently
+curl -s -X POST http://localhost:8080/api/batch \
+  -H "Content-Type: application/json" \
+  -d '{"count": 3}' | jq .
+
+# Greenthread / metrics status
+curl -s http://localhost:8080/gt/status | jq .
+
+# ZooKeeper pipeline health
+curl -s http://localhost:8080/zk/health | jq .
+
+# Live ZK runtime config
+curl -s http://localhost:8080/zk/config | jq .
+```
+
+### Step 6 — Inspect the database
+
+```bash
+# Summary of last 10 processed messages
+mysql -h 127.0.0.1 -u flowuser -pflowpassword flowfirst_db \
+  -e "SELECT id, flow_id, item_id, counter_value, metric_value,
+             examined_status, verified_by, created_at
+      FROM processed_messages
+      ORDER BY id DESC LIMIT 10;"
+
+# Full audit trail for a Flow 2 message
+mysql -h 127.0.0.1 -u flowuser -pflowpassword flowfirst_db -e "
+SELECT message_id, metric_value, examined_status, verified_by,
+       JSON_PRETTY(history_trail) AS audit_trail
+FROM processed_messages
+WHERE flow_id = 2
+ORDER BY id DESC LIMIT 1\G"
+```
+
+### Step 7 — Stop everything
+
+```bash
+# Kill background processes
+pkill -f 'python process[1-4].py' 2>/dev/null || true
+
+# Stop containers
+docker compose down
+
+# Or stop and delete all data volumes (full reset)
+docker compose down -v
 ```
 
 ---
@@ -4357,4 +4601,314 @@ sleep 3
 ```bash
 curl -s http://192.168.1.100:8080/zk/health | jq '.pipeline_health.process3'
 # Expected: node2 back with "state": "follower" (or "leader" if it won election)
+```
+
+---
+
+## Greenthread Scenarios
+
+### Scenario 39: Verify Greenthread Startup & Pool Status
+
+Confirm all expected greenthreads are running in each process immediately after startup.
+
+```bash
+# 1. Check Process 1 greenthread status via the new /gt/status endpoint
+curl -s http://192.168.1.100:8080/gt/status | jq .
+```
+
+*Expected response:*
+```json
+{
+  "active_greenthreads": [
+    "p1_http_server",
+    "p1_rmq_heartbeat",
+    "p1_zk_health",
+    "process1_metrics"
+  ],
+  "metrics": {
+    "flow1_published": 0,
+    "flow2_published": 0
+  },
+  "pool_size": 1000,
+  "is_stopping": false
+}
+```
+
+```bash
+# 2. Check /health — now includes greenthread list and metrics
+curl -s http://192.168.1.100:8080/health | jq '{node: .node, greenthreads: .greenthreads, metrics: .metrics}'
+```
+
+```bash
+# 3. Confirm all four processes are running with expected greenthreads via journalctl
+for svc in flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4; do
+    echo "=== ${svc} ==="
+    sudo journalctl -u "${svc}" -n 5 --no-pager | grep -E "\[gt\]|greenthread"
+done
+# Expected per process:
+# [P2][gt] All greenthreads started: ['p2_flow1_consumer', 'p2_flow2_consumer', ...]
+# [P2][gt] flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
+# [P2][gt] flow2-consumer greenthread started — consuming 'flow2_p1_to_p2'
+```
+
+```bash
+# 4. Verify OS-level file descriptor limit is in effect
+# (Pacemaker-managed processes use LimitNOFILE=65536 from the unit file)
+sudo cat /proc/$(pgrep -f process1.py | head -1)/limits | grep "open files"
+# Expected: Max open files   65536   65536   files
+```
+
+---
+
+### Scenario 40: Concurrent Batch Publishing — Greenthread Parallelism in Process 1
+
+The `/api/batch` endpoint spawns one greenthread per message, publishing Flow 1 and
+Flow 2 messages in parallel rather than sequentially.  This scenario measures the
+throughput improvement.
+
+#### A. Sequential baseline (single message timing)
+
+```bash
+time curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 1, "initial_data": "gt-timing-test"}' > /dev/null
+# Note the elapsed time — this is single-message latency
+```
+
+#### B. Concurrent batch of 20 messages (greenthread parallelism)
+
+```bash
+time curl -s -X POST http://192.168.1.100:8080/api/batch \
+  -H "Content-Type: application/json" \
+  -d '{"count": 20}' | jq '{flow1_count: (.flow1_messages | length), flow2_count: (.flow2_messages | length)}'
+# Expected: flow1_count=20, flow2_count=20
+# Elapsed time should be much less than 20x single-message time
+```
+
+#### C. Verify all 20 Flow 1 messages reached Process 2
+
+```bash
+# Check RabbitMQ queue depth (should be draining toward 0)
+sudo rabbitmqctl list_queues name messages | grep flow1_p1_to_p2
+
+# Check metrics counter on Process 1
+curl -s http://192.168.1.100:8080/gt/status | jq .metrics.flow1_published
+# Expected: ≥ 20
+```
+
+#### D. Confirm all 20 were persisted to MariaDB (end-to-end)
+
+```bash
+# Wait a few seconds for the pipeline to drain
+sleep 5
+
+mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+  -e "SELECT COUNT(*) as total, MAX(created_at) as latest
+      FROM processed_messages
+      WHERE flow_id = 1
+      AND created_at > NOW() - INTERVAL 60 SECOND;"
+# Expected: total ≥ 20
+```
+
+#### E. Check Process 2 throughput metrics
+
+```bash
+sudo journalctl -u flowfirst-process2 --since "2 minutes ago" --no-pager \
+  | grep "Throughput Report"
+# Expected lines like:
+# [gt][process2] ── Throughput Report ──
+#   flow1_processed: total=20  +20 in last 60s
+#   flow2_processed: total=20  +20 in last 60s
+#   active_greenthreads: ['p2_flow1_consumer', 'p2_flow2_consumer', ...]
+```
+
+---
+
+### Scenario 41: Per-Queue Greenthread Independence — Flow 1 Blockage Does Not Stall Flow 2
+
+Each queue in Process 2, 3, and 4 runs in its own greenthread with its own pika
+connection.  A slow or blocked Flow 1 handler should not delay Flow 2 messages.
+
+#### A. Inject a slow Flow 1 message by temporarily raising the counter step
+
+```bash
+# Set counter_step to a value that causes visible processing (ZK config, live)
+curl -s -X POST http://192.168.1.100:8080/zk/config \
+  -H "Content-Type: application/json" \
+  -d '{"key": "flow1_counter_step", "value": 999}' | jq .
+```
+
+#### B. Flood 10 Flow 1 and 10 Flow 2 messages simultaneously
+
+```bash
+# Send all 20 in parallel from the client side
+for flow in flow1 flow2; do
+    for i in $(seq 1 10); do
+        curl -s -X POST "http://192.168.1.100:8080/api/${flow}" \
+          -H "Content-Type: application/json" \
+          -d "{\"item_id\": $((3000 + i)), \"initial_data\": \"greenthread-independence-test\"}" \
+          > /dev/null &
+    done
+done
+wait
+echo "All 20 requests sent"
+```
+
+#### C. Watch Process 2 logs — both queues processed concurrently
+
+```bash
+sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "\[Flow [12]\]"
+# Expected: Flow 1 and Flow 2 log lines are interleaved — not Flow 1 completes
+# before Flow 2 starts.  The `gt.sleep(0)` yield after each message allows
+# the sibling greenthread to run between messages.
+```
+
+#### D. Verify both queues drain to 0 depth in parallel
+
+```bash
+watch -n1 "sudo rabbitmqctl list_queues name messages | grep -E 'flow[12]_p1_to_p2'"
+# Expected: both queues drain simultaneously, not sequentially
+```
+
+#### E. Restore default counter step
+
+```bash
+curl -s -X POST http://192.168.1.100:8080/zk/config \
+  -H "Content-Type: application/json" \
+  -d '{"key": "flow1_counter_step", "value": 10}' | jq .
+```
+
+---
+
+### Scenario 42: Greenthread Auto-Restart on RabbitMQ Consumer Failure
+
+Consumer greenthreads are spawned with `restart_on_error=True`.  If a consumer
+greenthread crashes (e.g. RabbitMQ connection dropped), it automatically restarts
+after 2 seconds without operator intervention or process restart.
+
+#### A. Identify the RabbitMQ node that Process 2 on node1 is connected to
+
+```bash
+sudo journalctl -u flowfirst-process2 -n 20 --no-pager | grep "Connected to RabbitMQ"
+# Example: [gt] [p2-flow1] RabbitMQ connected at 192.168.1.102:5672
+```
+
+#### B. Force-drop the RabbitMQ connection on that node
+
+```bash
+# On the node Process 2 connected to (e.g. node2) — close all connections from node1
+ssh 192.168.1.102 "sudo rabbitmqctl close_all_connections 'greenthread restart test'"
+```
+
+#### C. Watch Process 2 on node1 detect the drop and auto-restart consumers
+
+```bash
+sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "restart|Reconnect|consumer greenthread|not ready"
+# Expected sequence (within ~10 seconds):
+# [gt] Greenthread 'p2_flow1_consumer' raised: <connection error>
+# [gt] Restarting 'p2_flow1_consumer' in 2s...
+# [gt] [p2-flow1] RabbitMQ not ready (attempt 1/20): ... — retrying in 5s...
+# [gt] [p2-flow1] RabbitMQ connected at 192.168.1.102:5672
+# [P2][gt] flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
+```
+
+#### D. Confirm no messages were lost during the restart window
+
+```bash
+# Send 5 Flow 1 messages while the restart is in progress
+for i in $(seq 4001 4005); do
+    curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+      -H "Content-Type: application/json" \
+      -d "{\"item_id\": ${i}, \"initial_data\": \"auto-restart-test\"}" | jq -r .payload.message_id
+done
+
+# Wait for pipeline to drain
+sleep 15
+
+mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+  -e "SELECT item_id, counter_value FROM processed_messages
+      WHERE item_id BETWEEN 4001 AND 4005 ORDER BY item_id;"
+# Expected: all 5 rows present (messages queued in RabbitMQ during restart window,
+# consumed once the greenthread reconnected)
+```
+
+---
+
+### Scenario 43: Greenthread Metrics Reporter — Throughput Monitoring
+
+Each process emits a structured throughput report every `GT_METRICS_INTERVAL_S` seconds
+(default 60s).  This scenario triggers activity and then reads the metrics.
+
+#### A. Set the metrics interval to 15 seconds for fast observation
+
+```bash
+# This requires restarting the processes since GT_METRICS_INTERVAL_S is read at startup.
+# On each node, update .env and restart via Pacemaker:
+ssh 192.168.1.101 "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=15/' /opt/flowfirst/.env"
+ssh 192.168.1.102 "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=15/' /opt/flowfirst/.env"
+ssh 192.168.1.103 "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=15/' /opt/flowfirst/.env"
+
+sudo pcs resource restart flowfirst-p1-res-clone
+sudo pcs resource restart flowfirst-p2-res-clone
+sudo pcs resource restart flowfirst-p3-res-clone
+sudo pcs resource restart flowfirst-p4-res-clone
+```
+
+#### B. Generate pipeline activity
+
+```bash
+# Send 50 messages across both flows
+for i in $(seq 1 25); do
+    curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+      -H "Content-Type: application/json" \
+      -d "{\"item_id\": $((5000 + i)), \"initial_data\": \"metrics-test\"}" > /dev/null
+    curl -s -X POST http://192.168.1.100:8080/api/flow2 \
+      -H "Content-Type: application/json" \
+      -d "{\"item_id\": $((5000 + i)), \"value\": 28.5}" > /dev/null
+done
+echo "50 messages sent"
+```
+
+#### C. Read metrics from /gt/status (Process 1 leader node)
+
+```bash
+# Wait for metrics interval
+sleep 16
+
+curl -s http://192.168.1.100:8080/gt/status | jq .metrics
+# Expected:
+# {
+#   "flow1_published": 25,
+#   "flow2_published": 25
+# }
+```
+
+#### D. Read per-process metrics from journal
+
+```bash
+# Process 2 metrics (shows flow1_processed and flow2_processed)
+sudo journalctl -u flowfirst-process2 --since "1 minute ago" --no-pager \
+  | grep -A 10 "Throughput Report"
+
+# Expected output on the leader node:
+# [gt][process2] ── Throughput Report ──
+#   flow1_processed: total=25  +25 in last 15s
+#   flow2_processed: total=25  +25 in last 15s
+#   active_greenthreads: ['p2_flow1_consumer', 'p2_flow2_consumer', ...]
+
+# Process 4 metrics (shows flow1_persisted, flow2_persisted, dedup_reaped)
+sudo journalctl -u flowfirst-process4 --since "1 minute ago" --no-pager \
+  | grep -A 10 "Throughput Report"
+```
+
+#### E. Restore metrics interval to default
+
+```bash
+for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+    ssh "${node}" "sed -i 's/^GT_METRICS_INTERVAL_S=.*/GT_METRICS_INTERVAL_S=60/' /opt/flowfirst/.env"
+done
+sudo pcs resource restart flowfirst-p1-res-clone
+sudo pcs resource restart flowfirst-p2-res-clone
+sudo pcs resource restart flowfirst-p3-res-clone
+sudo pcs resource restart flowfirst-p4-res-clone
 ```

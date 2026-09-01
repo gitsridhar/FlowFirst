@@ -1,9 +1,13 @@
+# IMPORTANT: monkey_patch() must be the very first call, before any other import.
+import gt
+gt.monkey_patch()
+
 import json
 import time
 import pika
+import eventlet
 from config import (
     NODE_NAME,
-    get_connection,
     setup_queues,
     QUEUE_FLOW1_P2_TO_P3,
     QUEUE_FLOW1_P3_TO_P4,
@@ -13,138 +17,154 @@ from config import (
 import zk as zklib
 
 
-def on_flow1_message(ch, method, properties, body):
+def handle_flow1_message(ch, method, properties, body):
     """
-    Flow 1 handler:
-    Process 3 receives the reflected message from Process 2, adds audit notes,
-    and forwards it to Process 4 (QUEUE_FLOW1_P3_TO_P4) to be stored in MariaDB.
+    Flow 1 handler — runs inside the flow1 consumer greenthread.
+    Process 3 adds audit note and forwards to Process 4.
     """
     try:
         data = json.loads(body.decode("utf-8"))
-        print(f"\n[Process 3] [Flow 1] Picked up item #{data.get('item_id')}")
-        print(f"             Counter: {data.get('counter')}")
+        print(f"\n[P3][gt] [Flow 1] Picked up item #{data.get('item_id')} (counter={data.get('counter')})")
 
         data["process3_acknowledged"] = True
-        data["history"].append(
-            {
-                "stage": "process3_received_and_forwarded",
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "processed_by": NODE_NAME,
-                "status": "forwarded_to_process4",
-            }
-        )
+        data["history"].append({
+            "stage": "process3_received_and_forwarded",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "status": "forwarded_to_process4",
+        })
 
-        forward_body = json.dumps(data, indent=2)
         ch.basic_publish(
             exchange="",
             routing_key=QUEUE_FLOW1_P3_TO_P4,
-            body=forward_body,
+            body=json.dumps(data, indent=2),
             properties=pika.BasicProperties(
                 delivery_mode=pika.DeliveryMode.Persistent,
                 content_type="application/json",
             ),
         )
-        print(f"[Process 3] [Flow 1] Forwarded item #{data.get('item_id')} to '{QUEUE_FLOW1_P3_TO_P4}' for DB storage")
+        gt.metrics_counter["flow1_forwarded"] += 1
+        print(f"[P3][gt] [Flow 1] Forwarded item #{data.get('item_id')} to '{QUEUE_FLOW1_P3_TO_P4}'")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
     except Exception as e:
-        print(f"[Process 3] [Flow 1] Error: {e}")
+        print(f"[P3][gt] [Flow 1] Error: {e}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
-def on_flow2_message(ch, method, properties, body):
+def handle_flow2_message(ch, method, properties, body):
     """
-    Flow 2 handler:
-    Process 3 picks up the examined data from Process 2, modifies it slightly,
-    and reflects it back to the queue (QUEUE_FLOW2_P3_REFLECTED) for Process 4.
+    Flow 2 handler — runs inside the flow2 consumer greenthread.
+    Process 3 verifies and reflects back to QUEUE_FLOW2_P3_REFLECTED for Process 4.
     """
     try:
         data = json.loads(body.decode("utf-8"))
-        print(f"\n[Process 3] [Flow 2 PICKUP & REFLECT] Received item #{data.get('item_id')} "
+        print(f"\n[P3][gt] [Flow 2] Received item #{data.get('item_id')} "
               f"(status={data.get('examined_status')}, value={data.get('value')})")
 
         data["verified_by"] = "process3"
-        data["completed"] = True
-        data["history"].append(
-            {
-                "stage": "process3_reflected",
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "processed_by": NODE_NAME,
-                "modification": "Added verification seal and marked completed",
-            }
-        )
+        data["completed"]   = True
+        data["history"].append({
+            "stage": "process3_reflected",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "modification": "Added verification seal and marked completed",
+        })
 
-        reflected_body = json.dumps(data, indent=2)
         ch.basic_publish(
             exchange="",
             routing_key=QUEUE_FLOW2_P3_REFLECTED,
-            body=reflected_body,
+            body=json.dumps(data, indent=2),
             properties=pika.BasicProperties(
                 delivery_mode=pika.DeliveryMode.Persistent,
                 content_type="application/json",
             ),
         )
-        print(f"[Process 3] [Flow 2] Reflected modified data back to queue '{QUEUE_FLOW2_P3_REFLECTED}'")
+        gt.metrics_counter["flow2_reflected"] += 1
+        print(f"[P3][gt] [Flow 2] Reflected to '{QUEUE_FLOW2_P3_REFLECTED}'")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
     except Exception as e:
-        print(f"[Process 3] [Flow 2] Error: {e}")
+        print(f"[P3][gt] [Flow 2] Error: {e}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
-def _consume(connection):
-    """Active consumer loop — runs only on the elected leader node."""
-    channel = connection.channel()
-    setup_queues(channel)
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue=QUEUE_FLOW1_P2_TO_P3, on_message_callback=on_flow1_message, auto_ack=False)
-    channel.basic_consume(queue=QUEUE_FLOW2_P2_TO_P3, on_message_callback=on_flow2_message, auto_ack=False)
-
-    print(f"[Process 3] LEADER — consuming '{QUEUE_FLOW1_P2_TO_P3}' and '{QUEUE_FLOW2_P2_TO_P3}'")
-    print(f"[Process 3] Forwarding Flow 1 to: '{QUEUE_FLOW1_P3_TO_P4}'")
-    print(f"[Process 3] Reflecting Flow 2 to: '{QUEUE_FLOW2_P3_REFLECTED}'")
+def _gt_consume_flow1():
+    """Greenthread: dedicated consumer for QUEUE_FLOW1_P2_TO_P3 (own connection)."""
+    conn = gt.get_rmq_connection_with_retry("p3-flow1")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue=QUEUE_FLOW1_P2_TO_P3, on_message_callback=handle_flow1_message, auto_ack=False)
+    print(f"[P3][gt] flow1-consumer greenthread started — consuming '{QUEUE_FLOW1_P2_TO_P3}'")
     try:
-        channel.start_consuming()
-    except KeyboardInterrupt:
-        print("\n[Process 3] Stopping consumer...")
-        channel.stop_consuming()
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
     finally:
-        connection.close()
-        print("[Process 3] Connection closed.")
+        conn.close()
+        print("[P3][gt] flow1-consumer greenthread stopped.")
+
+
+def _gt_consume_flow2():
+    """Greenthread: dedicated consumer for QUEUE_FLOW2_P2_TO_P3 (own connection)."""
+    conn = gt.get_rmq_connection_with_retry("p3-flow2")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue=QUEUE_FLOW2_P2_TO_P3, on_message_callback=handle_flow2_message, auto_ack=False)
+    print(f"[P3][gt] flow2-consumer greenthread started — consuming '{QUEUE_FLOW2_P2_TO_P3}'")
+    try:
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
+    finally:
+        conn.close()
+        print("[P3][gt] flow2-consumer greenthread stopped.")
+
+
+def _gt_zk_health_reporter():
+    while not gt.is_stopping():
+        try:
+            zklib._update_health("process3", NODE_NAME, "leader")
+        except Exception:
+            pass
+        gt.sleep(30)
+
+
+def _consume():
+    """Leader callback: launch all greenthreads for Process 3."""
+    gt.register_signal_handlers()
+
+    gt.spawn("p3_flow1_consumer", _gt_consume_flow1, restart_on_error=True)
+    gt.spawn("p3_flow2_consumer", _gt_consume_flow2, restart_on_error=True)
+    gt.periodic("p3_zk_health",  _gt_zk_health_reporter, 30)
+    gt.start_metrics_reporter("process3")
+
+    print(f"[P3][gt] All greenthreads started: {gt.list_greenthreads()}")
+    print(f"[P3][gt] Forwarding Flow 1 → '{QUEUE_FLOW1_P3_TO_P4}'")
+    print(f"[P3][gt] Reflecting Flow 2 → '{QUEUE_FLOW2_P3_REFLECTED}'")
+
+    gt.stop_event.wait()
+    print("[P3][gt] Shutdown signal — waiting for greenthreads to finish...")
+    gt.wait_all()
 
 
 def main():
-    print("[Process 3] Starting consumer & reflector...")
-    print(f"[Process 3] Node: {NODE_NAME} — connecting to ZooKeeper...")
+    print(f"[P3][gt] Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
 
-    # --- ZooKeeper: connect and register ---
     try:
         zklib.register_service("process3", NODE_NAME)
-        print(f"[Process 3] ZooKeeper service registered for node '{NODE_NAME}'")
+        print(f"[P3][gt] ZK service registered.")
     except Exception as e:
-        print(f"[Process 3] WARNING: ZooKeeper unavailable ({e}) — continuing without ZK features.")
+        print(f"[P3][gt] WARNING: ZK unavailable ({e}) — degraded mode.")
 
-    # --- RabbitMQ connection with retry ---
-    connection = None
-    for attempt in range(1, 11):
-        try:
-            connection = get_connection()
-            break
-        except Exception as e:
-            print(f"[Process 3] RabbitMQ not ready (attempt {attempt}/10): {e} — retrying in 5s...")
-            import time as _time; _time.sleep(5)
-    if connection is None:
-        print("[Process 3] Could not connect to RabbitMQ after 10 attempts. Exiting.")
-        raise SystemExit(1)
-
-    print(f"[Process 3] Connected to RabbitMQ at {connection._connected_to}")
-
-    # --- Leader election: only the elected leader consumes ---
-    print(f"[Process 3] Entering ZooKeeper leader election...")
     try:
         election = zklib.LeaderElection("process3", NODE_NAME)
-        election.run(lambda: _consume(connection))
+        election.run(_consume)
     except Exception as e:
-        print(f"[Process 3] ZooKeeper election failed ({e}) — running without election (single-node mode).")
-        _consume(connection)
+        print(f"[P3][gt] ZK election failed ({e}) — single-node mode.")
+        _consume()
     finally:
         zklib.close_client()
 

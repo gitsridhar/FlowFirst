@@ -17,6 +17,7 @@ StandardError=journal
 SyslogIdentifier=flowfirst-p3
 
 # Security Sandbox options
+LimitNOFILE=65536
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only

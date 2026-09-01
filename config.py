@@ -99,6 +99,17 @@ QUEUE_FLOW2_P1_TO_P2 = "flow2_p1_to_p2"
 QUEUE_FLOW2_P2_TO_P3 = "flow2_p2_to_p3"
 QUEUE_FLOW2_P3_REFLECTED = "flow2_p3_reflected"
 
+# ZooKeeper connection settings
+ZK_HOSTS = os.getenv(
+    "ZK_HOSTS",
+    f"{os.getenv('NODE1_IP','127.0.0.1')}:2181,"
+    f"{os.getenv('NODE2_IP','127.0.0.1')}:2181,"
+    f"{os.getenv('NODE3_IP','127.0.0.1')}:2181",
+)
+ZK_TIMEOUT        = float(os.getenv("ZK_TIMEOUT", "10"))
+ZK_DEDUP_TTL_MS   = int(os.getenv("ZK_DEDUP_TTL_MS", "300000"))
+ZK_CLIENT_PORT    = _int_env("ZK_CLIENT_PORT", 2181)
+
 ALL_QUEUES = [
     QUEUE_FLOW1_P1_TO_P2,
     QUEUE_FLOW1_P2_TO_P3,

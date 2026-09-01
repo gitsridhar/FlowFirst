@@ -3,8 +3,8 @@ services:
     image: rabbitmq:3.13-management-alpine
     container_name: rabbitmq_flowfirst
     ports:
-      - "5672:5672"   # AMQP protocol port
-      - "15672:15672" # Management UI port
+      - "5672:5672"    # AMQP protocol port
+      - "15672:15672"  # Management UI port
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
@@ -30,6 +30,26 @@ services:
       - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  zookeeper:
+    image: zookeeper:3.9
+    container_name: zookeeper_flowfirst
+    ports:
+      - "2181:2181"   # Client port
+      - "2888:2888"   # Peer port (unused in single-node dev mode)
+      - "3888:3888"   # Leader election port (unused in single-node dev mode)
+      - "8080:8080"   # ZK admin server
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_SERVERS: "server.1=zookeeper:2888:3888;2181"
+      ZOO_MAX_CLIENT_CNXNS: 60
+      ZOO_HEAP_SIZE: 256
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w2 localhost 2181 | grep imok"]
       interval: 10s
       timeout: 5s
       retries: 5

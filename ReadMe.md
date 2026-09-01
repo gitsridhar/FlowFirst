@@ -433,6 +433,147 @@ wsrep_local_state_comment: Synced
 
 ---
 
+### Phase 1b: Install ZooKeeper Ensemble on All 3 Nodes
+
+> **Install ZooKeeper after Galera and before RabbitMQ.**
+> ZooKeeper must be running and in quorum before the pipeline processes start —
+> they use it for leader election on startup.
+
+```bash
+cd /opt/flowfirst
+sudo ./zookeeper/setup_zookeeper.sh
+```
+
+The script performs these steps automatically on each node:
+1. Installs Java 17 (`java-17-openjdk-headless`) if not already present
+2. Downloads Apache ZooKeeper `ZK_VERSION` (default `3.9.2`) from `downloads.apache.org`
+3. Creates a dedicated `zookeeper` system user and `/var/lib/zookeeper/data`, `/var/log/zookeeper` directories
+4. Writes `myid` from `CURRENT_NODE_IP` matched against `NODE1_IP`/`NODE2_IP`/`NODE3_IP` in `.env`
+5. Writes `zoo.cfg` with the full 3-node ensemble and auto-purge settings
+6. Installs and enables `zookeeper.service` as a systemd unit
+7. Opens firewall ports `2181/tcp` (client), `2888/tcp` (peer), `3888/tcp` (election)
+8. Starts ZooKeeper and checks for `imok` response
+
+**After running on all 3 nodes, verify the ensemble has quorum:**
+
+```bash
+# Each node should respond "imok"
+echo ruok | nc 127.0.0.1 2181
+
+# One node will be leader, two will be followers
+echo mntr | nc 127.0.0.1 2181 | grep zk_server_state
+# Expected on one node:  zk_server_state    leader
+# Expected on two nodes: zk_server_state    follower
+
+# Check quorum size
+echo mntr | nc 127.0.0.1 2181 | grep zk_synced_followers
+# Expected: zk_synced_followers   2
+
+# Full ensemble status
+for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+    echo -n "${node}: "
+    echo mntr | nc -w2 "${node}" 2181 | grep zk_server_state || echo "unreachable"
+done
+```
+
+#### ZooKeeper `.env` variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `ZK_VERSION` | `3.9.2` | ZooKeeper release to download |
+| `ZK_CLIENT_PORT` | `2181` | Port clients (kazoo) connect to |
+| `ZK_PEER_PORT` | `2888` | Inter-node replication port |
+| `ZK_ELECTION_PORT` | `3888` | Leader election port |
+| `ZK_HEAP_MB` | `256` | JVM heap size (MB) |
+| `ZK_TIMEOUT` | `10` | Kazoo session timeout (seconds) |
+| `ZK_DEDUP_TTL_MS` | `300000` | How long Process 4 dedup znodes live (ms) |
+| `ZK_HOSTS` | *(auto)* | Leave blank — `config.py` builds from `NODE*_IP` |
+
+#### ZooKeeper znode tree
+
+The pipeline creates this znode hierarchy on first startup:
+
+```
+/flowfirst
+├── election/
+│   ├── process1/     ← ephemeral sequential election candidates
+│   ├── process2/
+│   ├── process3/
+│   └── process4/
+├── config/           ← persistent, hot-reloadable runtime config
+│   ├── flow2_high_threshold    (default: "30.0")
+│   ├── flow1_counter_step      (default: "10")
+│   └── flow2_scale_factor      (default: "1.15")
+├── registry/         ← ephemeral service registration (auto-removed on crash)
+│   ├── process1/
+│   │   └── node1     {"node":"node1","pid":1234,"started_at":"..."}
+│   ├── process2/
+│   ├── process3/
+│   └── process4/
+├── dedup/            ← ephemeral dedup barrier (Process 4 double-insert prevention)
+│   └── <message_id>  ← created on first processing, auto-expires after ZK_DEDUP_TTL_MS
+└── health/           ← pipeline health dashboard
+    ├── process1/
+    │   └── node1     {"state":"leader","updated_at":"...","pid":1234}
+    ├── process2/
+    ├── process3/
+    └── process4/
+```
+
+#### Inspect the znode tree with zkCli
+
+```bash
+# Connect to the local ZooKeeper node
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181
+
+# Inside the shell:
+ls /flowfirst
+ls /flowfirst/election/process1
+get /flowfirst/config/flow2_high_threshold
+ls /flowfirst/registry/process1
+get /flowfirst/registry/process1/node1
+ls /flowfirst/health/process1
+get /flowfirst/health/process1/node1
+quit
+```
+
+#### ZooKeeper Troubleshooting Reference
+
+**Problem: `Connection refused` on port 2181**
+
+ZooKeeper needs a quorum (2 of 3 nodes) to serve clients.
+If only one node is up, clients cannot connect.
+
+```bash
+# Check the service on each node
+sudo systemctl status zookeeper
+
+# Confirm the ensemble config is correct
+grep "server\." /opt/zookeeper/conf/zoo.cfg
+
+# Check ZooKeeper logs
+sudo journalctl -u zookeeper -n 50 --no-pager
+```
+
+**Problem: `myid` mismatch — ZooKeeper starts but never joins ensemble**
+
+```bash
+cat /var/lib/zookeeper/data/myid
+# Must be 1, 2, or 3 matching the server.X line in zoo.cfg
+# Re-run setup if wrong:
+sudo ./zookeeper/setup_zookeeper.sh
+```
+
+**Problem: Java not found or wrong version**
+
+```bash
+java -version
+# Must be 11, 17, or 21. Install if missing:
+sudo dnf install -y java-17-openjdk-headless
+```
+
+---
+
 ### Phase 2: Install RabbitMQ on All 3 Nodes
 
 > **Prerequisite:** Phase 0b (chrony time sync) must be complete on all nodes before running this.
@@ -3906,4 +4047,314 @@ python process1.py &
 # Send curl requests
 curl -X POST http://localhost:8080/api/flow1
 curl -X POST http://localhost:8080/api/flow2
+```
+
+---
+
+## ZooKeeper Scenarios
+
+### Scenario 34: ZooKeeper Ensemble Health & Leader Election Verification
+
+Verify the ensemble is healthy and identify which node holds the ZooKeeper leader role.
+
+```bash
+# 1. Check each node responds "imok"
+for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+    echo -n "${node}: "
+    echo ruok | nc -w2 "${node}" 2181 || echo "NO RESPONSE"
+done
+# Expected: all three print "imok"
+
+# 2. Identify the ZooKeeper leader
+for node in 192.168.1.101 192.168.1.102 192.168.1.103; do
+    state=$(echo mntr | nc -w2 "${node}" 2181 | grep zk_server_state | awk '{print $2}')
+    echo "${node}: ${state}"
+done
+# Expected: one "leader", two "follower"
+
+# 3. Confirm quorum (synced followers = 2)
+ZK_LEADER=$(for n in 192.168.1.101 192.168.1.102 192.168.1.103; do
+    echo mntr | nc -w2 "$n" 2181 | grep -q "zk_server_state.*leader" && echo "$n"
+done)
+echo mntr | nc -w2 "${ZK_LEADER}" 2181 | grep zk_synced_followers
+# Expected: zk_synced_followers   2
+
+# 4. Check pipeline leader elections via REST API
+curl -s http://192.168.1.100:8080/zk/health | jq .pipeline_health
+# Expected: each process shows one node as "leader", others as "follower"
+```
+
+*Expected output from `/zk/health`:*
+```json
+{
+  "pipeline_health": {
+    "process1": { "node1": {"state": "leader", ...}, "node2": {"state": "follower", ...} },
+    "process2": { "node2": {"state": "leader", ...}, "node1": {"state": "follower", ...} },
+    "process3": { "node3": {"state": "leader", ...} },
+    "process4": { "node1": {"state": "leader", ...} }
+  }
+}
+```
+
+---
+
+### Scenario 35: Live Config Change via ZooKeeper — No Restart Required
+
+Change the Flow 2 HIGH threshold and the Flow 1 counter step at runtime. All three running
+Process 2 instances pick up the change within seconds without any restart.
+
+#### A. Inspect current config
+
+```bash
+curl -s http://192.168.1.100:8080/zk/config | jq .
+# Expected:
+# {
+#   "zk_config": {
+#     "flow2_high_threshold": 30.0,
+#     "flow1_counter_step": 10,
+#     "flow2_scale_factor": 1.15
+#   }
+# }
+```
+
+#### B. Lower the HIGH threshold to 20.0
+
+```bash
+curl -s -X POST http://192.168.1.100:8080/zk/config \
+  -H "Content-Type: application/json" \
+  -d '{"key": "flow2_high_threshold", "value": 20.0}' | jq .
+```
+
+#### C. Send a Flow 2 message with a value of 25.0 (was NORMAL, now HIGH)
+
+```bash
+curl -s -X POST http://192.168.1.100:8080/api/flow2 \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 901, "value": 25.0, "initial_data": "ZK config test"}' | jq .
+```
+
+Watch Process 2 logs on any node — it should now assign `status=HIGH`:
+
+```bash
+sudo journalctl -u flowfirst-process2 -f --no-pager | grep "status=\|threshold="
+# Expected: status=HIGH, threshold=20.0
+```
+
+#### D. Increase the counter step to 50
+
+```bash
+curl -s -X POST http://192.168.1.100:8080/zk/config \
+  -H "Content-Type: application/json" \
+  -d '{"key": "flow1_counter_step", "value": 50}' | jq .
+```
+
+Send a Flow 1 message and verify the counter increment in the MariaDB audit trail:
+
+```bash
+curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 902, "counter": 100}' | jq .
+
+# Counter after Process 2: should be 100 + 50 = 150
+mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+  -e "SELECT item_id, counter_value, history_trail FROM processed_messages WHERE item_id=902\G"
+```
+
+#### E. Restore defaults
+
+```bash
+curl -s -X POST http://192.168.1.100:8080/zk/config -H "Content-Type: application/json" \
+  -d '{"key": "flow2_high_threshold", "value": 30.0}' | jq .
+curl -s -X POST http://192.168.1.100:8080/zk/config -H "Content-Type: application/json" \
+  -d '{"key": "flow1_counter_step", "value": 10}' | jq .
+```
+
+#### F. Verify via zkCli directly
+
+```bash
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
+  get /flowfirst/config/flow2_high_threshold
+# Expected: 30.0
+```
+
+---
+
+### Scenario 36: ZooKeeper Leader Failover — Kill the Elected Leader Node
+
+Verify that when the node holding the Process 2 leader election crashes, the standby
+on another node automatically wins and takes over consuming without message loss.
+
+#### A. Identify the current Process 2 leader
+
+```bash
+curl -s http://192.168.1.100:8080/zk/health | jq '.pipeline_health.process2'
+# Note which node shows "state": "leader" — assume it is node2
+```
+
+#### B. Send 5 Flow 1 messages to build up a queue backlog
+
+```bash
+for i in $(seq 1 5); do
+  curl -s -X POST http://192.168.1.100:8080/api/flow1 \
+    -H "Content-Type: application/json" \
+    -d "{\"item_id\": $((2000 + i)), \"initial_data\": \"leader-failover-test\"}" | jq -r .payload.message_id
+done
+```
+
+#### C. Kill Process 2 on the leader node (node2)
+
+```bash
+# On node2 — stop only process2
+ssh 192.168.1.102 "sudo pcs resource ban flowfirst-p2-res-clone node2"
+# Or forcefully kill the process:
+ssh 192.168.1.102 "sudo systemctl stop flowfirst-process2"
+```
+
+#### D. Watch the ZK election on node1 or node3
+
+```bash
+sudo journalctl -u flowfirst-process2 -f --no-pager | grep "LEADER\|election\|Reconnect"
+# Expected within ~10 seconds:
+# [Process 2] *** NODE node1 IS NOW LEADER ***
+# [Process 2] LEADER — consuming 'flow1_p1_to_p2' and 'flow2_p1_to_p2'
+```
+
+#### E. Verify all 5 messages were processed (no loss, no duplicates)
+
+```bash
+mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+  -e "SELECT item_id, counter_value, history_trail
+      FROM processed_messages
+      WHERE item_id BETWEEN 2001 AND 2005
+      ORDER BY item_id\G"
+# Expected: 5 rows, each with a complete 4-stage history trail
+# Each row's history should show process2_reflected with the new leader's node name
+```
+
+#### F. Restore the banned node
+
+```bash
+ssh 192.168.1.102 "sudo pcs resource clear flowfirst-p2-res-clone"
+curl -s http://192.168.1.100:8080/zk/health | jq '.pipeline_health.process2'
+# All three nodes now show registered (leader on one, follower on the others)
+```
+
+---
+
+### Scenario 37: ZooKeeper Dedup Barrier — Prevent Double-Insert on Failover
+
+Simulate a Pacemaker failover that re-delivers an already-processed message to
+Process 4 and verify the ZooKeeper dedup barrier prevents a duplicate MariaDB row.
+
+#### A. Record a message_id that was already processed
+
+```bash
+PROCESSED_ID=$(mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+  -sNe "SELECT message_id FROM processed_messages ORDER BY id DESC LIMIT 1;")
+echo "Already processed: ${PROCESSED_ID}"
+```
+
+#### B. Manually re-publish the same message to the final queue
+
+```bash
+# Get the raw payload that was already stored
+RAW=$(mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+  -sNe "SELECT raw_payload FROM processed_messages WHERE message_id='${PROCESSED_ID}';")
+
+# Re-publish it directly to the flow1_p3_to_p4 queue using rabbitmqadmin
+sudo rabbitmqadmin -u flowuser -p flowpassword publish \
+  exchange='' routing_key='flow1_p3_to_p4' \
+  properties='{"content_type":"application/json"}' \
+  payload="${RAW}"
+```
+
+#### C. Watch Process 4 logs — expect the dedup barrier to fire
+
+```bash
+sudo journalctl -u flowfirst-process4 -f --no-pager | grep -i "dedup\|duplicate"
+# Expected:
+# [Process 4] [Flow 1] DUPLICATE detected via ZK dedup — skipping insert for <message_id>
+```
+
+#### D. Verify no duplicate row was inserted
+
+```bash
+mysql -h 192.168.1.100 -u flowuser -pflowpassword flowfirst_db \
+  -e "SELECT COUNT(*) as row_count FROM processed_messages WHERE message_id='${PROCESSED_ID}';"
+# Expected: row_count = 1  (not 2)
+```
+
+#### E. Inspect the dedup znode in ZooKeeper
+
+```bash
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
+  ls /flowfirst/dedup
+# Expected: [<message_id>, ...]
+
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
+  stat /flowfirst/dedup/${PROCESSED_ID}
+# Shows ctime, mtime — the node was created when Process 4 first processed it
+```
+
+---
+
+### Scenario 38: ZooKeeper Service Registry — Observe Live Process Registration
+
+Verify the ephemeral service registry updates in real time as processes start and stop.
+
+#### A. Read the current service registry via REST and zkCli
+
+```bash
+# Via REST API (Process 1 exposes live registry in /health)
+curl -s http://192.168.1.100:8080/health | jq .zk_registered_workers
+# Expected: all 4 processes, all 3 nodes listed
+
+# Via zkCli
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 <<'EOF'
+ls /flowfirst/registry/process1
+ls /flowfirst/registry/process2
+ls /flowfirst/registry/process3
+ls /flowfirst/registry/process4
+quit
+EOF
+```
+
+#### B. Stop Process 3 on node2 and observe the ephemeral znode disappear
+
+```bash
+# Stop process3 on node2
+ssh 192.168.1.102 "sudo systemctl stop flowfirst-process3"
+
+# Watch the registry — node2 should disappear within the ZK session timeout (~10s)
+sleep 12
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
+  ls /flowfirst/registry/process3
+# Expected: [node1, node3]  — node2 is gone
+
+# Confirm via REST
+curl -s http://192.168.1.100:8080/health | jq '.zk_registered_workers.process3'
+# Expected: ["node1", "node3"]
+```
+
+#### C. Restart Process 3 on node2 and watch it re-register
+
+```bash
+ssh 192.168.1.102 "sudo systemctl start flowfirst-process3"
+sleep 3
+
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
+  ls /flowfirst/registry/process3
+# Expected: [node1, node2, node3]
+
+# Inspect the registration payload
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
+  get /flowfirst/registry/process3/node2
+# Expected JSON: {"node":"node2","pid":XXXX,"started_at":"..."}
+```
+
+#### D. Verify the pipeline health dashboard reflects the re-registration
+
+```bash
+curl -s http://192.168.1.100:8080/zk/health | jq '.pipeline_health.process3'
+# Expected: node2 back with "state": "follower" (or "leader" if it won election)
 ```

@@ -2,32 +2,43 @@ import json
 import time
 import pika
 from config import (
+    NODE_NAME,
     get_connection,
     setup_queues,
     QUEUE_FLOW1_P3_TO_P4,
     QUEUE_FLOW2_P3_REFLECTED,
 )
 from db import init_database, insert_processed_message
+import zk as zklib
 
 
 def on_flow1_message(ch, method, properties, body):
     """
     Process 4 handler for Flow 1:
-    Receives forwarded message from Process 3, logs the receipt, and saves it to MariaDB.
+    Receives forwarded message from Process 3.
+    Uses ZooKeeper dedup barrier to prevent double-inserts on Pacemaker failover.
+    Saves to MariaDB.
     """
     try:
         data = json.loads(body.decode("utf-8"))
-        print(f"\n[Process 4] [Flow 1 FINAL RECEIVE] Consumed item #{data.get('item_id')} (message_id: {data.get('message_id')})")
-        
-        # Append process4 persistence step to history
+        msg_id = data.get("message_id", "")
+        print(f"\n[Process 4] [Flow 1 FINAL RECEIVE] Consumed item #{data.get('item_id')} (message_id: {msg_id})")
+
+        # --- ZooKeeper dedup barrier ---
+        if not zklib.check_and_mark_processed(msg_id):
+            print(f"[Process 4] [Flow 1] DUPLICATE detected via ZK dedup — skipping insert for {msg_id}")
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            return
+
         data["history"].append(
             {
                 "stage": "process4_saved_to_mariadb",
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "persisted_by": NODE_NAME,
                 "database_action": "INSERT/UPDATE processed_messages",
             }
         )
-        
+
         row_id = insert_processed_message(data)
         print(f"[Process 4] [Flow 1] Successfully persisted to MariaDB (row_id: {row_id})")
         print(f"             Initial Data: {data.get('initial_data')}")
@@ -43,17 +54,26 @@ def on_flow1_message(ch, method, properties, body):
 def on_flow2_message(ch, method, properties, body):
     """
     Process 4 handler for Flow 2:
-    Consumes reflected message from Process 3 (QUEUE_FLOW2_P3_REFLECTED) and persists it into MariaDB.
+    Consumes reflected message from Process 3.
+    Uses ZooKeeper dedup barrier to prevent double-inserts on Pacemaker failover.
+    Persists into MariaDB.
     """
     try:
         data = json.loads(body.decode("utf-8"))
-        print(f"\n[Process 4] [Flow 2 FINAL RECEIVE] Consumed reflected item #{data.get('item_id')} (message_id: {data.get('message_id')})")
-        
-        # Append process4 persistence step to history
+        msg_id = data.get("message_id", "")
+        print(f"\n[Process 4] [Flow 2 FINAL RECEIVE] Consumed reflected item #{data.get('item_id')} (message_id: {msg_id})")
+
+        # --- ZooKeeper dedup barrier ---
+        if not zklib.check_and_mark_processed(msg_id):
+            print(f"[Process 4] [Flow 2] DUPLICATE detected via ZK dedup — skipping insert for {msg_id}")
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            return
+
         data["history"].append(
             {
                 "stage": "process4_saved_to_mariadb",
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "persisted_by": NODE_NAME,
                 "database_action": "INSERT/UPDATE processed_messages",
             }
         )
@@ -72,15 +92,45 @@ def on_flow2_message(ch, method, properties, body):
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
+def _consume(connection):
+    """Active consumer loop — runs only on the elected leader node."""
+    channel = connection.channel()
+    setup_queues(channel)
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(queue=QUEUE_FLOW1_P3_TO_P4,     on_message_callback=on_flow1_message, auto_ack=False)
+    channel.basic_consume(queue=QUEUE_FLOW2_P3_REFLECTED,  on_message_callback=on_flow2_message, auto_ack=False)
+
+    print(f"[Process 4] LEADER — consuming '{QUEUE_FLOW1_P3_TO_P4}' and '{QUEUE_FLOW2_P3_REFLECTED}'")
+    print("[Process 4] Ready to persist incoming messages into MariaDB 'processed_messages' table.")
+    try:
+        channel.start_consuming()
+    except KeyboardInterrupt:
+        print("\n[Process 4] Stopping consumer...")
+        channel.stop_consuming()
+    finally:
+        connection.close()
+        print("[Process 4] RabbitMQ connection closed.")
+
+
 def main():
     print("[Process 4] Initializing MariaDB schema and starting consumer...")
+    print(f"[Process 4] Node: {NODE_NAME} — connecting to ZooKeeper...")
+
+    # --- MariaDB schema init ---
     try:
         init_database()
         print("[Process 4] MariaDB schema verified/ready.")
     except Exception as e:
         print(f"[Process 4] Warning: Could not auto-initialize MariaDB (is MariaDB running?): {e}")
 
-    # Retry loop — Pacemaker may start this process before RabbitMQ is ready.
+    # --- ZooKeeper: connect and register ---
+    try:
+        zklib.register_service("process4", NODE_NAME)
+        print(f"[Process 4] ZooKeeper service registered for node '{NODE_NAME}'")
+    except Exception as e:
+        print(f"[Process 4] WARNING: ZooKeeper unavailable ({e}) — continuing without ZK features.")
+
+    # --- RabbitMQ connection with retry ---
     connection = None
     for attempt in range(1, 11):
         try:
@@ -94,32 +144,17 @@ def main():
         raise SystemExit(1)
 
     print(f"[Process 4] Connected to RabbitMQ at {connection._connected_to}")
-    channel = connection.channel()
-    setup_queues(channel)
 
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(
-        queue=QUEUE_FLOW1_P3_TO_P4,
-        on_message_callback=on_flow1_message,
-        auto_ack=False,
-    )
-    channel.basic_consume(
-        queue=QUEUE_FLOW2_P3_REFLECTED,
-        on_message_callback=on_flow2_message,
-        auto_ack=False,
-    )
-
-    print(f"[Process 4] Listening on queues: '{QUEUE_FLOW1_P3_TO_P4}' and '{QUEUE_FLOW2_P3_REFLECTED}'")
-    print("[Process 4] Ready to persist incoming messages into MariaDB 'processed_messages' table.")
-    print("[Process 4] Press Ctrl+C to exit.")
+    # --- Leader election: only the elected leader consumes and persists ---
+    print(f"[Process 4] Entering ZooKeeper leader election...")
     try:
-        channel.start_consuming()
-    except KeyboardInterrupt:
-        print("\n[Process 4] Stopping consumer...")
-        channel.stop_consuming()
+        election = zklib.LeaderElection("process4", NODE_NAME)
+        election.run(lambda: _consume(connection))
+    except Exception as e:
+        print(f"[Process 4] ZooKeeper election failed ({e}) — running without election (single-node mode).")
+        _consume(connection)
     finally:
-        connection.close()
-        print("[Process 4] RabbitMQ connection closed.")
+        zklib.close_client()
 
 
 if __name__ == "__main__":

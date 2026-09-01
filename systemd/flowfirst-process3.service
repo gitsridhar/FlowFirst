@@ -1,7 +1,7 @@
 [Unit]
 Description=FlowFirst Process 3 - Reflector & Forwarder
-After=network.target rabbitmq-server.service mariadb.service docker.service
-Wants=rabbitmq-server.service
+After=network.target rabbitmq-server.service mariadb.service zookeeper.service
+Wants=rabbitmq-server.service zookeeper.service
 
 [Service]
 Type=simple

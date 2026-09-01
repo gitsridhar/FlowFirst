@@ -47,7 +47,7 @@ listen stats
 # Frontend: Process 1 REST API (Binds to Virtual IP / All Interfaces)
 #---------------------------------------------------------------------
 frontend flowfirst_api_front
-    bind *:__API_PORT__
+    bind __VIP__:__API_PORT__
     mode http
     option httplog
     option forwardfor except 127.0.0.0/8

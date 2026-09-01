@@ -930,29 +930,34 @@ sysctl net.ipv4.ip_nonlocal_bind
 
 ---
 
-**Failure 3 — SELinux blocking HAProxy port binding**
+**Failure 3 — SELinux blocking HAProxy port binding or shared memory (`/dev/shm`) access**
 
-RHEL 9 ships with SELinux in `Enforcing` mode. Without the `haproxy_connect_any` boolean, HAProxy cannot bind to custom ports such as `8080`, `3306`, or `9000`.
+RHEL 9 ships with SELinux in `Enforcing` mode. Without the `haproxy_connect_any` and `daemons_enable_cluster_mode` booleans, HAProxy cannot bind to custom ports such as `8080`, `3306`, or `9000`, and may encounter denials mapping shared memory files (`/dev/shm`).
 
 Symptom — check the audit log:
 ```bash
 sudo ausearch -m avc -ts recent | grep haproxy
-# Example:
-#   avc:  denied { name_bind } for  comm="haproxy" ...
-#   tcontext=system_u:object_r:http_cache_port_t:s0
+# Example 1:
+#   avc:  denied { name_bind } for  comm="haproxy" ... tcontext=system_u:object_r:http_cache_port_t:s0
+# Example 2:
+#   avc:  denied { map } for  comm="haproxy" path="/dev/shm/..." dev="tmpfs" tcontext=system_u:object_r:tmpfs_t:s0
 ```
 
 Fix (the setup script already does this, but if needed manually):
 ```bash
-# Allow HAProxy to connect/bind to any port
+# Allow HAProxy to connect/bind to custom ports and operate in cluster/shared memory environments
 sudo setsebool -P haproxy_connect_any 1
+sudo setsebool -P daemons_enable_cluster_mode 1
 
-# Confirm
-getsebool haproxy_connect_any
-# Expected: haproxy_connect_any --> on
+# If a custom policy module is required for strict /dev/shm file mapping:
+sudo ausearch -c 'haproxy' --raw | audit2allow -M haproxy_shm
+sudo semodule -i haproxy_shm.pp
 
-# Restart HAProxy
-sudo systemctl restart haproxy
+# Confirm booleans
+getsebool haproxy_connect_any daemons_enable_cluster_mode
+# Expected:
+#   haproxy_connect_any --> on
+#   daemons_enable_cluster_mode --> on
 ```
 
 ---
@@ -982,35 +987,30 @@ sudo ./haproxy/setup_haproxy.sh
 
 ---
 
-**Failure 5 — `bind *:3306` / `bind *:5672` — port already in use**
+**Failure 5 — `bind *:8080` / `bind *:3306` / `bind *:5672` — port already in use**
 
-HAProxy binds TCP frontends for MariaDB (3306) and RabbitMQ (5672) to `0.0.0.0`,
-but MariaDB and RabbitMQ are already listening on those ports on every cluster node.
-Two processes cannot share the same `0.0.0.0:<port>` binding.
+When HAProxy and the backend services (`process1.py` API on 8080, MariaDB on 3306, RabbitMQ on 5672) run on the same node and HAProxy binds to wildcard `0.0.0.0` or `*`, an `[Errno 98] Address already in use` or HAProxy socket bind failure occurs.
 
 Symptom:
 ```
-[ALERT] : Starting frontend mariadb_galera_front: cannot bind socket
-          [0.0.0.0:3306]: Address already in use
-[ALERT] : Starting frontend rabbitmq_amqp_front: cannot bind socket
-          [0.0.0.0:5672]: Address already in use
+[ALERT] : Starting frontend flowfirst_api_front: cannot bind socket
+          [0.0.0.0:8080]: Address already in use
+# or in Process 1 startup:
+OSError: [Errno 98] Address already in use
 ```
 
 Fix (already corrected in `haproxy.cfg.template`):
-The TCP frontends now bind to the **VIP address only** (`__VIP__:3306` /
-`__VIP__:5672`). The VIP is held by exactly one node at a time (Pacemaker).
-MariaDB and RabbitMQ listen on the node's own IP; HAProxy listens on the VIP — no
-collision is possible. Re-run setup to regenerate the config:
+The frontends bind to the **VIP address only** (`__VIP__:8080`, `__VIP__:3306`, `__VIP__:5672`). The VIP is held by exactly one node at a time via Pacemaker, and `net.ipv4.ip_nonlocal_bind=1` allows HAProxy on standby nodes to bind the VIP address ahead of time. Backend services listen on `0.0.0.0` or node IPs, preventing any port collision. Re-run setup to regenerate the config:
 
 ```bash
 cd /opt/flowfirst
 sudo ./haproxy/setup_haproxy.sh
 
-# Confirm the TCP frontends bind to the VIP, not *
+# Confirm the frontends bind to the VIP
 grep "bind" /etc/haproxy/haproxy.cfg
 # Expected:
-#   bind *:8080               ← REST API (OK to use * — no conflict)
-#   bind *:9000               ← stats
+#   bind ${FLOWFIRST_VIP}:8080   ← REST API (VIP only)
+#   bind 0.0.0.0:9000            ← Stats dashboard
 #   bind ${FLOWFIRST_VIP}:3306   ← MariaDB (VIP only)
 #   bind ${FLOWFIRST_VIP}:5672   ← RabbitMQ (VIP only)
 ```

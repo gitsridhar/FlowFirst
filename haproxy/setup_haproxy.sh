@@ -117,13 +117,17 @@ echo "net.ipv4.ip_nonlocal_bind=1" | \
 # Apply immediately and persist across reboots
 sudo sysctl --system | grep nonlocal_bind || true
 
-# 3. SELinux: allow HAProxy to bind to cluster ports
+# 3. SELinux: allow HAProxy to bind to cluster ports and access shared memory / cluster resources
 echo "[3/6] Configuring SELinux for HAProxy..."
 if command -v getsebool &>/dev/null && sudo getsebool haproxy_connect_any &>/dev/null; then
     sudo setsebool -P haproxy_connect_any 1
     echo "  SELinux: haproxy_connect_any set to ON"
 else
     echo "  SELinux: haproxy_connect_any not available — skipping"
+fi
+if command -v getsebool &>/dev/null && sudo getsebool daemons_enable_cluster_mode &>/dev/null; then
+    sudo setsebool -P daemons_enable_cluster_mode 1
+    echo "  SELinux: daemons_enable_cluster_mode set to ON"
 fi
 
 # 4. Generate HAProxy configuration from template

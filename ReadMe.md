@@ -512,22 +512,32 @@ The script performs these steps automatically on each node:
 7. Opens firewall ports `2181/tcp` (client), `2888/tcp` (peer), `3888/tcp` (election)
 8. Starts ZooKeeper and checks for `imok` response
 
-**After running on all 3 nodes, verify the ensemble has quorum:**
+**Step 1 — Verify the ensemble has quorum across all nodes:**
+
+Run on **each node** to verify basic health and check its server state:
 
 ```bash
 # Each node should respond "imok"
 echo ruok | nc 127.0.0.1 2181
 
-# One node will be leader, two will be followers
+# Check this node's state (one node in the ensemble will be leader, two will be followers)
 echo mntr | nc 127.0.0.1 2181 | grep zk_server_state
-# Expected on one node:  zk_server_state    leader
-# Expected on two nodes: zk_server_state    follower
+# Output on one node:   zk_server_state    leader
+# Output on other two:  zk_server_state    follower
+```
 
-# Check quorum size
+**Step 2 — Verify quorum and full ensemble status (run ONLY on the node where `zk_server_state` is `leader`):**
+
+> **Important:** `zk_synced_followers` is exposed **only by the elected ZooKeeper leader node**.
+> Running `echo mntr | grep zk_synced_followers` on a follower node will return empty because followers do not track synced followers.
+> Identify which node reported `zk_server_state leader` in Step 1, log in to that node (or query it remotely), and run:
+
+```bash
+# Run ON THE LEADER NODE to confirm quorum size (synced followers must be 2 for a 3-node ensemble):
 echo mntr | nc 127.0.0.1 2181 | grep zk_synced_followers
-# Expected: zk_synced_followers   2
+# Expected output on leader: zk_synced_followers   2
 
-# Full ensemble status
+# Check the state of all 3 nodes from the leader:
 for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
     echo -n "${node}: "
     echo mntr | nc -w2 "${node}" 2181 | grep zk_server_state || echo "unreachable"

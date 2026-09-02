@@ -57,8 +57,10 @@ def _str_env(name: str, default: str) -> str:
 FLOWFIRST_VIP = _str_env("FLOWFIRST_VIP", NODE1_IP)
 
 # Process 1 REST API Settings
+# Process 1 listens on API_BACKEND_PORT (8082). HAProxy frontend listens on API_PORT (8080).
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = _int_env("API_PORT", 8080)
+API_BACKEND_PORT = _int_env("API_BACKEND_PORT", 8082)
 
 # RabbitMQ Connection Settings
 RABBITMQ_PORT = _int_env("RABBITMQ_PORT", 5672)

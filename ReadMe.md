@@ -987,9 +987,12 @@ sudo ./haproxy/setup_haproxy.sh
 
 ---
 
-**Failure 5 — `bind *:8080` / `bind *:3306` / `bind *:5672` — port already in use**
+**Failure 5 — Port Collision between HAProxy and Backend Services**
 
-When HAProxy and the backend services (`process1.py` API on 8080, MariaDB on 3306, RabbitMQ on 5672) run on the same node and HAProxy binds to wildcard `0.0.0.0` or `*`, an `[Errno 98] Address already in use` or HAProxy socket bind failure occurs.
+When HAProxy and backend services run on the same node, port separation prevents any `[Errno 98] Address already in use` collisions:
+- **HAProxy REST API Frontend**: Listens on port `8080` (or `FLOWFIRST_VIP:8080`), balancing requests across backend nodes.
+- **Process 1 REST API Backend**: Listens on dedicated backend port `8082` (`API_BACKEND_PORT=8082`), avoiding any collision with HAProxy (`8080`) or ZooKeeper AdminServer (`8081`).
+- **MariaDB & RabbitMQ Frontends**: Bind to `FLOWFIRST_VIP:3306` and `FLOWFIRST_VIP:5672` respectively, while local daemons listen on physical interfaces.
 
 Symptom:
 ```
@@ -999,17 +1002,17 @@ Symptom:
 OSError: [Errno 98] Address already in use
 ```
 
-Fix (already corrected in `haproxy.cfg.template`):
-The frontends bind to the **VIP address only** (`__VIP__:8080`, `__VIP__:3306`, `__VIP__:5672`). The VIP is held by exactly one node at a time via Pacemaker, and `net.ipv4.ip_nonlocal_bind=1` allows HAProxy on standby nodes to bind the VIP address ahead of time. Backend services listen on `0.0.0.0` or node IPs, preventing any port collision. Re-run setup to regenerate the config:
+Fix (already configured in `haproxy.cfg.template` & `process1.py`):
+Process 1 binds to `API_BACKEND_PORT=8082` while HAProxy binds to `API_PORT=8080` and routes to `node:8082`. Re-run setup to regenerate the config:
 
 ```bash
 cd /opt/flowfirst
 sudo ./haproxy/setup_haproxy.sh
 
-# Confirm the frontends bind to the VIP
+# Confirm the configuration
 grep "bind" /etc/haproxy/haproxy.cfg
 # Expected:
-#   bind ${FLOWFIRST_VIP}:8080   ← REST API (VIP only)
+#   bind *:8080                  ← REST API Frontend
 #   bind 0.0.0.0:9000            ← Stats dashboard
 #   bind ${FLOWFIRST_VIP}:3306   ← MariaDB (VIP only)
 #   bind ${FLOWFIRST_VIP}:5672   ← RabbitMQ (VIP only)

@@ -47,7 +47,7 @@ listen stats
 # Frontend: Process 1 REST API (Binds to Virtual IP / All Interfaces)
 #---------------------------------------------------------------------
 frontend flowfirst_api_front
-    bind __VIP__:__API_PORT__
+    bind *:__API_PORT__
     mode http
     option httplog
     option forwardfor except 127.0.0.0/8
@@ -64,10 +64,10 @@ backend flowfirst_api_back
     http-check expect status 200
     default-server inter 3s fall 2 rise 2
 
-    # Cluster Node Physical IPs (populated from .env)
-    server __NODE1_NAME__ __NODE1_IP__:__API_PORT__ check
-    server __NODE2_NAME__ __NODE2_IP__:__API_PORT__ check
-    server __NODE3_NAME__ __NODE3_IP__:__API_PORT__ check
+    # Cluster Node Physical IPs pointing to Process 1 instances (port 8082)
+    server __NODE1_NAME__ __NODE1_IP__:__API_BACKEND_PORT__ check
+    server __NODE2_NAME__ __NODE2_IP__:__API_BACKEND_PORT__ check
+    server __NODE3_NAME__ __NODE3_IP__:__API_BACKEND_PORT__ check
 
 #---------------------------------------------------------------------
 # Load balancing & Failover for MariaDB Galera Cluster (Port 3306)

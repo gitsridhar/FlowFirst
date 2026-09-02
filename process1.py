@@ -11,7 +11,7 @@ import pika
 from config import (
     NODE_NAME,
     API_HOST,
-    API_PORT,
+    API_BACKEND_PORT,
     setup_queues,
     QUEUE_FLOW1_P1_TO_P2,
     QUEUE_FLOW2_P1_TO_P2,
@@ -285,11 +285,11 @@ def _gt_http_server():
     """Greenthread: runs the HTTP server. Each request is dispatched into the
     global GreenPool so requests are handled concurrently."""
     _ensure_publish_channel()
-    httpd = HTTPServer((API_HOST, API_PORT), RestApiHandler)
+    httpd = HTTPServer((API_HOST, API_BACKEND_PORT), RestApiHandler)
     # Use GreenPool to handle each request in its own greenthread
-    httpd.socket = eventlet.listen((API_HOST, API_PORT))
+    httpd.socket = eventlet.listen((API_HOST, API_BACKEND_PORT))
     pool = eventlet.GreenPool(size=gt.GT_WORKER_CONCURRENCY * 10)
-    print(f"[P1][gt] HTTP server listening on {API_HOST}:{API_PORT} (GreenPool size={gt.GT_WORKER_CONCURRENCY * 10})")
+    print(f"[P1][gt] HTTP server listening on {API_HOST}:{API_BACKEND_PORT} (GreenPool size={gt.GT_WORKER_CONCURRENCY * 10})")
     while not gt.is_stopping():
         try:
             sock, addr = httpd.socket.accept()

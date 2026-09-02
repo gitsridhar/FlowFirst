@@ -36,6 +36,7 @@ done
 VIP="${VIP:-${FLOWFIRST_VIP}}"
 VIP_NIC="${VIP_NIC:-}"           # set in .env — see pre-flight check below
 API_PORT="${API_PORT:-8080}"
+API_BACKEND_PORT="${API_BACKEND_PORT:-8082}"
 MARIADB_PORT="${MARIADB_PORT:-3306}"
 RABBITMQ_PORT="${RABBITMQ_PORT:-5672}"
 HAPROXY_STATS_PORT="${HAPROXY_STATS_PORT:-9000}"
@@ -95,7 +96,8 @@ echo " Node 2:          ${NODE2_NAME} (${NODE2_IP})"
 echo " Node 3:          ${NODE3_NAME} (${NODE3_IP})"
 echo " Virtual IP (VIP):${VIP}"
 echo " VIP NIC:         ${VIP_NIC}"
-echo " API Port:        ${API_PORT}"
+echo " API Port (VIP):  ${API_PORT}"
+echo " Backend Port:    ${API_BACKEND_PORT}"
 echo " MariaDB Port:    ${MARIADB_PORT}"
 echo " RabbitMQ Port:   ${RABBITMQ_PORT}"
 echo " Stats Dashboard: :${HAPROXY_STATS_PORT}"
@@ -141,6 +143,7 @@ sed \
     -e "s/__NODE3_IP__/${NODE3_IP}/g" \
     -e "s/__VIP__/${VIP}/g" \
     -e "s/__API_PORT__/${API_PORT}/g" \
+    -e "s/__API_BACKEND_PORT__/${API_BACKEND_PORT}/g" \
     -e "s/__MARIADB_PORT__/${MARIADB_PORT}/g" \
     -e "s/__RABBITMQ_PORT__/${RABBITMQ_PORT}/g" \
     -e "s/__HAPROXY_STATS_PORT__/${HAPROXY_STATS_PORT}/g" \
@@ -152,6 +155,7 @@ sed \
 echo "[5/6] Opening firewall ports..."
 if command -v firewall-cmd >/dev/null 2>&1 && sudo systemctl is-active --quiet firewalld; then
     sudo firewall-cmd --permanent --add-port="${API_PORT}/tcp"
+    sudo firewall-cmd --permanent --add-port="${API_BACKEND_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${MARIADB_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${RABBITMQ_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${HAPROXY_STATS_PORT}/tcp"

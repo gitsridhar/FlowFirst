@@ -24,11 +24,11 @@ This project implements an enterprise-grade, high-availability, distributed inte
 ## Multi-Node Cluster Architecture & Network Topology
 
 ### Cluster Nodes Configuration
-- **Node 1 (`node1`)**: `${NODE1_IP}` (Galera Node 1 / API Node 1 / RabbitMQ)
-- **Node 2 (`node2`)**: `${NODE2_IP}` (Galera Node 2 / API Node 2 / RabbitMQ)
-- **Node 3 (`node3`)**: `${NODE3_IP}` (Galera Node 3 / API Node 3 / RabbitMQ)
-- **Virtual IP (VIP)**: `${FLOWFIRST_VIP}` (Managed by Pacemaker)
-- **Remote Node 4 (`node4`)**: `${NODE4_IP}` (Worker Node running `process5`)
+- **Node 1 (`node1`)**: `${NODE1_IP}` (Galera Node 1 / API Node 1 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
+- **Node 2 (`node2`)**: `${NODE2_IP}` (Galera Node 2 / API Node 2 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
+- **Node 3 (`node3`)**: `${NODE3_IP}` (Galera Node 3 / API Node 3 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
+- **Virtual IP (VIP)**: `${FLOWFIRST_VIP}` (Managed by Pacemaker across Nodes 1–3)
+- **Remote Node 4 (`node4`)**: `${NODE4_IP}` (Dedicated Remote Worker running **`process5` only**; acts strictly as a lightweight client connecting to the RabbitMQ pool, ZooKeeper ensemble, and Swift storage with no local broker/database daemons)
 
 ```mermaid
 graph TD
@@ -203,16 +203,17 @@ erDiagram
 
 | Phase | Runs on | Description | Key script / command |
 |---|---|---|---|
-| **0a** | All nodes | Time synchronisation — install & configure Chrony | `dnf install -y chrony` → `chronyc makestep` |
-| **0b** | All nodes | Clone repo, create Python venv, copy `.env` | `git clone` → `python3 -m venv .venv` → `pip install -r requirements.txt` |
-| **1** | All nodes | MariaDB Galera cluster setup | `mariadb-galera/setup_galera_node.sh` |
+| **0a** | All nodes (1–4) | Time synchronisation — install & configure Chrony | `dnf install -y chrony` → `chronyc makestep` |
+| **0b** | All nodes (1–4) | Clone repo, create Python venv, copy `.env` | `git clone` → `python3 -m venv .venv` → `pip install -r requirements.txt` |
+| **1** | Nodes 1–3 only | MariaDB Galera cluster setup (server) | `mariadb-galera/setup_galera_node.sh` |
 | **1 bootstrap** | Node 1 only | Bootstrap the primary Galera node | `mariadb-galera/bootstrap_galera.sh` |
-| **1b** | All nodes | ZooKeeper ensemble (leader election, config watch, dedup) | `zookeeper/setup_zookeeper.sh` |
-| **1c** | All nodes | Raise OS file-descriptor limit for eventlet greenthreads | `ulimit -n 65536` + `/etc/security/limits.d/flowfirst.conf` |
-| **2** | All nodes | RabbitMQ server & Erlang install | `scripts/install_rabbitmq_rhel9.sh` |
-| **3** | All nodes | Identify cluster NIC, set `VIP_NIC` in `.env`, generate HAProxy config | `haproxy/setup_haproxy.sh` |
-| **4** | All nodes | Install & disable systemd service units (Pacemaker manages lifecycle) | `systemd/install_services.sh` |
-| **5a** | All nodes | Prepare each node for Pacemaker (packages, `pcsd`, firewall, `/etc/hosts`) | `pacemaker/setup_multinode_cluster.sh --prepare-node` |
+| **1b** | Nodes 1–3 only | ZooKeeper 3-node ensemble (servers) | `zookeeper/setup_zookeeper.sh` |
+| **1c** | All nodes (1–4) | Raise OS file-descriptor limit for eventlet greenthreads | `ulimit -n 65536` + `/etc/security/limits.d/flowfirst.conf` |
+| **2** | Nodes 1–3 only | RabbitMQ cluster & Erlang install (servers) | `scripts/install_rabbitmq_rhel9.sh` |
+| **3** | Nodes 1–3 only | Identify cluster NIC, set `VIP_NIC` in `.env`, generate HAProxy config | `haproxy/setup_haproxy.sh` |
+| **4** | Nodes 1–3 | Install systemd units for Process 1–4 & target (Pacemaker managed) | `systemd/install_services.sh /opt/flowfirst` |
+| **4 (Remote)** | Node 4 only | Install & enable `flowfirst-process5.service` (runs Process 5 only) | `systemd/install_services.sh /opt/flowfirst --remote` |
+| **5a** | Nodes 1–3 only | Prepare cluster nodes for Pacemaker (packages, `pcsd`, firewall, `/etc/hosts`) | `pacemaker/setup_multinode_cluster.sh --prepare-node` |
 | **5b** | Node 1 only | Initialise cluster, authenticate nodes, deploy VIP + HAProxy + process clones | `pacemaker/setup_multinode_cluster.sh` → `pacemaker/configure_multinode_resources.sh` |
 | **5c** | Node 1 only | Verify HAProxy is running under Pacemaker after cluster start | `pcs status` → `ss -tlnp \| grep haproxy` |
 
@@ -1081,14 +1082,31 @@ sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 
 ---
 
-### Phase 4: Install Systemd Services on All 3 Nodes
+### Phase 4: Install Systemd Services
+
+#### Step 4a — Core Cluster Nodes (node1, node2, node3)
+Install unit files for Processes 1–4 and disable direct systemd boot so Pacemaker manages process lifecycles:
+
 ```bash
 cd /opt/flowfirst
-# Install Systemd Units
+# Install systemd units for cluster processes (Process 1 to 4)
 sudo ./systemd/install_services.sh /opt/flowfirst
 
 # Disable standard systemd boot so Pacemaker manages service lifecycles
 sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4
+```
+
+#### Step 4b — Remote Node 4 (`node4` only)
+On Remote Node 4, **only Process 5** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, HAProxy, or Pacemaker) run on Node 4; Process 5 acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`):
+
+```bash
+cd /opt/flowfirst
+# Install ONLY Process 5 service on the remote node
+sudo ./systemd/install_services.sh /opt/flowfirst --remote
+
+# Enable and start Process 5 on Remote Node 4
+sudo systemctl enable --now flowfirst-process5
+sudo systemctl status flowfirst-process5
 ```
 
 ---
@@ -5097,11 +5115,13 @@ Demonstrates cross-node asynchronous inter-process communication spanning the co
 
 #### A. Pre-requisite: Verify Process 5 is running on Remote Node 4
 
+On Remote Node 4 (`node4`), only the lightweight Python environment and `process5` run — no broker or database server daemons:
+
 ```bash
 # On Remote Node 4 (node4):
 sudo systemctl status flowfirst-process5
-# Or if running interactively:
-# python process5.py
+# Confirm no cluster daemons are running on Node 4 (returns nothing):
+pgrep -a mariadbd || pgrep -a beam.smp || pgrep -a zookeeper || echo "Clean client-only node"
 ```
 
 #### B. Trigger Flow 3 via Virtual IP REST API

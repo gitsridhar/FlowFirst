@@ -24,7 +24,20 @@ chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Copying unit files to ${SYSTEMD_DIR}..."
 
-for unit in flowfirst-process1.service flowfirst-process2.service flowfirst-process3.service flowfirst-process4.service flowfirst-process5.service flowfirst.target; do
+# Mode selection:
+# --remote / node4: install only flowfirst-process5.service
+# default (node1-node3): install flowfirst-process1..4 and flowfirst.target
+TARGET_MODE="${2:-cluster}"
+
+if [[ "${TARGET_MODE}" == "--remote" ]] || [[ "${TARGET_MODE}" == "remote" ]] || [[ "${TARGET_MODE}" == "node4" ]]; then
+    UNITS=("flowfirst-process5.service")
+    echo "Installing Remote Node units (Process 5 only)..."
+else
+    UNITS=("flowfirst-process1.service" "flowfirst-process2.service" "flowfirst-process3.service" "flowfirst-process4.service" "flowfirst.target")
+    echo "Installing Cluster Node units (Processes 1-4 & target)..."
+fi
+
+for unit in "${UNITS[@]}"; do
     sed "s|/opt/flowfirst|${INSTALL_DIR}|g; s|User=flowuser|User=${RUN_USER}|g; s|Group=flowuser|Group=${RUN_USER}|g" \
         "${SCRIPT_DIR}/${unit}" > "${SYSTEMD_DIR}/${unit}"
     chmod 644 "${SYSTEMD_DIR}/${unit}"

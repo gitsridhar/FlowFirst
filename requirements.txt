@@ -5,3 +5,6 @@ cryptography>=42.0.0
 kazoo>=2.9.0
 eventlet>=0.37.0
 dnspython>=2.6.0
+python-swiftclient>=4.4.0
+python-keystoneclient>=5.3.0
+requests>=2.31.0

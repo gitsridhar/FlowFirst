@@ -5,7 +5,8 @@ This project implements an enterprise-grade, distributed inter-process communica
 - **Virtual IP (VIP) Failover** managed by **Pacemaker/Corosync** (`IPaddr2`)
 - **HAProxy Round-Robin Load Balancing** for both the **REST API** (`:8080`) and **MariaDB Galera** (`:3306`)
 - **MariaDB Galera Cluster** with synchronous multi-master replication (`wsrep`), automated state transfer, and quorum consistency across all 3 nodes
-- **Multi-Process Pipeline** (`process1` through `process4`) with data transformation, reflection, and MariaDB persistence
+- **Swift Object Storage** integration via `python-swiftclient` for immutable object archiving and REST API payload retrieval
+- **Multi-Process Pipeline** (`process1` through `process4`) with data transformation, reflection, MariaDB persistence, and Swift object storage
 - **RabbitMQ Message Broker** ensuring reliable queuing between stages
 
 ---
@@ -17,6 +18,7 @@ This project implements an enterprise-grade, distributed inter-process communica
 - **Node 2 (`node2`)**: `${NODE2_IP}` (Galera Node 2 / API Node 2 / RabbitMQ)
 - **Node 3 (`node3`)**: `${NODE3_IP}` (Galera Node 3 / API Node 3 / RabbitMQ)
 - **Virtual IP (VIP)**: `${FLOWFIRST_VIP}` (Managed by Pacemaker)
+- **Remote Node 4 (`node4`)**: `${NODE4_IP}` (Worker Node running `process5`)
 
 ```mermaid
 graph TD
@@ -27,7 +29,7 @@ graph TD
         P1a["P1: REST API"]
         P2a["P2: Examiner"]
         P3a["P3: Reflector"]
-        P4a["P4: DB Persister"]
+        P4a["P4: DB & Swift Persister"]
         RMQ1[("RabbitMQ")]
         GAL1[("Galera Node 1")]
     end
@@ -36,7 +38,7 @@ graph TD
         P1b["P1: REST API"]
         P2b["P2: Examiner"]
         P3b["P3: Reflector"]
-        P4b["P4: DB Persister"]
+        P4b["P4: DB & Swift Persister"]
         RMQ2[("RabbitMQ")]
         GAL2[("Galera Node 2")]
     end
@@ -45,14 +47,30 @@ graph TD
         P1c["P1: REST API"]
         P2c["P2: Examiner"]
         P3c["P3: Reflector"]
-        P4c["P4: DB Persister"]
+        P4c["P4: DB & Swift Persister"]
         RMQ3[("RabbitMQ")]
         GAL3[("Galera Node 3")]
+    end
+
+    subgraph Node4[Remote Node 4]
+        P5["P5: Remote Worker"]
     end
 
     HAProxy -->|"Round-Robin"| P1a
     HAProxy -->|"Round-Robin"| P1b
     HAProxy -->|"Round-Robin"| P1c
+
+    P1a -.->|"RMQ: flow3_p1_to_p5"| P5
+    P1b -.->|"RMQ: flow3_p1_to_p5"| P5
+    P1c -.->|"RMQ: flow3_p1_to_p5"| P5
+
+    P5 -.->|"RMQ: flow3_p5_to_p2"| P2a
+    P5 -.->|"RMQ: flow3_p5_to_p2"| P2b
+    P5 -.->|"RMQ: flow3_p5_to_p2"| P2c
+
+    P2a -.->|"RMQ: flow3_p2_to_p4"| P4a
+    P2b -.->|"RMQ: flow3_p2_to_p4"| P4b
+    P2c -.->|"RMQ: flow3_p2_to_p4"| P4c
 
     P4a -.->|"SQL"| HAProxy
     P4b -.->|"SQL"| HAProxy
@@ -123,7 +141,7 @@ sequenceDiagram
 3. **Process 1 ([`process1.py`](process1.py:1))**: Generates payload with UUID, publishes to `flow1_p1_to_p2`.
 4. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, modifies counter (`+10`), logs audit entry, and **reflects** it to `flow1_p2_to_p3`.
 5. **Process 3 ([`process3.py`](process3.py:1))**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment timestamp, and forwards to `flow1_p3_to_p4`.
-6. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow1_p3_to_p4` and stores the payload in **MariaDB Galera Cluster** via [`db.py`](db.py:1), replicating instantaneously to all 3 nodes.
+6. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow1_p3_to_p4` and stores the payload in both **MariaDB Galera Cluster** via [`db.py`](db.py:1) and **Swift Object Storage** via [`swift_storage.py`](swift_storage.py:1).
 
 ---
 
@@ -133,7 +151,17 @@ sequenceDiagram
 3. **Process 1 ([`process1.py`](process1.py:1))**: Generates metric payload, publishes to `flow2_p1_to_p2`.
 4. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, evaluates threshold status (`HIGH`/`NORMAL`), applies 15% scaling factor, and forwards to `flow2_p2_to_p3`.
 5. **Process 3 ([`process3.py`](process3.py:1))**: Consumes from `flow2_p2_to_p3`, seals with verification signature (`verified_by: process3`), and **reflects** to `flow2_p3_reflected`.
-6. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow2_p3_reflected` and persists full history into the **MariaDB Galera Cluster**.
+6. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow2_p3_reflected` and persists full history into both the **MariaDB Galera Cluster** and **Swift Object Storage**.
+
+---
+
+### Flow 3: Remote Node 4 / Process 5 Pipeline & Persistence
+1. **Client (`curl`)**: Sends `POST /api/flow3` to `http://${FLOWFIRST_VIP}:8080`.
+2. **HAProxy**: Delivers request to `Process 1` on any of the first three nodes (Round-Robin).
+3. **Process 1 ([`process1.py`](process1.py:1))**: Prepares data with UUID and initial metric, publishes to `flow3_p1_to_p5` via RabbitMQ pool.
+4. **Process 5 ([`process5.py`](process5.py:1)) on Remote Node (`node4`)**: Consumes from `flow3_p1_to_p5`, modifies/computes remote transform value, logs audit trail, and **reflects** the modified data back to the RabbitMQ pool on `flow3_p5_to_p2`.
+5. **Process 2 ([`process2.py`](process2.py:1)) on any of the first three nodes**: Consumes from `flow3_p5_to_p2`, verifies the remote transformation, appends audit trail, and publishes to `flow3_p2_to_p4` via RabbitMQ pool.
+6. **Process 4 ([`process4.py`](process4.py:1)) on any of the first three nodes**: Consumes from `flow3_p2_to_p4` and stores the complete history and payload into both the **MariaDB Galera Cluster** via [`db.py`](db.py:1) and **Swift Object Storage** via [`swift_storage.py`](swift_storage.py:1).
 
 ---
 
@@ -144,7 +172,7 @@ erDiagram
     PROCESSED_MESSAGES {
         bigint id PK "Auto Increment"
         varchar(64) message_id UK "Unique UUID"
-        int flow_id "Flow identifier (1 or 2)"
+        int flow_id "Flow identifier (1, 2, or 3)"
         int item_id "Sequence number"
         varchar(255) initial_data "Origin payload"
         int counter_value "Flow 1 reflected counter"
@@ -227,6 +255,7 @@ erDiagram
 | [41](#scenario-41-per-queue-greenthread-independence-flow-1-blockage-does-not-stall-flow-2) | Per-Queue Greenthread Independence | Greenthreads | Slow one queue, confirm sibling greenthread unaffected |
 | [42](#scenario-42-greenthread-auto-restart-on-rabbitmq-consumer-failure) | Greenthread Auto-Restart on RMQ Failure | Greenthreads | Kill RMQ connection, greenthread reconnects automatically |
 | [43](#scenario-43-greenthread-metrics-reporter-throughput-monitoring) | Greenthread Metrics Reporter | Greenthreads | Read throughput counters from `/gt/status` and journal |
+| [44](#scenario-44-remote-node4-process5-end-to-end-pipeline-execution-database-validation) | Remote Node 4 / Process 5 Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 4)→P2→P4, verify MariaDB audit trail & Swift object storage |
 
 ---
 
@@ -4385,6 +4414,12 @@ curl -s http://localhost:8080/zk/health | jq .
 
 # Live ZK runtime config
 curl -s http://localhost:8080/zk/config | jq .
+
+# Swift Object Storage status & stored objects query
+curl -s http://localhost:8080/swift/status | jq .
+curl -s http://localhost:8080/swift/objects | jq .
+# Query specific stored object payload from Swift
+# curl -s http://localhost:8080/swift/object/flow1/<message_id>.json | jq .
 ```
 
 ### Step 6 — Inspect the database
@@ -5037,4 +5072,158 @@ sudo pcs resource restart flowfirst-p1-res-clone
 sudo pcs resource restart flowfirst-p2-res-clone
 sudo pcs resource restart flowfirst-p3-res-clone
 sudo pcs resource restart flowfirst-p4-res-clone
+```
+
+---
+
+### Scenario 44: Remote Node 4 / Process 5 End-to-End Pipeline Execution & Database Validation
+
+Demonstrates cross-node asynchronous inter-process communication spanning the core 3-node cluster and **Remote Node 4 (`node4`)**:
+1. `Process 1` on one of the cluster nodes receives `POST /api/flow3` and prepares the initial message payload.
+2. `Process 1` pushes the payload onto the RabbitMQ pool queue `flow3_p1_to_p5`.
+3. `Process 5` running on **Remote Node 4 (`node4`)** consumes the message from the RabbitMQ pool, applies remote transformation/computation, records audit details, and **reflects** the modified payload back to the RabbitMQ pool on `flow3_p5_to_p2`.
+4. `Process 2` on one of the cluster nodes consumes the reflected message from `flow3_p5_to_p2`, verifies the remote node processing, logs the verification step, and pushes it to `flow3_p2_to_p4`.
+5. `Process 4` consumes the message, passes the ZooKeeper dedup barrier, and persists the complete audit history into both the **MariaDB Galera Cluster** (`processed_messages` table) and **Swift Object Storage**.
+
+#### A. Pre-requisite: Verify Process 5 is running on Remote Node 4
+
+```bash
+# On Remote Node 4 (node4):
+sudo systemctl status flowfirst-process5
+# Or if running interactively:
+# python process5.py
+```
+
+#### B. Trigger Flow 3 via Virtual IP REST API
+
+```bash
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow3 \
+     -H "Content-Type: application/json" \
+     -d '{"item_id": 9001, "remote_metric": 64.0, "initial_data": "Remote telemetry batch 9001"}' | jq .
+```
+
+*Expected API response:*
+```json
+{
+  "status": "success",
+  "flow": 3,
+  "handled_by_node": "node1",
+  "target_queue": "flow3_p1_to_p5",
+  "target_node": "remote_node4",
+  "payload": {
+    "flow": 3,
+    "message_id": "7b8f9a2c-d4e5-4a6b-8c1e-9f0a1b2c3d4e",
+    "item_id": 9001,
+    "initial_data": "Remote telemetry batch 9001",
+    "remote_metric": 64.0,
+    "history": [
+      {
+        "stage": "process1_created",
+        "timestamp": "2025-06-15 14:00:00",
+        "status": "prepared_for_remote_node4",
+        "source": "rest_api",
+        "published_by": "node1"
+      }
+    ]
+  }
+}
+```
+
+#### C. Inspect Remote Node 4 (Process 5) Logs
+
+```bash
+# On Remote Node 4:
+sudo journalctl -u flowfirst-process5 --since "1 minute ago" --no-pager
+# Expected output:
+# [P5][gt][Remote Node] Consumed Flow 3 item #9001 (msg_id=7b8f9a2c...)
+# [P5][gt][Remote Node] Reflected to 'flow3_p5_to_p2' (computed=135.5)
+```
+
+#### D. Validate Database Record & Full Audit Trail in MariaDB
+
+Query the Galera cluster via the Virtual IP:
+
+```bash
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "
+SELECT id, message_id, flow_id, item_id, initial_data, created_at
+FROM processed_messages
+WHERE flow_id = 3 AND item_id = 9001\G"
+```
+
+*Expected result:*
+```
+*************************** 1. row ***************************
+          id: 1
+  message_id: 7b8f9a2c-d4e5-4a6b-8c1e-9f0a1b2c3d4e
+     flow_id: 3
+     item_id: 9001
+initial_data: Remote telemetry batch 9001
+  created_at: 2025-06-15 14:00:01
+```
+
+Examine the full 4-stage audit trail spanning Node 1-3 and Remote Node 4:
+
+```bash
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "
+SELECT JSON_PRETTY(history_trail) AS full_audit_trail
+FROM processed_messages
+WHERE flow_id = 3 AND item_id = 9001\G"
+```
+
+*Expected audit trail JSON:*
+```json
+[
+  {
+    "stage": "process1_created",
+    "timestamp": "2025-06-15 14:00:00",
+    "status": "prepared_for_remote_node4",
+    "source": "rest_api",
+    "published_by": "node1"
+  },
+  {
+    "stage": "process5_remote_transformed_and_reflected",
+    "timestamp": "2025-06-15 14:00:00",
+    "processed_by": "node4",
+    "node_type": "remote_node4",
+    "modification": "Applied remote transform (multiplier=2, computed_value=135.5)"
+  },
+  {
+    "stage": "process2_received_from_remote_and_forwarded_to_p4",
+    "timestamp": "2025-06-15 14:00:01",
+    "processed_by": "node2",
+    "status": "remote_flow3_verified",
+    "action": "Received from node4 (computed_val=135.5) and forwarded to Process 4"
+  },
+  {
+    "stage": "process4_saved_to_mariadb",
+    "timestamp": "2025-06-15 14:00:01",
+    "persisted_by": "node3",
+    "database_action": "INSERT/UPDATE processed_messages (flow3 remote complete)"
+  }
+]
+```
+
+#### E. Verify Swift Object Storage Persistence & REST API Query
+
+```bash
+# Query Swift stored object via Process 1 REST API
+MSG_ID=$(mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -N -e "
+SELECT message_id FROM processed_messages WHERE flow_id = 3 AND item_id = 9001;")
+
+curl -s http://${FLOWFIRST_VIP}:8080/swift/object/flow3/${MSG_ID}.json | jq .
+```
+
+*Expected Swift API response:*
+```json
+{
+  "status": "success",
+  "object_name": "flow3/7b8f9a2c-d4e5-4a6b-8c1e-9f0a1b2c3d4e.json",
+  "payload": {
+    "flow": 3,
+    "item_id": 9001,
+    "remote_node": "node4",
+    "remote_computed_value": 135.5,
+    "process2_verified_remote": true
+  }
+}
 ```

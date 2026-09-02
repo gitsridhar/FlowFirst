@@ -13,6 +13,8 @@ from config import (
     QUEUE_FLOW1_P2_TO_P3,
     QUEUE_FLOW2_P1_TO_P2,
     QUEUE_FLOW2_P2_TO_P3,
+    QUEUE_FLOW3_P5_TO_P2,
+    QUEUE_FLOW3_P2_TO_P4,
 )
 import zk as zklib
 
@@ -104,6 +106,45 @@ def handle_flow2_message(ch, method, properties, body):
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
+def handle_flow3_message(ch, method, properties, body):
+    """
+    Flow 3 handler on Process 2 (Cluster Nodes 1-3).
+    Receives modified data back from Remote Node 4 / Process 5 via RabbitMQ pool,
+    evaluates and logs confirmation, and forwards directly to Process 4 on QUEUE_FLOW3_P2_TO_P4.
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+        item_id = data.get("item_id")
+        msg_id = data.get("message_id", "")
+        print(f"\n[P2][gt] [Flow 3] Received reflected item #{item_id} from Process 5 on Remote Node (msg_id={msg_id})")
+
+        data["process2_verified_remote"] = True
+        data["history"].append({
+            "stage": "process2_received_from_remote_and_forwarded_to_p4",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "status": "remote_flow3_verified",
+            "action": f"Received from {data.get('remote_node')} (computed_val={data.get('remote_computed_value')}) and forwarded to Process 4",
+        })
+
+        ch.basic_publish(
+            exchange="",
+            routing_key=QUEUE_FLOW3_P2_TO_P4,
+            body=json.dumps(data, indent=2),
+            properties=pika.BasicProperties(
+                delivery_mode=pika.DeliveryMode.Persistent,
+                content_type="application/json",
+            ),
+        )
+        gt.metrics_counter["flow3_processed"] += 1
+        print(f"[P2][gt] [Flow 3] Forwarded to Process 4 via '{QUEUE_FLOW3_P2_TO_P4}'")
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
+    except Exception as e:
+        print(f"[P2][gt] [Flow 3] Error: {e}")
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+
 # ---------------------------------------------------------------------------
 # Per-queue consumer greenthreads — each owns its own pika connection+channel
 # ---------------------------------------------------------------------------
@@ -149,6 +190,26 @@ def _gt_consume_flow2():
         print("[P2][gt] flow2-consumer greenthread stopped.")
 
 
+def _gt_consume_flow3():
+    """
+    Greenthread: dedicated consumer for QUEUE_FLOW3_P5_TO_P2 (from Remote Node 4).
+    Owns its own RabbitMQ connection.
+    """
+    conn = gt.get_rmq_connection_with_retry("p2-flow3")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue=QUEUE_FLOW3_P5_TO_P2, on_message_callback=handle_flow3_message, auto_ack=False)
+    print(f"[P2][gt] flow3-consumer greenthread started — consuming '{QUEUE_FLOW3_P5_TO_P2}'")
+    try:
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
+    finally:
+        conn.close()
+        print("[P2][gt] flow3-consumer greenthread stopped.")
+
+
 def _gt_zk_health_reporter():
     while not gt.is_stopping():
         try:
@@ -168,10 +229,13 @@ def _consume():
     # Greenthread 2: Flow 2 consumer (own connection)
     gt.spawn("p2_flow2_consumer", _gt_consume_flow2, restart_on_error=True)
 
-    # Greenthread 3: ZooKeeper health reporter
+    # Greenthread 3: Flow 3 consumer (from remote Process 5)
+    gt.spawn("p2_flow3_consumer", _gt_consume_flow3, restart_on_error=True)
+
+    # Greenthread 4: ZooKeeper health reporter
     gt.periodic("p2_zk_health", _gt_zk_health_reporter, 30)
 
-    # Greenthread 4: Metrics reporter
+    # Greenthread 5: Metrics reporter
     gt.start_metrics_reporter("process2")
 
     print(f"[P2][gt] All greenthreads started: {gt.list_greenthreads()}")

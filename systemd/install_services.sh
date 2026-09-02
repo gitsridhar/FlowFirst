@@ -24,7 +24,7 @@ chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Copying unit files to ${SYSTEMD_DIR}..."
 
-for unit in flowfirst-process1.service flowfirst-process2.service flowfirst-process3.service flowfirst-process4.service flowfirst.target; do
+for unit in flowfirst-process1.service flowfirst-process2.service flowfirst-process3.service flowfirst-process4.service flowfirst-process5.service flowfirst.target; do
     sed "s|/opt/flowfirst|${INSTALL_DIR}|g; s|User=flowuser|User=${RUN_USER}|g; s|Group=flowuser|Group=${RUN_USER}|g" \
         "${SCRIPT_DIR}/${unit}" > "${SYSTEMD_DIR}/${unit}"
     chmod 644 "${SYSTEMD_DIR}/${unit}"

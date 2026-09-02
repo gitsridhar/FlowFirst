@@ -59,5 +59,19 @@ services:
       retries: 5
     restart: unless-stopped
 
+  swift:
+    image: bouncestorage/swift-aio:latest
+    container_name: swift_flowfirst
+    ports:
+      - "8090:8080"   # Swift API & TempAuth endpoint → http://localhost:8090/auth/v1.0
+    environment:
+      SWIFT_DEFAULT_CONTAINER: flowfirst_messages
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f -s -I -H 'X-Auth-User: test:tester' -H 'X-Auth-Key: testing' http://localhost:8080/auth/v1.0 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
   mariadb_data:

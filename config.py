@@ -36,6 +36,8 @@ NODE_NAME = os.getenv("NODE_NAME", socket.gethostname())
 NODE1_IP = os.getenv("NODE1_IP", "127.0.0.1")
 NODE2_IP = os.getenv("NODE2_IP", "127.0.0.1")
 NODE3_IP = os.getenv("NODE3_IP", "127.0.0.1")
+NODE4_IP = os.getenv("NODE4_IP", "127.0.0.1")
+NODE4_NAME = os.getenv("NODE4_NAME", "node4")
 FLOWFIRST_VIP = os.getenv("FLOWFIRST_VIP", NODE1_IP)
 
 # Strip unexpanded shell references from IP/host values too
@@ -89,6 +91,14 @@ if _raw_mariadb_hosts:
 else:
     MARIADB_HOSTS = f"{NODE1_IP},{NODE2_IP},{NODE3_IP}"
 
+# Swift Object Storage Connection Settings
+SWIFT_AUTH_URL = os.getenv("SWIFT_AUTH_URL", f"http://{FLOWFIRST_VIP}:8080/auth/v1.0")
+SWIFT_AUTH_VERSION = os.getenv("SWIFT_AUTH_VERSION", "1.0")
+SWIFT_USER = os.getenv("SWIFT_USER", "test:tester")
+SWIFT_KEY = os.getenv("SWIFT_KEY", "testing")
+SWIFT_CONTAINER = os.getenv("SWIFT_CONTAINER", "flowfirst_messages")
+SWIFT_ENABLED = os.getenv("SWIFT_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on")
+
 # Flow 1 Queues
 # Flow 1: P1 -> [flow1_p1_to_p2] -> P2 -> (reflects modified) -> [flow1_p2_to_p3] -> P3 -> [flow1_p3_to_p4] -> P4 (persists to MariaDB)
 QUEUE_FLOW1_P1_TO_P2 = "flow1_p1_to_p2"
@@ -100,6 +110,12 @@ QUEUE_FLOW1_P3_TO_P4 = "flow1_p3_to_p4"
 QUEUE_FLOW2_P1_TO_P2 = "flow2_p1_to_p2"
 QUEUE_FLOW2_P2_TO_P3 = "flow2_p2_to_p3"
 QUEUE_FLOW2_P3_REFLECTED = "flow2_p3_reflected"
+
+# Flow 3 Queues (Remote Node 4 / Process 5 Scenario)
+# Flow 3: P1 (Node1-3) -> [flow3_p1_to_p5] -> P5 (Remote Node 4) -> (modifies/reflects) -> [flow3_p5_to_p2] -> P2 (Node1-3) -> [flow3_p2_to_p4] -> P4 (persists to MariaDB & Swift)
+QUEUE_FLOW3_P1_TO_P5 = "flow3_p1_to_p5"
+QUEUE_FLOW3_P5_TO_P2 = "flow3_p5_to_p2"
+QUEUE_FLOW3_P2_TO_P4 = "flow3_p2_to_p4"
 
 # Greenthread (eventlet) settings
 GT_POOL_SIZE          = int(os.getenv("GT_POOL_SIZE",          "1000"))
@@ -124,6 +140,9 @@ ALL_QUEUES = [
     QUEUE_FLOW2_P1_TO_P2,
     QUEUE_FLOW2_P2_TO_P3,
     QUEUE_FLOW2_P3_REFLECTED,
+    QUEUE_FLOW3_P1_TO_P5,
+    QUEUE_FLOW3_P5_TO_P2,
+    QUEUE_FLOW3_P2_TO_P4,
 ]
 
 

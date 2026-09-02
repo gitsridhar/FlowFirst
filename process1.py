@@ -15,9 +15,12 @@ from config import (
     setup_queues,
     QUEUE_FLOW1_P1_TO_P2,
     QUEUE_FLOW2_P1_TO_P2,
+    QUEUE_FLOW3_P1_TO_P5,
     GT_METRICS_INTERVAL_S,
 )
 import zk as zklib
+import swift_storage
+from urllib.parse import parse_qs
 
 # ---------------------------------------------------------------------------
 # Per-process state — each greenthread owns its OWN pika connection+channel.
@@ -123,6 +126,43 @@ def publish_flow2_message(item_id: int = None, custom_data: str = None, value: f
     return payload
 
 
+def publish_flow3_message(item_id: int = None, custom_data: str = None, remote_metric: float = None) -> dict:
+    """Prepare and publish a Flow 3 message targeted to Remote Node 4 / Process 5."""
+    if item_id  is None: item_id  = int(time.time() * 1000) % 100000
+    if remote_metric is None: remote_metric = round(45.0 + (item_id % 15) * 2.2, 2)
+    if custom_data is None: custom_data = f"Flow-3 remote payload for item #{item_id}"
+
+    payload = {
+        "flow": 3,
+        "message_id": str(uuid.uuid4()),
+        "item_id": item_id,
+        "initial_data": custom_data,
+        "remote_metric": remote_metric,
+        "history": [{
+            "stage": "process1_created",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "prepared_for_remote_node4",
+            "source": "rest_api",
+            "published_by": NODE_NAME,
+        }],
+    }
+    body = json.dumps(payload, indent=2)
+    with _publish_sem:
+        ch = _ensure_publish_channel()
+        ch.basic_publish(
+            exchange="",
+            routing_key=QUEUE_FLOW3_P1_TO_P5,
+            body=body,
+            properties=pika.BasicProperties(
+                delivery_mode=pika.DeliveryMode.Persistent,
+                content_type="application/json",
+            ),
+        )
+    gt.metrics_counter["flow3_published"] += 1
+    print(f"[P1][gt] [Flow 3] Published #{item_id} to Remote Node 4 (metric={remote_metric})")
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # HTTP Handler
 # ---------------------------------------------------------------------------
@@ -164,10 +204,14 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     "GET /gt/status":    "Greenthread pool status",
                     "GET /zk/health":    "Full ZooKeeper pipeline health tree",
                     "GET /zk/config":    "Current live runtime config from ZK",
+                    "GET /swift/status": "Swift object storage connection and container status",
+                    "GET /swift/objects": "List stored objects in Swift (?prefix=...&limit=...)",
+                    "GET /swift/object/<path>": "Retrieve stored message payload from Swift",
                     "POST /zk/config":   "Update a runtime config value in ZK",
                     "POST /api/flow1":   "Publish message to Flow 1",
                     "POST /api/flow2":   "Publish message to Flow 2",
-                    "POST /api/batch":   "Publish batch to both flows",
+                    "POST /api/flow3":   "Publish message to Flow 3 (Remote Node 4 / Process 5 pipeline)",
+                    "POST /api/batch":   "Publish batch to all flows",
                 },
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
@@ -187,6 +231,41 @@ class RestApiHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "zk_config": _config_watcher.get_all() if _config_watcher else {},
             })
+        elif path == "/swift/status":
+            self._send_json(200, swift_storage.get_swift_status())
+        elif path == "/swift/objects":
+            query = parse_qs(urlparse(self.path).query)
+            prefix = query.get("prefix", [None])[0]
+            limit = int(query.get("limit", [100])[0])
+            ok, objs, err = swift_storage.list_message_objects(prefix=prefix, limit=limit)
+            if ok:
+                self._send_json(200, {
+                    "status": "success",
+                    "count": len(objs),
+                    "prefix": prefix,
+                    "objects": objs,
+                })
+            else:
+                self._send_json(502, {"status": "error", "error": err})
+        elif path.startswith("/swift/object/"):
+            obj_name = path[len("/swift/object/"):]
+            if not obj_name:
+                self._send_json(400, {"error": "Object name required in URL path"})
+                return
+            ok, data, headers = swift_storage.get_message_object(obj_name)
+            if ok:
+                self._send_json(200, {
+                    "status": "success",
+                    "object_name": obj_name,
+                    "payload": data,
+                    "swift_headers": headers,
+                })
+            else:
+                self._send_json(404, {
+                    "status": "error",
+                    "object_name": obj_name,
+                    "details": headers,
+                })
         else:
             self._send_json(404, {"error": "Not Found", "path": self.path})
 
@@ -214,6 +293,13 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 p = publish_flow2_message(item_id=item_id, custom_data=post_data.get("initial_data"), value=val)
                 self._send_json(200, {"status": "success", "flow": 2, "handled_by_node": NODE_NAME,
                                       "target_queue": QUEUE_FLOW2_P1_TO_P2, "payload": p})
+
+            elif path == "/api/flow3":
+                item_id = int(post_data["item_id"]) if "item_id" in post_data else None
+                metric  = float(post_data["remote_metric"]) if "remote_metric" in post_data else None
+                p = publish_flow3_message(item_id=item_id, custom_data=post_data.get("initial_data"), remote_metric=metric)
+                self._send_json(200, {"status": "success", "flow": 3, "handled_by_node": NODE_NAME,
+                                      "target_queue": QUEUE_FLOW3_P1_TO_P5, "target_node": "remote_node4", "payload": p})
 
             elif path == "/api/batch":
                 count = int(post_data.get("count", 3))

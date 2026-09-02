@@ -1,13 +1,23 @@
-# FlowFirst - Multi-Process RabbitMQ & MariaDB Data Pipeline
-## Cluster-Aware 3-Node Architecture with Virtual IP (VIP), HAProxy, Pacemaker, & MariaDB Galera Multi-Master Replication
+# FlowFirst: Enterprise Multi-Process Distributed Data Pipeline
+## HA Architecture with Git, Python 3, Pip, Pyenv/Venv, Chrony, MariaDB/Galera Multi-Master, RabbitMQ, HAProxy, Pacemaker/Corosync, Virtual IP (VIP), Apache ZooKeeper, Systemd Services, Eventlet Greenthreads, OpenStack Swift & Remote Worker Node
 
-This project implements an enterprise-grade, distributed inter-process communication and persistence pipeline across **3 network nodes (RHEL 9.6)**. It incorporates:
-- **Virtual IP (VIP) Failover** managed by **Pacemaker/Corosync** (`IPaddr2`)
-- **HAProxy Round-Robin Load Balancing** for both the **REST API** (`:8080`) and **MariaDB Galera** (`:3306`)
-- **MariaDB Galera Cluster** with synchronous multi-master replication (`wsrep`), automated state transfer, and quorum consistency across all 3 nodes
-- **Swift Object Storage** integration via `python-swiftclient` for immutable object archiving and REST API payload retrieval
-- **Multi-Process Pipeline** (`process1` through `process4`) with data transformation, reflection, MariaDB persistence, and Swift object storage
-- **RabbitMQ Message Broker** ensuring reliable queuing between stages
+This project implements an enterprise-grade, high-availability, distributed inter-process communication, object storage, and persistence pipeline across a 4-node topology (3-node core high-availability cluster + 1 remote worker node on RHEL 9.6). It incorporates:
+- **Git, Python 3, Pip, & Pyenv/Virtualenv**: Version-controlled modular codebase running isolated Python virtual environments across all nodes
+- **Chrony NTP Time Synchronisation**: Sub-millisecond cluster clock synchronisation for Galera writesets and Corosync consensus
+- **Virtual IP (VIP) Failover & High Availability**: Managed by **Pacemaker / Corosync** (`IPaddr2`) with zero-downtime VIP migration
+- **HAProxy Load Balancing**: Round-Robin Layer-7 load balancing for REST API (:8080), Layer-4 load balancing for MariaDB Galera (:3306), and RabbitMQ AMQP (:5672) with live statistics dashboard (:9000)
+- **MariaDB Galera Multi-Master Cluster**: Synchronous multi-master replication (`wsrep`), automated Incremental (IST) / State Snapshot Transfers (SST), and quorum consistency across all core nodes
+- **RabbitMQ Message Broker Pool**: Durable message queuing, automated reconnect greenthreads, and reliable cross-node message routing
+- **Apache ZooKeeper**: Distributed coordinator for runtime leader election, live dynamic configuration hot-reloading (without process restart), worker service registry, and atomic deduplication barriers
+- **Eventlet Greenthreads & Non-Blocking I/O**: High-concurrency cooperative multitasking, dedicated per-queue consumer greenpools, cooperative RMQ heartbeats, and live throughput metric collectors
+- **OpenStack Swift Object Storage (`python-swiftclient`)**: Dual-persistence layer providing immutable object archiving and direct REST API retrieval
+- **Systemd Service Architecture**: Managed systemd service units for `flowfirst-process1` through `flowfirst-process5` with automatic crash recovery
+- **Distributed Multi-Process Pipeline (`process1` – `process5`)**:
+  - **Process 1**: REST API producer & health gateway
+  - **Process 2**: Message transformer, metric examiner & reflection forwarder
+  - **Process 3**: Acknowledgment sealer & reflection forwarder
+  - **Process 4**: Dual MariaDB & Swift persistence engine with ZooKeeper dedup protection
+  - **Process 5**: Dedicated remote worker running on Remote Node 4 (`node4`) for cross-network asynchronous task execution and reflection
 
 ---
 

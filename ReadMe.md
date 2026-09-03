@@ -1216,8 +1216,8 @@ sudo ss -tlnp | grep haproxy
 # Expected lines:
 #   0.0.0.0:8080    ← REST API frontend
 #   0.0.0.0:9000    ← stats dashboard
-#   ${FLOWFIRST_VIP}:3306  ← MariaDB (VIP only, on the node holding the VIP)
-#   ${FLOWFIRST_VIP}:5672  ← RabbitMQ (VIP only)
+#   0.0.0.0:3307    ← MariaDB LB frontend (proxies to node 3306)
+#   0.0.0.0:5673    ← RabbitMQ LB frontend (proxies to node 5672)
 
 # Confirm stats page is reachable via the VIP
 curl -s -u "${HAPROXY_STATS_USER}:${HAPROXY_STATS_PASS}" http://${FLOWFIRST_VIP}:${HAPROXY_STATS_PORT:-9000}/stats | grep -c "pxname"

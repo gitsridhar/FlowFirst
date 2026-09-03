@@ -70,6 +70,17 @@ sudo pcs resource create flowfirst-vip ocf:heartbeat:IPaddr2 \
 
 # 3. Configure HAProxy as a Pacemaker Cluster Resource
 echo "[3/5] Creating HAProxy cluster resource..."
+
+# Ensure HAProxy config is valid before registering with Pacemaker
+if [[ -f /etc/haproxy/haproxy.cfg ]]; then
+    if ! sudo haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null 2>&1; then
+        echo "  [WARNING] /etc/haproxy/haproxy.cfg is invalid or unpopulated — running setup_haproxy.sh..."
+        if [[ -x "${ROOT_DIR}/haproxy/setup_haproxy.sh" ]]; then
+            sudo "${ROOT_DIR}/haproxy/setup_haproxy.sh"
+        fi
+    fi
+fi
+
 sudo pcs resource create haproxy-res systemd:haproxy \
     op monitor interval=15s timeout=20s \
     op start timeout=30s \

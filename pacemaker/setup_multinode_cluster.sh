@@ -128,6 +128,12 @@ prepare_node() {
     enable_ha_repo
     sudo dnf install -y pcs pacemaker corosync fence-agents-all haproxy
 
+    # 1b. Automatically generate FlowFirst HAProxy configuration if setup script is available
+    if [[ -x "${ROOT_DIR}/haproxy/setup_haproxy.sh" ]]; then
+        echo "  [INFO] Generating FlowFirst HAProxy configuration..."
+        sudo "${ROOT_DIR}/haproxy/setup_haproxy.sh" || true
+    fi
+
     # 2. Enable and start pcsd — must be running before pcs host auth
     echo "[P2/5] Enabling and starting pcsd (TCP 2224)..."
     sudo systemctl enable --now pcsd
@@ -255,6 +261,9 @@ preflight_checks
 echo "[1/6] Ensuring cluster packages installed on this node..."
 enable_ha_repo
 sudo dnf install -y pcs pacemaker corosync fence-agents-all haproxy
+if [[ -x "${ROOT_DIR}/haproxy/setup_haproxy.sh" ]]; then
+    sudo "${ROOT_DIR}/haproxy/setup_haproxy.sh" || true
+fi
 sudo systemctl enable --now pcsd
 
 # 2. Set hacluster password on this node

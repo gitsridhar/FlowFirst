@@ -1060,6 +1060,38 @@ grep "bind" /etc/haproxy/haproxy.cfg
 
 ---
 
+**Failure 6 — `backend 'static' has no server available!` / Default RHEL `/etc/haproxy/haproxy.cfg` Active**
+
+When HAProxy is installed on RHEL 9 via `dnf install haproxy`, it creates a default configuration file containing a sample `frontend main`, `backend static`, and `backend app`. The sample `backend static` has no defined servers, causing HAProxy startup failure or warnings.
+
+Symptom:
+```
+backend 'static' has no server available!
+```
+
+Root Cause:
+The FlowFirst setup script `./haproxy/setup_haproxy.sh` has not yet been executed (or was executed before `.env` was created), leaving the default RHEL configuration in `/etc/haproxy/haproxy.cfg`.
+
+Fix:
+Generate the FlowFirst HAProxy configuration from template:
+
+```bash
+cd /opt/flowfirst
+sudo ./haproxy/setup_haproxy.sh
+
+# Verify that 'static' is gone and FlowFirst frontends/backends are present:
+grep -E "frontend|backend" /etc/haproxy/haproxy.cfg
+# Expected output:
+#   frontend flowfirst_api_front
+#   backend flowfirst_api_back
+#   frontend mariadb_galera_front
+#   backend mariadb_galera_back
+#   frontend rabbitmq_amqp_front
+#   backend rabbitmq_amqp_back
+```
+
+---
+
 **Quick all-in-one HAProxy pre-start check** (run after Phase 3, before Phase 5):
 
 ```bash
@@ -1127,7 +1159,8 @@ sudo ./pacemaker/setup_multinode_cluster.sh --prepare-node
 This single command on each node:
 1. Enables the HA repo (or adds CentOS Stream 9 HA + AppStream + BaseOS as fallback)
 2. Installs `pcs pacemaker corosync fence-agents-all haproxy`
-3. Enables and starts `pcsd` (TCP 2224)
+3. Automatically generates the FlowFirst `/etc/haproxy/haproxy.cfg` from `.env` (preventing default RHEL `backend 'static'` errors)
+4. Enables and starts `pcsd` (TCP 2224)
 4. Sets the `hacluster` password (read from `.env` → `HACLUSTER_PASS`, default `hacluster123`)
 5. Opens firewall ports: `2224/tcp` `3121/tcp` `5403/tcp` `5404/udp` `5405/udp`
 6. Adds all three node IPs to `/etc/hosts`

@@ -112,12 +112,17 @@ fi
 # 2. Allow HAProxy to bind to the VIP address even when Pacemaker hasn't
 #    assigned it to this node yet.  Without this, HAProxy fails to start
 #    on nodes that don't currently hold the VIP.
-echo "[2/6] Configuring net.ipv4.ip_nonlocal_bind=1 ..."
+echo "[2/6] Configuring net.ipv4.ip_nonlocal_bind=1 and runtime directories..."
 sudo sysctl -w net.ipv4.ip_nonlocal_bind=1
 echo "net.ipv4.ip_nonlocal_bind=1" | \
     sudo tee /etc/sysctl.d/99-haproxy-nonlocalbind.conf > /dev/null
 # Apply immediately and persist across reboots
 sudo sysctl --system | grep nonlocal_bind || true
+
+# Ensure chroot and runtime state directories exist with correct permissions
+sudo mkdir -p /var/lib/haproxy /run/haproxy
+sudo chown -R haproxy:haproxy /var/lib/haproxy /run/haproxy 2>/dev/null || true
+sudo chmod 750 /var/lib/haproxy /run/haproxy 2>/dev/null || true
 
 # 3. SELinux: allow HAProxy to bind to cluster ports and access shared memory / cluster resources
 echo "[3/6] Configuring SELinux for HAProxy..."

@@ -121,10 +121,13 @@ echo "net.ipv4.ip_nonlocal_bind=1" | \
 # Apply immediately and persist across reboots
 sudo sysctl --system | grep nonlocal_bind || true
 
-# Ensure chroot and runtime state directories exist with correct permissions
-sudo mkdir -p /var/lib/haproxy /run/haproxy
-sudo chown -R haproxy:haproxy /var/lib/haproxy /run/haproxy 2>/dev/null || true
-sudo chmod 750 /var/lib/haproxy /run/haproxy 2>/dev/null || true
+# Ensure chroot, log, and runtime state directories exist with correct permissions and SELinux contexts
+sudo mkdir -p /var/lib/haproxy /run/haproxy /var/log/haproxy
+sudo chown -R haproxy:haproxy /var/lib/haproxy /run/haproxy /var/log/haproxy 2>/dev/null || true
+sudo chmod 755 /var/lib/haproxy /run/haproxy /var/log/haproxy 2>/dev/null || true
+if command -v restorecon &>/dev/null; then
+    sudo restorecon -Rv /var/lib/haproxy /run/haproxy /var/log/haproxy /etc/haproxy >/dev/null 2>&1 || true
+fi
 
 # 3. SELinux: allow HAProxy to bind to cluster ports and access shared memory / cluster resources
 echo "[3/6] Configuring SELinux for HAProxy..."

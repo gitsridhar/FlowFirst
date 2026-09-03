@@ -970,9 +970,9 @@ sysctl net.ipv4.ip_nonlocal_bind
 
 ---
 
-**Failure 3 — SELinux blocking HAProxy port binding or shared memory (`/dev/shm`) access**
+**Failure 3 — SELinux blocking HAProxy port binding, `dac_override`, or shared memory access**
 
-RHEL 9 ships with SELinux in `Enforcing` mode. Without the `haproxy_connect_any` and `daemons_enable_cluster_mode` booleans, HAProxy cannot bind to custom ports such as `8080`, `3306`, or `9000`, and may encounter denials mapping shared memory files (`/dev/shm`).
+RHEL 9 ships with SELinux in `Enforcing` mode. Without proper file ownership/contexts and the `haproxy_connect_any` and `daemons_enable_cluster_mode` booleans, HAProxy encounters socket binding denials or `dac_override` permission denials when accessing runtime state directories (`/var/lib/haproxy`, `/run/haproxy`, `/var/log/haproxy`).
 
 Symptom — check the audit log:
 ```bash
@@ -980,18 +980,26 @@ sudo ausearch -m avc -ts recent | grep haproxy
 # Example 1:
 #   avc:  denied { name_bind } for  comm="haproxy" ... tcontext=system_u:object_r:http_cache_port_t:s0
 # Example 2:
+#   avc:  denied { dac_override } for  pid=... comm="haproxy" capability=1  scontext=system_u:system_r:haproxy_t:s0
+# Example 3:
 #   avc:  denied { map } for  comm="haproxy" path="/dev/shm/..." dev="tmpfs" tcontext=system_u:object_r:tmpfs_t:s0
 ```
 
 Fix (the setup script already does this, but if needed manually):
 ```bash
-# Allow HAProxy to connect/bind to custom ports and operate in cluster/shared memory environments
+# 1. Restore standard SELinux security contexts and directory permissions:
+sudo mkdir -p /var/lib/haproxy /run/haproxy /var/log/haproxy
+sudo chown -R haproxy:haproxy /var/lib/haproxy /run/haproxy /var/log/haproxy /etc/haproxy
+sudo chmod 755 /var/lib/haproxy /run/haproxy /var/log/haproxy
+sudo restorecon -Rv /var/lib/haproxy /run/haproxy /var/log/haproxy /etc/haproxy
+
+# 2. Allow HAProxy to connect/bind to custom ports and operate in cluster/shared memory environments
 sudo setsebool -P haproxy_connect_any 1
 sudo setsebool -P daemons_enable_cluster_mode 1
 
-# If a custom policy module is required for strict /dev/shm file mapping:
-sudo ausearch -c 'haproxy' --raw | audit2allow -M haproxy_shm
-sudo semodule -i haproxy_shm.pp
+# 3. If any persistent AVC denial remains, compile a targeted SELinux policy:
+sudo ausearch -c 'haproxy' --raw | audit2allow -M haproxy_custom
+sudo semodule -i haproxy_custom.pp
 
 # Confirm booleans
 getsebool haproxy_connect_any daemons_enable_cluster_mode

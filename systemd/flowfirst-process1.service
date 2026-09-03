@@ -16,6 +16,11 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=flowfirst-p1
 
+# Timeout settings for clean shutdown under systemd
+TimeoutStopSec=5s
+KillMode=mixed
+KillSignal=SIGTERM
+
 # Security Sandbox options
 # Greenthread support: allow up to 65536 open file descriptors per process
 LimitNOFILE=65536

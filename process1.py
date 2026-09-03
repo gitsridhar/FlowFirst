@@ -376,15 +376,25 @@ def _gt_http_server():
     httpd.socket = eventlet.listen((API_HOST, API_BACKEND_PORT))
     pool = eventlet.GreenPool(size=gt.GT_WORKER_CONCURRENCY * 10)
     print(f"[P1][gt] HTTP server listening on {API_HOST}:{API_BACKEND_PORT} (GreenPool size={gt.GT_WORKER_CONCURRENCY * 10})")
-    while not gt.is_stopping():
+    try:
+        while not gt.is_stopping():
+            try:
+                # Set a non-blocking timeout on accept so loop checks gt.is_stopping()
+                httpd.socket.settimeout(1.0)
+                sock, addr = httpd.socket.accept()
+                pool.spawn_n(httpd.process_request, sock, addr)
+            except (eventlet.support.greenlets.GreenletExit, StopIteration):
+                break
+            except Exception as e:
+                # Timeout is normal when idle; log only real errors
+                if not gt.is_stopping() and "timed out" not in str(e).lower():
+                    print(f"[P1][gt] HTTP accept error: {e}")
+    finally:
         try:
-            sock, addr = httpd.socket.accept()
-            pool.spawn_n(httpd.process_request, sock, addr)
-        except Exception as e:
-            if not gt.is_stopping():
-                print(f"[P1][gt] HTTP accept error: {e}")
-    httpd.server_close()
-    print("[P1][gt] HTTP server stopped.")
+            httpd.server_close()
+        except Exception:
+            pass
+        print("[P1][gt] HTTP server stopped.")
 
 
 def _run_api_server():

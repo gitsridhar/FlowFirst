@@ -16,6 +16,11 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=flowfirst-p3
 
+# Timeout settings for clean shutdown under systemd
+TimeoutStopSec=5s
+KillMode=mixed
+KillSignal=SIGTERM
+
 # Security Sandbox options
 LimitNOFILE=65536
 NoNewPrivileges=true

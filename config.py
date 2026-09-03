@@ -123,15 +123,14 @@ GT_WORKER_CONCURRENCY = int(os.getenv("GT_WORKER_CONCURRENCY", "4"))
 GT_METRICS_INTERVAL_S = int(os.getenv("GT_METRICS_INTERVAL_S", "60"))
 
 # ZooKeeper connection settings
-ZK_HOSTS = os.getenv(
-    "ZK_HOSTS",
-    f"{os.getenv('NODE1_IP','127.0.0.1')}:2181,"
-    f"{os.getenv('NODE2_IP','127.0.0.1')}:2181,"
-    f"{os.getenv('NODE3_IP','127.0.0.1')}:2181",
-)
+ZK_CLIENT_PORT    = _int_env("ZK_CLIENT_PORT", 2181)
+_raw_zk_hosts     = _str_env("ZK_HOSTS", "")
+if _raw_zk_hosts:
+    ZK_HOSTS = _raw_zk_hosts
+else:
+    ZK_HOSTS = f"{NODE1_IP}:{ZK_CLIENT_PORT},{NODE2_IP}:{ZK_CLIENT_PORT},{NODE3_IP}:{ZK_CLIENT_PORT}"
 ZK_TIMEOUT        = float(os.getenv("ZK_TIMEOUT", "10"))
 ZK_DEDUP_TTL_MS   = int(os.getenv("ZK_DEDUP_TTL_MS", "300000"))
-ZK_CLIENT_PORT    = _int_env("ZK_CLIENT_PORT", 2181)
 
 ALL_QUEUES = [
     QUEUE_FLOW1_P1_TO_P2,

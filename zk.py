@@ -50,9 +50,19 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # ZooKeeper connection settings (read from environment / config)
 # ---------------------------------------------------------------------------
-_ZK_HOSTS = os.getenv("ZK_HOSTS", "127.0.0.1:2181")
-_ZK_TIMEOUT = float(os.getenv("ZK_TIMEOUT", "10"))
-_DEDUP_TTL_MS = int(os.getenv("ZK_DEDUP_TTL_MS", "300000"))   # 5 minutes
+try:
+    import config as _cfg
+    _ZK_HOSTS = _cfg.ZK_HOSTS
+    _ZK_TIMEOUT = _cfg.ZK_TIMEOUT
+    _DEDUP_TTL_MS = _cfg.ZK_DEDUP_TTL_MS
+except ImportError:
+    _ZK_HOSTS = os.getenv("ZK_HOSTS", "127.0.0.1:2181")
+    _ZK_TIMEOUT = float(os.getenv("ZK_TIMEOUT", "10"))
+    _DEDUP_TTL_MS = int(os.getenv("ZK_DEDUP_TTL_MS", "300000"))   # 5 minutes
+
+# Guard against empty string or unexpanded shell variables in _ZK_HOSTS
+if not _ZK_HOSTS or not _ZK_HOSTS.strip() or "$" in _ZK_HOSTS:
+    _ZK_HOSTS = "127.0.0.1:2181"
 
 # Root ZNode paths
 _ROOT            = "/flowfirst"

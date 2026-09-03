@@ -197,7 +197,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 "zk_config": _config_watcher.get_all() if _config_watcher else {},
                 "zk_registered_workers": {
                     p: zklib.list_registered(p)
-                    for p in ("process1", "process2", "process3", "process4")
+                    for p in ("process1", "process2", "process3", "process4", "process5")
                 },
                 "endpoints": {
                     "GET /health":       "Health + greenthread status + ZK pipeline state",

@@ -5,7 +5,7 @@ This project implements an enterprise-grade, high-availability, distributed inte
 - **Git, Python 3, Pip, & Pyenv/Virtualenv**: Version-controlled modular codebase running isolated Python virtual environments across all nodes
 - **Chrony NTP Time Synchronisation**: Sub-millisecond cluster clock synchronisation for Galera writesets and Corosync consensus
 - **Virtual IP (VIP) Failover & High Availability**: Managed by **Pacemaker / Corosync** (`IPaddr2`) with zero-downtime VIP migration
-- **HAProxy Load Balancing**: Round-Robin Layer-7 load balancing for REST API (:8080), Layer-4 load balancing for MariaDB Galera (:3306), and RabbitMQ AMQP (:5672) with live statistics dashboard (:9000)
+- **HAProxy Load Balancing**: Round-Robin Layer-7 load balancing for REST API (:8080), Layer-4 load balancing for MariaDB Galera (:3307 -> :3306), and RabbitMQ AMQP (:5673 -> :5672) with live statistics dashboard (:9000)
 - **MariaDB Galera Multi-Master Cluster**: Synchronous multi-master replication (`wsrep`), automated Incremental (IST) / State Snapshot Transfers (SST), and quorum consistency across all core nodes
 - **RabbitMQ Message Broker Pool**: Durable message queuing, automated reconnect greenthreads, and reliable cross-node message routing
 - **Apache ZooKeeper**: Distributed coordinator for runtime leader election, live dynamic configuration hot-reloading (without process restart), worker service registry, and atomic deduplication barriers
@@ -33,7 +33,7 @@ This project implements an enterprise-grade, high-availability, distributed inte
 ```mermaid
 graph TD
     Client["Client / curl"] -->|"VIP:8080"| VIP["Pacemaker VIP"]
-    VIP --> HAProxy["HAProxy\nREST :8080 round-robin\nSQL :3306 load-balanced"]
+    VIP --> HAProxy["HAProxy\nREST :8080 round-robin\nSQL :3307 load-balanced\nRMQ :5673 load-balanced"]
 
     subgraph Node1[Node 1]
         P1a["P1: REST API"]

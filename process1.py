@@ -371,7 +371,9 @@ def _gt_http_server():
     """Greenthread: runs the HTTP server. Each request is dispatched into the
     global GreenPool so requests are handled concurrently."""
     _ensure_publish_channel()
-    httpd = HTTPServer((API_HOST, API_BACKEND_PORT), RestApiHandler)
+    # Pass bind_and_activate=False so HTTPServer doesn't create and bind a socket.
+    # eventlet.listen() creates and binds the non-blocking green socket.
+    httpd = HTTPServer((API_HOST, API_BACKEND_PORT), RestApiHandler, bind_and_activate=False)
     # Use GreenPool to handle each request in its own greenthread
     httpd.socket = eventlet.listen((API_HOST, API_BACKEND_PORT))
     pool = eventlet.GreenPool(size=gt.GT_WORKER_CONCURRENCY * 10)

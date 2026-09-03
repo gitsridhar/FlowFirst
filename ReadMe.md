@@ -1042,8 +1042,14 @@ Symptom:
 OSError: [Errno 98] Address already in use
 ```
 
-Fix (already configured in `haproxy.cfg.template` & `process1.py`):
-Process 1 binds to `API_BACKEND_PORT=8082` while HAProxy binds to `API_PORT=8080` and routes to `node:8082`. Re-run setup to regenerate the config:
+Fix:
+1. Process 1 binds to `API_BACKEND_PORT=8082` while HAProxy binds to `API_PORT=8080` and routes to `node:8082`.
+2. Ensure no manually launched Python processes (`python process1.py`) or unmanaged systemd instances are holding port 8082 before Pacemaker starts `flowfirst-p1-res-clone`:
+   ```bash
+   # Kill manual instances across nodes:
+   sudo pkill -f 'python.*process1\.py' || true
+   sudo systemctl stop flowfirst-process1 || true
+   ```
 
 ```bash
 cd /opt/flowfirst

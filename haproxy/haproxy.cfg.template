@@ -77,7 +77,7 @@ backend flowfirst_api_back
 # in use" conflict: the real services listen on the node IP, HAProxy listens on
 # the VIP (which Pacemaker assigns to exactly one node at a time).
 frontend mariadb_galera_front
-    bind __VIP__:__MARIADB_PORT__
+    bind *:__MARIADB_LB_PORT__
     mode tcp
     option tcplog
     default_backend mariadb_galera_back
@@ -93,10 +93,10 @@ backend mariadb_galera_back
     server __NODE3_NAME__ __NODE3_IP__:__MARIADB_PORT__ check
 
 #---------------------------------------------------------------------
-# Load balancing for RabbitMQ AMQP (Port 5672)
+# Load balancing for RabbitMQ AMQP (Port 5672 -> LB Port 5673)
 #---------------------------------------------------------------------
 frontend rabbitmq_amqp_front
-    bind __VIP__:__RABBITMQ_PORT__
+    bind *:__RABBITMQ_LB_PORT__
     mode tcp
     option tcplog
     default_backend rabbitmq_amqp_back

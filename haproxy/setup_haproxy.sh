@@ -38,7 +38,9 @@ VIP_NIC="${VIP_NIC:-}"           # set in .env — see pre-flight check below
 API_PORT="${API_PORT:-8080}"
 API_BACKEND_PORT="${API_BACKEND_PORT:-8082}"
 MARIADB_PORT="${MARIADB_PORT:-3306}"
+MARIADB_LB_PORT="${MARIADB_LB_PORT:-3307}"
 RABBITMQ_PORT="${RABBITMQ_PORT:-5672}"
+RABBITMQ_LB_PORT="${RABBITMQ_LB_PORT:-5673}"
 HAPROXY_STATS_PORT="${HAPROXY_STATS_PORT:-9000}"
 HAPROXY_STATS_USER="${HAPROXY_STATS_USER:-admin}"
 HAPROXY_STATS_PASS="${HAPROXY_STATS_PASS:-admin123}"
@@ -98,8 +100,8 @@ echo " Virtual IP (VIP):${VIP}"
 echo " VIP NIC:         ${VIP_NIC}"
 echo " API Port (VIP):  ${API_PORT}"
 echo " Backend Port:    ${API_BACKEND_PORT}"
-echo " MariaDB Port:    ${MARIADB_PORT}"
-echo " RabbitMQ Port:   ${RABBITMQ_PORT}"
+echo " MariaDB Port:    ${MARIADB_PORT} (LB Port: ${MARIADB_LB_PORT})"
+echo " RabbitMQ Port:   ${RABBITMQ_PORT} (LB Port: ${RABBITMQ_LB_PORT})"
 echo " Stats Dashboard: :${HAPROXY_STATS_PORT}"
 echo "=================================================================="
 
@@ -150,7 +152,9 @@ sed \
     -e "s/__API_PORT__/${API_PORT}/g" \
     -e "s/__API_BACKEND_PORT__/${API_BACKEND_PORT}/g" \
     -e "s/__MARIADB_PORT__/${MARIADB_PORT}/g" \
+    -e "s/__MARIADB_LB_PORT__/${MARIADB_LB_PORT}/g" \
     -e "s/__RABBITMQ_PORT__/${RABBITMQ_PORT}/g" \
+    -e "s/__RABBITMQ_LB_PORT__/${RABBITMQ_LB_PORT}/g" \
     -e "s/__HAPROXY_STATS_PORT__/${HAPROXY_STATS_PORT}/g" \
     -e "s/__HAPROXY_STATS_USER__/${HAPROXY_STATS_USER}/g" \
     -e "s/__HAPROXY_STATS_PASS__/${HAPROXY_STATS_PASS}/g" \
@@ -162,7 +166,9 @@ if command -v firewall-cmd >/dev/null 2>&1 && sudo systemctl is-active --quiet f
     sudo firewall-cmd --permanent --add-port="${API_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${API_BACKEND_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${MARIADB_PORT}/tcp"
+    sudo firewall-cmd --permanent --add-port="${MARIADB_LB_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${RABBITMQ_PORT}/tcp"
+    sudo firewall-cmd --permanent --add-port="${RABBITMQ_LB_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${HAPROXY_STATS_PORT}/tcp"
     sudo firewall-cmd --reload
 fi

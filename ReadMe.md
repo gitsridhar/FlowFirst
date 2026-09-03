@@ -1030,9 +1030,10 @@ sudo ./haproxy/setup_haproxy.sh
 **Failure 5 — Port Collision between HAProxy and Backend Services**
 
 When HAProxy and backend services run on the same node, port separation prevents any `[Errno 98] Address already in use` collisions:
-- **HAProxy REST API Frontend**: Listens on port `8080` (or `FLOWFIRST_VIP:8080`), balancing requests across backend nodes.
+- **HAProxy REST API Frontend**: Listens on port `8080`, load-balancing requests across backend Process 1 nodes.
 - **Process 1 REST API Backend**: Listens on dedicated backend port `8082` (`API_BACKEND_PORT=8082`), avoiding any collision with HAProxy (`8080`) or ZooKeeper AdminServer (`8081`).
-- **MariaDB & RabbitMQ Frontends**: Bind to `FLOWFIRST_VIP:3306` and `FLOWFIRST_VIP:5672` respectively, while local daemons listen on physical interfaces.
+- **MariaDB Galera Load Balancer**: HAProxy frontend listens on dedicated LB port `3307` (`MARIADB_LB_PORT=3307`) and load-balances across node daemons on port `3306`.
+- **RabbitMQ AMQP Load Balancer**: HAProxy frontend listens on dedicated LB port `5673` (`RABBITMQ_LB_PORT=5673`) and load-balances across node daemons on port `5672`.
 
 Symptom:
 ```
@@ -1060,8 +1061,8 @@ grep "bind" /etc/haproxy/haproxy.cfg
 # Expected:
 #   bind *:8080                  ← REST API Frontend
 #   bind 0.0.0.0:9000            ← Stats dashboard
-#   bind ${FLOWFIRST_VIP}:3306   ← MariaDB (VIP only)
-#   bind ${FLOWFIRST_VIP}:5672   ← RabbitMQ (VIP only)
+#   bind *:3307                  ← MariaDB LB Frontend
+#   bind *:5673                  ← RabbitMQ LB Frontend
 ```
 
 ---

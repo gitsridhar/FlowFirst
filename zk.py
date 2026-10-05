@@ -74,9 +74,10 @@ _HEALTH_ROOT     = f"{_ROOT}/health"
 
 # Default runtime config values (used when ZK node is absent / unreadable)
 _CONFIG_DEFAULTS = {
-    "flow2_high_threshold": 30.0,
-    "flow1_counter_step":   10,
-    "flow2_scale_factor":   1.15,
+    "flow2_high_threshold":    30.0,
+    "flow1_counter_step":      10,
+    "flow2_scale_factor":      1.15,
+    "flow3_remote_multiplier": 2,
 }
 
 
@@ -297,13 +298,15 @@ def check_and_mark_processed(message_id: str) -> bool:
     Returns False if the message was already processed
                   (the caller should skip / ack-without-insert).
 
-    The dedup znode is created with a TTL so it is automatically cleaned up
-    after ZK_DEDUP_TTL_MS milliseconds (default 5 minutes).
+    The dedup znode is created as ephemeral so it is automatically removed
+    when the ZooKeeper session ends (process crash/restart). Stale znodes from
+    long-running sessions are reaped periodically by the p4_dedup_reaper
+    greenthread in process4.py using ZK_DEDUP_TTL_MS as the age threshold.
     """
     path = f"{_DEDUP_ROOT}/{message_id}"
     zk = get_client()
     try:
-        zk.create(path, b"1", makepath=True)
+        zk.create(path, b"1", ephemeral=True, makepath=True)
         log.debug("[zk] Dedup: first-seen %s — proceeding with insert.", message_id)
         return True
     except NodeExistsError:

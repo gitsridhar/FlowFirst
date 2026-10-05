@@ -190,10 +190,10 @@ def spawn(
         log.info("[gt] Greenthread '%s' exited.", name)
 
     _restart_policy[name] = restart_on_error
-    gt = _pool.spawn(_wrapper)
-    _greenthreads[name] = gt
+    handle = _pool.spawn(_wrapper)
+    _greenthreads[name] = handle
     log.info("[gt] Spawned greenthread '%s'.", name)
-    return gt
+    return handle
 
 
 def spawn_n(name: str, fn: Callable, *args, restart_on_error: bool = False, **kwargs):

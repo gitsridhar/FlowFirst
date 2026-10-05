@@ -32,9 +32,9 @@ _publish_conn = None
 _publish_ch   = None
 _config_watcher = None
 
-# A semaphore limits concurrent publishes to 1 (pika channel is not re-entrant)
-_publish_sem = gt._pool.resize and None  # replaced below after pool import
 import eventlet
+
+# A semaphore limits concurrent publishes to 1 (pika channel is not re-entrant)
 _publish_sem = eventlet.semaphore.Semaphore(1)
 
 

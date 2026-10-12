@@ -270,6 +270,10 @@ erDiagram
 | [45](#scenario-45-reading-the-mariadb-galera-error-log-across-scenarios) | Reading the MariaDB Galera Error Log | Galera | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 | [46](#scenario-46-reading-the-rabbitmq-broker-log-across-scenarios) | Reading the RabbitMQ Broker Log | RabbitMQ | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 | [47](#scenario-47-reading-the-zookeeper-server--client-logs-across-scenarios) | Reading the ZooKeeper Server & Client Logs | ZooKeeper | Locate logs, server & kazoo phrasebook, election timeline, session expiry correlation |
+| [48](#scenario-48-reading-and-managing-haproxy-logs-across-scenarios) | Reading and Managing HAProxy Logs | HAProxy | Is anything logged? rsyslog check, line anatomy, up/down events, rotation |
+| [49](#scenario-49-reading-pacemaker-and-corosync-logs-across-scenarios) | Reading Pacemaker and Corosync Logs | Pacemaker | Phrasebook, DC scheduler lines, `crm_simulate` replay, fail counts, `crm_report` |
+| [50](#scenario-50-reading-swift-logs-and-detecting-missing-objects) | Reading Swift Logs & Detecting Missing Objects | Swift | Client errors, non-fatal failures, MariaDB-vs-Swift reconciliation |
+| [51](#scenario-51-reading-varlogmessages-and-the-systemd-journal-across-scenarios) | Reading `/var/log/messages` & the systemd Journal | Linux | Boots, OOM kills, NIC/link changes, SELinux denials, journal retention |
 
 ---
 
@@ -5724,3 +5728,623 @@ sudo systemctl restart zookeeper
 ```
 
 Debug level logs every client request; keep it on only for the duration of the test. If the `sed` changes nothing, open `logback.xml` and change the root logger's level by hand.
+
+---
+
+## HAProxy Log Analysis
+
+### Scenario 48: Reading and Managing HAProxy Logs Across Scenarios
+
+> **Runs on:** the **current VIP holder** (`sudo crm_resource --resource flowfirst-vip --locate`). Pacemaker runs HAProxy on one node at a time (`vip-haproxy-group`), so only that node writes request logs. After a failover, the older lines stay on the previous holder; to see a whole incident, read the log on **both** nodes (the loop in D runs from any of node1–node3 over `ssh`). The `curl` traffic generators can run from any machine that can reach the VIP.
+
+Use this scenario alongside Scenarios 1, 8–9, 15, 17, 20–25, 29 and 40–41 to work out which backend served a request, how long each stage took, and when HAProxy marked a node up or down. Exact wording varies between HAProxy versions, so the commands below grep for stable keywords rather than whole lines.
+
+#### A. Find out where the logs go (and whether they go anywhere)
+
+[`haproxy/haproxy.cfg.template`](haproxy/haproxy.cfg.template) sends logs with `log 127.0.0.1 local2 info`, which is **UDP to 127.0.0.1:514**. HAProxy does not write a log file itself. If `rsyslog` is not listening on UDP 514, the lines are **silently discarded**, and `journalctl -u haproxy` shows only start, stop and reload messages. [`haproxy/setup_haproxy.sh`](haproxy/setup_haproxy.sh) creates `/var/log/haproxy/` but does not configure `rsyslog`.
+
+```bash
+# On the VIP holder
+sudo grep -n "^\s*log " /etc/haproxy/haproxy.cfg                         # expect: log 127.0.0.1 local2 info
+sudo ss -ulnp | grep ':514 '                                              # is rsyslog listening for HAProxy?
+sudo grep -rn "local2\|haproxy" /etc/rsyslog.conf /etc/rsyslog.d/ 2>/dev/null
+sudo ls -l /var/log/haproxy.log /var/log/haproxy/ 2>/dev/null
+sudo journalctl -u haproxy --since "30 min ago" --no-pager | tail -20     # start/stop/reload only
+```
+
+If there is no listener on UDP 514 and no rsyslog rule for `local2`, add one. Run this on **each of node1–node3**, because any of them can become the VIP holder:
+
+```bash
+sudo tee /etc/rsyslog.d/49-haproxy.conf > /dev/null << 'EOF'
+module(load="imudp")
+input(type="imudp" address="127.0.0.1" port="514")
+if $syslogfacility-text == 'local2' then /var/log/haproxy/haproxy.log
+& stop
+EOF
+sudo systemctl restart rsyslog
+sudo ss -ulnp | grep ':514 '
+```
+
+The rest of this scenario writes the log path as `HLOG`. Set it once on the VIP holder:
+
+```bash
+HLOG=/var/log/haproxy/haproxy.log      # or /var/log/haproxy.log if your package already ships an rsyslog rule
+```
+
+Generate a request and find it:
+
+```bash
+# From any machine that can reach the VIP
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq -r .node
+
+# On the VIP holder
+sudo grep flowfirst_api_front ${HLOG} | tail -3
+```
+```
+Oct 12 14:17:31 node1 haproxy[2211]: 192.168.1.50:51234 [12/Oct/2026:14:17:31.123] flowfirst_api_front flowfirst_api_back/node2 0/0/1/5/6 200 345 - - ---- 3/3/0/0/0 0/0 "GET /health HTTP/1.1"
+```
+
+#### B. Anatomy of a log line
+
+HTTP lines (`flowfirst_api_front`) read, left to right: `client:port [accept time] frontend backend/server Tq/Tw/Tc/Tr/Tt status bytes - - termination-flags conns srv_q/be_q "request"`.
+
+| Field | Meaning | What a large value tells you |
+|---|---|---|
+| `backend/server` | Which backend node served the request (`<NOSRV>` means none was available) | Count per server to prove round-robin (Scenario 1) |
+| `Tq` | Time to receive the full request from the client | Slow client or network |
+| `Tw` | Time queued in HAProxy waiting for a free backend slot | Backends saturated |
+| `Tc` | Time to connect to the backend | Network latency or packet loss to that node (Scenario 20) |
+| `Tr` | Time the backend took to answer | Slow Process 1 on that node |
+| `Tt` | Total time | Sum of the above plus data transfer |
+| `status` | HTTP status; `-1` means no response was received | `503` with `<NOSRV>`: no healthy backend; `502`: backend closed early |
+| termination flags (4 characters) | Who ended the session, and in what phase. `----` is a normal end | See the table in C |
+
+TCP lines (`mariadb_galera_front`, `rabbitmq_amqp_front`) are shorter: `client:port [accept time] frontend backend/server Tw/Tc/Tt bytes termination-flags conns srv_q/be_q`. Each line is written **when the connection closes**, so a long-lived AMQP connection appears only after it ends, with `Tt` equal to its whole lifetime.
+
+#### C. Message phrasebook — what each line means
+
+| Log keyword (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `Server flowfirst_api_back/nodeX is DOWN` | Health checks (`GET /health` every 3 s, `fall 2`) failed twice, so about 6 s after the fault. The text after `reason:` says why: `Layer4 connection problem` (port closed or host down), `Layer4 timeout`, `Layer7 wrong status, code: 503` (Process 1 up but unhealthy) | 8, 11, 12, 16–25 |
+| `Server flowfirst_api_back/nodeX is UP` | Two consecutive passed checks (`rise 2`) | 11.2, 12, 16–19 |
+| `X active and Y backup servers left` | Servers still in rotation after a state change; `0 active` means the next request gets a 503 | 12 (all processes stopped) |
+| `backend flowfirst_api_back has no server available!` | All three backends are down | 12, 19 |
+| `Server ... is going DOWN for maintenance`, `is NOLB` | Set through the stats socket or dashboard (`MAINT`, `DRAIN`) | 9 |
+| `Proxy flowfirst_api_front started`, `Stopping frontend`, `Stopping backend`, `Proxy ... stopped` | HAProxy started, was reloaded, or was stopped (including by Pacemaker moving the group) | 8, 15, 17 |
+| status `503` with `<NOSRV>` in the request line | No backend was selectable when the request arrived | 12, 19 |
+| status `504`, flags `sH` | Backend did not answer within `timeout server 1m` | 20, 21 |
+| status `502`, flags `SH` | Backend closed the connection before sending a full response (for example Process 1 was stopped mid-request) | 11, 16 |
+| flags `cD` / `CD` | Client side timeout (`c`) or abort (`C`) while data was flowing | 20, 21 |
+| flags `SC` / `sC` | Backend refused (`SC`) or did not accept (`sC`) the connection | 11, 16–25 |
+| flags `----` | Normal end of session | any |
+| `Connect() failed ... Connection refused` | Not written to this log; the request line shows the `SC` flags instead | 11 |
+
+The flags are read left to right: the first letter is **who** ended it (`C` client, `S` server, `s` server timeout, `c` client timeout, `P` proxy), the second is **which phase** (`C` connecting, `H` waiting for headers, `D` data, `R` waiting for the request), and the last two describe cookies and persistence (`--` in this setup).
+
+#### D. Build a timeline and compare the nodes
+
+```bash
+# Server state changes only, on the VIP holder
+sudo grep -E "Server .* is (UP|DOWN)|no server available|NOLB|MAINT|Proxy .* (started|stopped)|Stopping (frontend|backend)" ${HLOG} | tail -40
+
+# Requests per backend server and status (round-robin proof; error-rate check)
+sudo grep -o 'flowfirst_api_back/[^ ]* [-0-9/]* [0-9-]*' ${HLOG} \
+  | awk '{split($1,a,"/"); n[a[2]" "$3]++} END{for(k in n) print n[k], k}' | sort -k2
+```
+```
+118 node1 200
+121 node2 200
+120 node3 200
+```
+
+Compare both nodes after a failover (Scenarios 8, 15, 17). The loop runs from any of node1–node3:
+
+```bash
+SINCE="$(date -d '-15 min' '+%b %e %H:%M')"
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  echo "===== ${n} ====="
+  ssh "${n}" "sudo test -f ${HLOG} && sudo awk -v s='${SINCE}' '\$0 >= s' ${HLOG} \
+    | grep -E 'Server .* is (UP|DOWN)|no server available|Proxy .* (started|stopped)| 50[0-9] '"
+done
+```
+
+HAProxy's syslog timestamps look like `Oct 12 14:17:31` (no year), which is what the `awk` filter compares against; it works within a single day.
+
+Expected for Scenario 17 (reboot of the VIP holder): the old holder logs `Stopping frontend` / `Proxy ... stopped` (if it shut down cleanly) and nothing after it; the new holder logs `Proxy flowfirst_api_front started` and, since its backends were already healthy, no `is UP` lines unless a backend changed.
+
+> **Noise from the health checks:** Process 1 prints one `[P1][gt][http]` journal line per HTTP request, including HAProxy's own `GET /health` checks every 3 s per backend. When reading `journalctl -u flowfirst-process1`, filter them out with `grep -v "GET /health"`.
+
+#### E. Ask HAProxy directly (live state, no log needed)
+
+```bash
+# On the VIP holder — needs socat (sudo dnf install -y socat); the stats socket is /var/lib/haproxy/stats
+echo "show stat" | sudo socat stdio /var/lib/haproxy/stats \
+  | cut -d, -f1,2,18,22,23,24 | column -s, -t
+# Columns: proxy, server, status, check failures, times marked down, seconds since last change
+echo "show info" | sudo socat stdio /var/lib/haproxy/stats | grep -E "Uptime|CurrConns|Idle_pct"
+```
+
+A server whose "seconds since last change" is small just flipped state; match that time against `is UP` / `is DOWN` in the log.
+
+#### F. Watch live while running another scenario
+
+```bash
+# On the VIP holder, in a second terminal
+sudo tail -F ${HLOG} | grep --line-buffered -E "Server .* is (UP|DOWN)|no server available| 50[0-9] |Stopping (frontend|backend)|started"
+```
+
+#### G. Manage the log: volume, rotation and retention
+
+HAProxy writes one line per HTTP request and one per closed TCP connection. Health checks themselves are not logged (only state changes are), and `option dontlognull` suppresses empty connections.
+
+```bash
+# On the node(s) that have been VIP holder
+sudo ls -lh ${HLOG}*
+sudo test -f /etc/logrotate.d/haproxy && sudo cat /etc/logrotate.d/haproxy || echo "no logrotate rule for HAProxy"
+```
+
+If there is no rotation rule, add one (on each of node1–node3). The path in the first line must match `HLOG`:
+
+```bash
+sudo tee /etc/logrotate.d/haproxy-flowfirst > /dev/null << 'EOF'
+/var/log/haproxy/haproxy.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    postrotate
+        /usr/bin/systemctl kill -s HUP rsyslog.service >/dev/null 2>&1 || true
+    endscript
+}
+EOF
+sudo logrotate -d /etc/logrotate.d/haproxy-flowfirst     # dry run: prints what it would do
+```
+
+Raising the level from `info` to `debug` adds little for request logs and is not recommended. If you want per-health-check lines, add `option log-health-checks` to the `defaults` section of `haproxy/haproxy.cfg.template`, regenerate with `haproxy/setup_haproxy.sh`, validate with `sudo haproxy -c -f /etc/haproxy/haproxy.cfg`, and let Pacemaker reload it. Remove it again afterwards.
+
+---
+
+## Pacemaker & Corosync Log Analysis
+
+### Scenario 49: Reading Pacemaker and Corosync Logs Across Scenarios
+
+> **Runs on:** log files and `journalctl` on **each of node1–node3** (each node logs its own view; **scheduler decisions are logged only on the current DC**, find it with `sudo crm_mon -1 | grep "Current DC"`). `crm_mon`, `crm_resource`, `crm_simulate` and `pcs` on **any cluster member**. Resource-agent lines (`IPaddr2`, systemd start/stop) appear on the node where the action ran. node4 is not in the cluster and has no Pacemaker or Corosync logs.
+
+Use this scenario alongside Scenarios 8, 10–12, 15–26 and 38 to work out why Pacemaker moved a resource, restarted a process, or declared a node lost. Exact wording varies between Pacemaker and Corosync versions, so the commands below grep for stable keywords rather than whole lines.
+
+#### A. Locate the logs and the resource names
+
+```bash
+# On node1, node2 or node3
+sudo grep -E "^\s*(to_logfile|logfile|to_syslog)" /etc/corosync/corosync.conf   # RHEL/pcs default: /var/log/cluster/corosync.log
+sudo ls -l /var/log/pacemaker/pacemaker.log /var/log/cluster/corosync.log
+
+# The same daemons also log to the journal (all Pacemaker daemons run under pacemaker.service)
+sudo journalctl -u corosync -u pacemaker -u pcsd --since "30 min ago" --no-pager | tail -30
+
+# Which node is the DC (it writes the scheduler lines)?
+sudo crm_mon -1 | grep "Current DC"
+
+# Real resource IDs, as created by pacemaker/configure_multinode_resources.sh
+sudo pcs resource status
+```
+
+Resource IDs used below: `flowfirst-vip` and `haproxy-res` (grouped as `vip-haproxy-group`), and `flowfirst-p1-res` … `flowfirst-p4-res` with clones `flowfirst-p1-res-clone` … `flowfirst-p4-res-clone`. Always confirm with `pcs resource status` before grepping for an ID.
+
+#### B. Message phrasebook — what each line means
+
+**Pacemaker (`pacemaker-controld`, `-schedulerd`, `-execd`, `-attrd`, `-based` in `pacemaker.log`):**
+
+| Log keyword (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `Node nodeX state is now lost`, `state is now member` | Pacemaker's membership view changed | 16–19, 22–24 |
+| `Our peer on the DC (nodeX) is dead`, `Set DC to nodeY` | The DC was lost and a new one was elected; scheduler lines now appear on the new DC | 17, 18, 22 |
+| `State transition S_IDLE -> S_POLICY_ENGINE` … `-> S_TRANSITION_ENGINE -> S_IDLE` | One decision cycle (DC only). Every state change triggers one; cycles with no visible cause point to flapping | any |
+| `Calculated transition N`, `saving inputs in /var/lib/pacemaker/pengine/pe-input-N.bz2` | The scheduler computed a plan. `(with warnings)` / `(with errors)` mean it found a problem. The saved file can be replayed (see D) | any |
+| `Initiating start\|stop\|monitor\|migrate_to operation X on nodeY` | An action was sent to a node | 8, 11, 12, 15 |
+| `Result of start operation for X on nodeY: ok` | Action finished. Other results: `not running`, `error`, `Timed Out`, `Not installed` | 8, 11, 12, 16–18 |
+| `Result of monitor operation for flowfirst-pN-res on nodeY: not running` | The process is down. The fail count goes up and Pacemaker restarts it | 11, 16, 26 |
+| `Unexpected result (error) was recorded for monitor of X on nodeY` | A recorded failure that triggers recovery | 26 |
+| `Forcing X away from nodeY after N failures (max=1000000)` | The fail count reached `migration-threshold`. `1000000` is Pacemaker's INFINITY, which is the value in effect because the setup scripts never set `migration-threshold` | 26 |
+| `Resource X is active on 2 nodes (attempting recovery)` | A resource that must run once (the VIP, HAProxy) was seen on two nodes — a split-brain symptom | 19, 22 |
+| `unclean`, `will be fenced`, `fenc` | Appear only when STONITH is enabled. Here `stonith-enabled=false` (set in `pacemaker/setup_multinode_cluster.sh`), so a lost node is simply assumed dead and **never fenced** | 22–24 |
+| `ocf-exit-reason:` | The resource agent's human-readable cause of a failure (for example the NIC given in `VIP_NIC` does not exist) | 8, 17, install |
+
+**Resource agents and systemd resources:**
+
+| Log keyword (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `IPaddr2(flowfirst-vip)`, `ip -f inet addr add`, `gratuitous ARP` | The VIP was added to this node's NIC and neighbours were told | 8, 15, 17 |
+| `systemd[1]: Started FlowFirst Process N` / `Stopped ...` | Pacemaker's systemd resource started or stopped the process unit on this node | 11, 12, 16 |
+| `Scheduled restart job, restart counter is at N` | **systemd** restarted the process itself (the units use `Restart=always`) before Pacemaker's next 15 s monitor, so Pacemaker may never record a failure | 11, 38 |
+
+**Corosync (`corosync.log` or journal, tags in brackets):**
+
+| Log keyword (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `[KNET  ] link: host: N link: 0 is down`, `rx: host: N link: 0 is up` | Heartbeat link to node `N` (node ID, not name) failed / recovered | 16–25 |
+| `[TOTEM ] Token has not been received in N ms`, `A processor failed, forming new configuration` | A node stopped answering; the ring is re-forming | 16–19, 22–24 |
+| `[TOTEM ] Retransmit List:` | Packet loss or high latency on the ring | 20, 21 |
+| `[QUORUM] Members[N]: 1 2` | The new member list after a change | 16–19, 22–24 |
+| `[VOTEQ ] quorum lost, blocking activity`, `quorum regained, resuming activity` | The partition lost / regained majority. With no quorum Pacemaker stops resources on the minority side | 19, 22 |
+| `[MAIN  ] Completed service synchronization, ready to provide service.` | Membership change finished | any |
+
+#### C. Build a timeline on one node
+
+```bash
+# On the node being investigated
+sudo journalctl -u corosync -u pacemaker --since "15 min ago" -o short-iso --no-pager \
+  | grep -E "KNET|TOTEM|QUORUM|VOTEQ|state is now|peer on the DC|Set DC|State transition|Calculated transition|Initiating|Result of|Unexpected result|Forcing|active on 2 nodes|unclean|fenc|ocf-exit-reason|error" \
+  | tail -80
+```
+
+Read top to bottom: `link ... is down` / `Token has not been received` → `Members[N]` (smaller) → `state is now lost` → `State transition` → `Calculated transition` → `Initiating` / `Result of` actions. A resource moves only after the `Calculated transition` line for it.
+
+#### D. Explain a decision: replay the scheduler input
+
+The line `Calculated transition N, saving inputs in .../pe-input-N.bz2` names a file on the **DC that made the decision**. Replay it to see exactly what Pacemaker planned and why:
+
+```bash
+# On the DC that logged the transition
+sudo ls -t /var/lib/pacemaker/pengine/pe-input-*.bz2 | head -3
+sudo crm_simulate -S -x /var/lib/pacemaker/pengine/pe-input-N.bz2 -V     # N from the log line; prints the planned actions
+sudo crm_simulate -Ls                                                    # live cluster: allocation scores (why a resource prefers a node)
+```
+
+#### E. Failure history and leftover constraints
+
+```bash
+# On any cluster member
+sudo crm_mon -1Arf                                   # -f shows fail counts, -r inactive resources, -A node attributes
+sudo pcs resource failcount show
+sudo crm_resource --list-operations --resource flowfirst-p1-res
+
+# Constraints left behind by 'pcs resource ban' / 'move' (cli-ban-*, cli-prefer-*) keep a resource off a node
+sudo pcs constraint --full | grep -E "cli-ban|cli-prefer" || echo "no leftover CLI constraints"
+sudo pcs resource clear flowfirst-p2-res-clone      # remove a leftover ban (Scenarios 11, 36)
+sudo pcs resource cleanup flowfirst-p1-res-clone    # reset fail counts after the cause is fixed
+```
+
+#### F. Correlate the same event across all three nodes
+
+```bash
+# From any of node1–node3 (uses ssh to each node, including itself); sorts all nodes into one timeline
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  ssh "${n}" "sudo journalctl -u corosync -u pacemaker --since '15 min ago' -o short-iso --no-pager \
+    | grep -E 'link: host|Token has not|Members\[|quorum (lost|regained)|state is now|peer on the DC|Set DC|Calculated transition|Result of (start|stop)|Forcing|active on 2 nodes' \
+    | sed 's/^/${n} /'"
+done | sort -k2,2
+```
+
+This relies on synchronised clocks (chrony, Phase 0a) and the same time zone on every node. Expected for Scenario 16 (reboot node3): on node1 and node2, `link: host: 3 ... is down` → `Members[2]` → `Node node3 state is now lost` → one `Calculated transition` on the DC; later `link: host: 3 ... is up` → `Members[3]` → `Result of start operation for flowfirst-pN-res on node3: ok` for each clone. On node3 itself: boot, `Members[3]`, then the starts.
+
+#### G. Watch live and collect a support bundle
+
+```bash
+# On the node under test, in a second terminal
+sudo journalctl -u corosync -u pacemaker -f -o short-iso --no-pager \
+  | grep --line-buffered -E "link: host|Token has not|Members\[|quorum (lost|regained)|state is now|Calculated transition|Result of|Forcing|ocf-exit-reason|error"
+
+# After an incident, collect logs, CIB and scheduler inputs from every node into one archive
+sudo crm_report --from "2026-10-12 14:00:00" --to "2026-10-12 14:30:00" /tmp/flowfirst-incident
+```
+
+`crm_report` connects to the other nodes over `ssh`, so run it from a node that can `ssh` to the others without a password. Pacemaker rotates `pacemaker.log` itself (check `ls /etc/logrotate.d/`), but the `pe-input-*.bz2` files accumulate in `/var/lib/pacemaker/pengine/` until Pacemaker prunes them; check `du -sh /var/lib/pacemaker/pengine/` after long flapping tests such as Scenario 26.
+
+---
+
+## Swift Log Analysis
+
+### Scenario 50: Reading Swift Logs and Detecting Missing Objects
+
+> **Runs on:** client-side logs (`journalctl -u flowfirst-process4`) on the **current Process 4 leader node** (find it with `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health.process4`); for Flow 3, Process 5 only forwards the message, so Swift errors still appear on the Process 4 leader. The `curl` and `mariadb` reconciliation checks in D run from **any machine that can reach the VIP** (the `mariadb` client is installed on node1–node3). Swift **server** logs are wherever your Swift service runs. This repository does not install one: `SWIFT_AUTH_URL` in each node's `.env` says where it is, and `docker-compose.yml` runs a development all-in-one container (`swift_flowfirst`).
+
+Use this scenario alongside Scenarios 2, 37 and 44, and any scenario that stops RabbitMQ, MariaDB or the network, to find out whether Process 4 stored each payload in Swift, and why not when it did not. Swift failures are **non-fatal by design**: Process 4 prints a note, still writes the MariaDB row and still acknowledges the message, so a Swift outage never shows up as a stuck queue.
+
+#### A. Find where Swift is and whether it is enabled
+
+```bash
+# On the node you are investigating
+grep -E "^SWIFT_" /opt/flowfirst/.env            # SWIFT_ENABLED, SWIFT_AUTH_URL, SWIFT_USER, SWIFT_CONTAINER (the key is secret; do not paste it into tickets)
+
+# Ask Process 1 (any node, via the VIP) — this runs get_swift_status() from the node that answers
+curl -s http://${FLOWFIRST_VIP}:8080/swift/status | jq .
+```
+```json
+{ "enabled": true, "status": "connected", "container": "flowfirst_messages", "account_objects": "412", "account_bytes": "1048576" }
+```
+
+`"status": "error"` carries an `error` field with the underlying exception text. `"enabled": false` means `SWIFT_ENABLED` is false on the node that answered, and every object write is skipped. Because HAProxy round-robins `/swift/status`, run it a few times to see all three nodes.
+
+> **Check the URL, it is easy to get wrong:** the built-in default for `SWIFT_AUTH_URL` is `http://${FLOWFIRST_VIP}:8080/auth/v1.0` (in `config.py`), but port 8080 on the VIP is HAProxy in front of **Process 1**, which has no `/auth/v1.0` route. `.env.example` sets `http://127.0.0.1:8080/auth/v1.0`, which only works if a Swift proxy really listens on the local node's port 8080 (and that port is also HAProxy's frontend on the VIP holder). Confirm that `curl -sI -H "X-Auth-User: ${SWIFT_USER}" -H "X-Auth-Key: <key>" "${SWIFT_AUTH_URL}"` returns `X-Auth-Token` and `X-Storage-Url` headers before trusting any other result here.
+
+#### B. Message phrasebook — what each line means
+
+**Client side (`journalctl -u flowfirst-process4`, produced by `process4.py` and `swift_storage.py`):**
+
+The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account HEAD failed` texts below are **exception messages from `python-swiftclient`**. They are not separate log lines: they appear inside the `Swift store note: ...` and `Failed to put object ... : ...` lines.
+
+| Log text (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `Stored in Swift object storage: flowN/<message_id>.json` | The object write succeeded; the name is `flow<flow>/<message_id>.json` | 2, 44 |
+| `Swift store note: Swift storage is disabled` | `SWIFT_ENABLED` is false on this node. Printed for **every** message; nothing is stored | install |
+| `Swift store note: <error text>` | The write failed (see the error rows below). The message was still acknowledged and the MariaDB row was written | any Swift outage |
+| `Failed to put object '<name>' in container '<c>': <error>` | The same failure, logged by `swift_storage.py` with its logger (a WARNING-or-higher line, so it reaches the journal) | any Swift outage |
+| `Could not ensure container '<c>' exists: <error>` | Container create/check failed, usually auth or connectivity | install |
+| `Auth GET failed: <url> 401 Unauthorized` | Wrong `SWIFT_USER` / `SWIFT_KEY` for that node's `.env` | install |
+| `Auth GET failed: <url> 404 Not Found` | `SWIFT_AUTH_URL` points at something that is not a Swift auth endpoint (for example HAProxy to Process 1; see the note in A) | install |
+| `Object PUT failed: <url> 503 Service Unavailable` | Swift is up but unhealthy (disk, replication or backend failure) | storage outage |
+| `Object PUT failed: ... 507 Insufficient Storage` | A Swift device is full or unmounted | storage outage |
+| `Container PUT failed ... 404` / `Account HEAD failed ... 404` | The account is missing or not auto-created for that user | install |
+| `[Errno 111] Connection refused`, `Max retries exceeded with url`, `Read timed out`, `Name or service not known` | Swift is not reachable from this node (service down, wrong host, firewall, DNS, partition) | 22–25 |
+| `DUPLICATE via ZK dedup — skipping insert` | The message was already handled, so **no** Swift write is attempted for the redelivery | 37 |
+
+**REST API (`GET /swift/...` on Process 1):**
+
+| Response | Meaning |
+|---|---|
+| `GET /swift/status` returns `"status": "connected"` | Account and container are reachable from the answering node |
+| `GET /swift/status` returns `"status": "error"` with `error` | Auth or connectivity failed from the answering node |
+| `GET /swift/object/<name>` returns `404` with `details.error` containing `ClientException 404` | No such object (never written, or written under a different name) |
+| `GET /swift/objects` returns `502` with `error` | Listing failed (same causes as above) |
+
+**Server side (only if you run Swift yourself):**
+
+| Where | What to look for |
+|---|---|
+| `docker logs swift_flowfirst` (development container) | Request lines from `proxy-server`, `object-server`, `container-server`, `account-server`: status code, `tx<id>` transaction id and the object path |
+| A packaged Swift service on RHEL | The Swift daemons log to **syslog** (facility `LOCAL0` unless changed), so the lines land in `/var/log/messages` or a Swift-specific file and in the journal; filter with `journalctl -t proxy-server -t object-server -t container-server -t account-server` |
+| `401` / `403` on the auth line | Credential or ACL problem |
+| `503` from `proxy-server` with `Timeout` / `ConnectionTimeout` | The proxy could not reach an object server in time |
+| `507` | A device is unmounted or full (`swift-recon -d` shows disk usage, on a node with the recon middleware enabled) |
+
+To correlate a client error with the server log, match the **time** and the **object path** (`/v1/AUTH_<account>/flowfirst_messages/flow1/<message_id>.json`); the client text does not include the server's `tx` id.
+
+#### C. Build a timeline on the Process 4 leader
+
+```bash
+# On the Process 4 leader node
+sudo journalctl -u flowfirst-process4 --since "30 min ago" --no-pager \
+  | grep -E "Swift|swift|Auth GET|Object PUT|Container (PUT|HEAD)|Account HEAD|Errno|Max retries" | tail -60
+```
+
+Read top to bottom: `Stored in Swift object storage` lines stop → first `Swift store note:` / `Failed to put object` → (fault cleared) → `Stored in Swift object storage` resumes. The messages between the first failure and the first success are the ones **missing from Swift** (see D).
+
+> **Output delay:** the systemd units do not set `PYTHONUNBUFFERED`, and `print()` output to the journal is block-buffered by Python. Lines from `process4.py` can therefore appear in bursts, or only after the buffer fills or the process restarts. If the log looks quiet while messages are flowing, trust MariaDB and the REST API checks in D rather than the journal's timing, or add `Environment=PYTHONUNBUFFERED=1` to the unit files and `systemctl daemon-reload`.
+
+#### D. Reconcile MariaDB and Swift (find objects that were never stored)
+
+```bash
+# From any machine with a mariadb client that can reach the VIP
+# 1. Row count per flow in MariaDB
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
+  -e "SELECT flow_id, COUNT(*) AS rows_in_db FROM processed_messages GROUP BY flow_id ORDER BY flow_id;"
+
+# 2. Object count per flow in Swift (listing is capped by &limit; Swift itself caps one listing at 10000)
+for f in 1 2 3; do
+  echo -n "flow${f} objects in Swift: "
+  curl -s "http://${FLOWFIRST_VIP}:8080/swift/objects?prefix=flow${f}/&limit=10000" | jq -r .count
+done
+```
+
+The two numbers should match. Rows without objects were written while Swift was failing. Name them, comparing the 20 newest rows for Flow 1 as an example:
+
+```bash
+for id in $(mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -N \
+    -e "SELECT message_id FROM processed_messages WHERE flow_id = 1 ORDER BY id DESC LIMIT 20;"); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://${FLOWFIRST_VIP}:8080/swift/object/flow1/${id}.json")
+  echo "${code} ${id}"
+done | sort | uniq -c -w3
+```
+
+`200` means the object exists; `404` means it is missing. **There is no automatic back-fill:** `put_message_object()` runs only once per delivery, and a redelivered message is skipped by the ZooKeeper dedup barrier. To restore a missing object, republish the stored payload from MariaDB (`raw_payload` column) into Swift by hand, or accept the gap.
+
+Rows can legitimately exceed objects if `SWIFT_ENABLED=false` was set on some nodes (each such node skips every write; see the `disabled` note in B), so check `/swift/status` on every node before blaming an outage.
+
+#### E. Watch live while running another scenario
+
+```bash
+# On the Process 4 leader node, in a second terminal, then run Scenario 2 or 44
+sudo journalctl -u flowfirst-process4 -f --no-pager | grep --line-buffered -E "Swift|Auth GET|Object PUT|Errno|Max retries"
+```
+
+#### F. Controlled failure test (optional)
+
+This shows the failure path without touching Swift itself. Run it from **any of node1–node3**. It changes `.env` on **all three** nodes, because the Process 4 leader may be re-elected on a different node when the clones restart:
+
+```bash
+# 1. Disable Swift on every node (the units read /opt/flowfirst/.env on start), then restart the P4 clone
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  ssh "${n}" "sudo sed -i 's/^SWIFT_ENABLED=.*/SWIFT_ENABLED=false/' /opt/flowfirst/.env"
+done
+sudo pcs resource restart flowfirst-p4-res-clone
+
+# 2. Send one Flow 1 message, then look for the note on the current Process 4 leader node
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
+  -d '{"item_id": 9501, "initial_data": "swift-disabled-test"}' | jq -r .payload.message_id
+sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep "Swift store note"
+
+# 3. Restore on every node and restart the clone again
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  ssh "${n}" "sudo sed -i 's/^SWIFT_ENABLED=.*/SWIFT_ENABLED=true/' /opt/flowfirst/.env"
+done
+sudo pcs resource restart flowfirst-p4-res-clone
+```
+
+Item 9501 now exists in MariaDB but not in Swift; use D to confirm. There is no back-fill, so that gap remains.
+
+---
+
+## Linux System Log Analysis
+
+### Scenario 51: Reading `/var/log/messages` and the systemd Journal Across Scenarios
+
+> **Runs on:** **each of node1–node3, and node4** for its own host-level events (reboots, OOM kills, SELinux denials, NIC changes, time steps). System logs are strictly **per host**: a reboot, kernel message or `tc`/`iptables` change appears only on the node where it happened. The cross-node loop in D runs from any of node1–node3 over `ssh` (add `${NODE4_IP}` if node4 is reachable from there).
+
+Use this scenario alongside Scenarios 16–26 (reboots and network faults), and whenever a service stops without an obvious cause, to work out what the operating system itself did: why a node rebooted, whether the kernel killed a process, which firewall rule dropped traffic, and whether SELinux denied an action. Exact wording varies between kernel, systemd and RHEL minor versions, so the commands below grep for stable keywords rather than whole lines.
+
+#### A. Know where each log lives
+
+| Source | Where to read it | What it holds |
+|---|---|---|
+| systemd journal | `journalctl` | Everything: kernel, systemd, every service's stdout/stderr (including `flowfirst-processN`, MariaDB, RabbitMQ, ZooKeeper, HAProxy, Corosync, Pacemaker) |
+| `/var/log/messages` | `sudo less /var/log/messages` | rsyslog's copy of the journal's general messages (kernel, systemd, sshd, chronyd, NetworkManager, firewalld, most daemons). Authentication lines go to `/var/log/secure` and cron to `/var/log/cron` instead |
+| `/var/log/audit/audit.log` | `sudo ausearch ...` | SELinux denials (`type=AVC`) and audit events, written by `auditd`, **not** by rsyslog |
+| `dmesg` / `journalctl -k` | `sudo dmesg -T` | Kernel ring buffer: NIC link changes, OOM killer, disk errors, `iptables` LOG targets |
+| Per-service files | See Scenarios 45–50 | `/var/log/mariadb/`, `/var/log/rabbitmq/`, `/var/log/zookeeper/`, `/var/log/pacemaker/`, `/var/log/cluster/` |
+
+`/var/log/messages` and the journal overlap, but they are **not identical**: `/var/log/messages` is a text file that `logrotate` rotates weekly, and the journal can be size-limited or discarded at reboot. When a line is missing from one, check the other.
+
+```bash
+# On any node: is the journal kept across reboots? This matters for every reboot scenario (16-19).
+sudo ls -ld /var/log/journal 2>/dev/null || echo "NO /var/log/journal: the journal is VOLATILE and is lost at every reboot"
+sudo journalctl --list-boots | tail -5          # one line per boot still on disk; a single line after a reboot means history was lost
+sudo journalctl --disk-usage
+sudo ls -lh /var/log/messages*                  # current file and rotated copies
+sudo systemctl is-active rsyslog auditd chronyd
+```
+
+If `/var/log/journal` does not exist, make the journal persistent **on each node** so that reboot scenarios leave evidence behind:
+
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+sudo systemctl restart systemd-journald
+sudo journalctl --flush
+sudo journalctl --list-boots | tail -2          # survives the next reboot
+```
+
+#### B. Message phrasebook — what each line means
+
+| Log keyword (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `-- Boot` / `journalctl --list-boots` entries, `systemd[1]: Started ...` after a gap, `Linux version ... (mockbuild` | The host booted. Lines before the gap are the previous boot | 16–19 |
+| `Reached target Shutdown`, `systemd-shutdown`, `reboot: Restarting system` | A **clean** shutdown or reboot. Without these lines before the boot gap, the host lost power or crashed | 16–19 |
+| `Out of memory: Killed process N (name)`, `oom-kill:`, `invoked oom-killer` | The kernel killed a process for lack of RAM. The victim is named in the line (often `java` for ZooKeeper, `mariadbd`, `beam.smp` for RabbitMQ, or a `python` pipeline process) | heavy load, 40 |
+| `systemd[1]: <unit>.service: Main process exited, code=killed, status=9/KILL` | A unit was SIGKILLed (the OOM killer or `kill -9`); check for the OOM line just above | 38, 42 |
+| `<unit>.service: Failed with result 'exit-code'` / `'timeout'` / `'signal'` | The unit stopped abnormally. `Scheduled restart job, restart counter is at N` follows when `Restart=` applies (the FlowFirst units use `Restart=always`) | 11, 38 |
+| `<unit>.service: Start request repeated too quickly`, `Failed with result 'start-limit-hit'` | systemd gave up restarting a crashing unit; clear with `sudo systemctl reset-failed <unit>` | 38 |
+| `NetworkManager[...]: <info> device (ens3): state change`, `kernel: ... NIC Link is Down` / `Up` | A NIC link changed (cable, hypervisor, `ip link set down`). VIP moves, Corosync `link is down` and Galera suspicion usually follow within seconds | 16–25 |
+| `kernel: IN=... OUT=... SRC=... DST=... PROTO=... DPT=...` | A packet matched an `iptables ... -j LOG` rule. The `DPT` shows which port. The README's `DROP` rules do **not** log; add a LOG rule before them to see drops (see F) | 22–25 |
+| `firewalld[...]: ... ERROR`, `COMMAND_FAILED` | A `firewall-cmd` change failed (wrong zone, missing service) | install |
+| `avc:  denied  { ... } for  pid=N comm="name" ... scontext=... tcontext=...` | **SELinux blocked an action.** `comm` is the process; `{ name_bind }` is a port, `{ read }`/`{ write }` a file, `{ connectto }` a socket. See D | install, 8, 15 |
+| `setroubleshoot: SELinux is preventing` | The same denial, with a suggested fix (needs `setroubleshoot-server`) | install |
+| `chronyd[...]: System clock wrong by N seconds`, `Selected source`, `Can't synchronise: no selectable sources` | A time step or a lost time source. Large steps break RabbitMQ/Erlang joins, Galera and Pacemaker timestamps | 16–19, install |
+| `sshd[...]: Failed password`, `Accepted publickey for ... from <ip>` (in `/var/log/secure`) | Who logged in, from where; failed lines mean `ssh` between nodes (used by several scenarios and `crm_report`) is not set up | 36, 49 |
+| `sudo[...]: ... COMMAND=...` (in `/var/log/secure`) | Who ran which privileged command, when — useful to confirm which operator action preceded an incident | any |
+| `EXT4-fs error`, `XFS ... metadata I/O error`, `I/O error, dev`, `blk_update_request` | Disk problems. MariaDB, RabbitMQ and ZooKeeper stall or crash | storage outage |
+| `Remounting filesystem read-only`, `No space left on device` | Disk full or failed. Check `df -h /var /var/lib` | long tests, 26 |
+| `pam_unix(sudo:session)`, `systemd-logind` | Session and login housekeeping — routine | any |
+
+#### C. Build a timeline for one boot, one unit, or one time window
+
+```bash
+# Everything at warning level or worse in the current boot
+sudo journalctl -b -p warning --no-pager | tail -60
+
+# The previous boot (what happened just before a reboot or crash?). -b -1 needs a persistent journal (see A).
+sudo journalctl -b -1 -p warning --no-pager | tail -60
+sudo journalctl -b -1 --no-pager | tail -30             # the last lines before the node went down
+
+# One unit, with ISO timestamps
+sudo journalctl -u mariadb -u rabbitmq-server -u zookeeper --since "30 min ago" -o short-iso --no-pager
+
+# A time window across all units, kernel included
+sudo journalctl --since "2026-10-12 14:00:00" --until "2026-10-12 14:30:00" -o short-iso --no-pager \
+  | grep -E -i "Out of memory|oom-kill|Main process exited|Failed with result|Link is|state change|avc: +denied|System clock|error|fail" | tail -80
+
+# Kernel only
+sudo journalctl -k --since "30 min ago" --no-pager
+```
+
+Read a reboot from the bottom of the old boot (`journalctl -b -1`): clean shutdowns end with `Reached target Shutdown` and `systemd-shutdown`; a crash or power loss ends abruptly with no shutdown lines. On a node you rebooted with `sudo reboot`, expect the clean ending.
+
+```bash
+# Search /var/log/messages and its rotated copies, including compressed ones
+sudo grep -h -E "Out of memory|oom-kill|Main process exited|Failed with result" /var/log/messages* 2>/dev/null | tail -20
+sudo zgrep -h "Out of memory" /var/log/messages-*.gz 2>/dev/null | tail -5
+```
+
+#### D. SELinux denials in detail
+
+RHEL 9 runs SELinux in **Enforcing** mode, and a denial usually looks like an application bug (a service that starts but cannot bind a port, read a file or reach a socket).
+
+```bash
+sudo getenforce                                              # expect: Enforcing
+sudo ausearch -m AVC,USER_AVC -ts recent 2>/dev/null | tail -30
+sudo ausearch -m AVC -ts today -c haproxy 2>/dev/null | head -20     # limit to one command name (comm=)
+
+# Explain one denial in plain language
+sudo ausearch -m AVC -ts recent 2>/dev/null | audit2why | head -30
+```
+
+If the denial is for a FlowFirst component, first check the booleans and file contexts the install scripts set (`haproxy_connect_any`, `daemons_enable_cluster_mode`, `restorecon -R` on `/var/lib/haproxy` and `/var/log/haproxy`). Only as a last resort build a local policy module with `audit2allow -M <name>` (see the HAProxy troubleshooting section in Phase 3). **Do not** run `setenforce 0` as a fix: it hides the evidence and does not survive the next reboot or `restorecon`.
+
+#### E. Correlate the same event across hosts
+
+```bash
+# From any of node1–node3 (uses ssh to each node, including itself); one merged timeline
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  ssh "${n}" "sudo journalctl --since '15 min ago' -o short-iso --no-pager \
+    | grep -E 'Reached target Shutdown|-- Boot|Out of memory|oom-kill|Main process exited|Failed with result|Link is (Up|Down)|NIC Link|System clock wrong|avc: +denied' \
+    | sed 's/^/${n} /'"
+done | sort -k2,2
+```
+
+This relies on synchronised clocks (chrony, Phase 0a) and the same time zone on every node. Expected for Scenario 16 (reboot node3): node3 shows `Reached target Shutdown`, then (in the **next** boot, so read it after the node is back) `-- Boot` lines and a `chronyd ... Selected source`; node1 and node2 show no OS-level event at all, which proves the others did not restart.
+
+#### F. Watch live, and add temporary packet logging
+
+```bash
+# In a second terminal, before running a fault scenario: errors, OOM kills, link changes, denials
+sudo journalctl -f -o short-iso --no-pager \
+  | grep --line-buffered -E "Out of memory|oom-kill|Main process exited|Failed with result|Link is|state change|avc: +denied|System clock wrong|I/O error"
+```
+
+To see **what an `iptables` DROP rule is dropping** during Scenarios 22–25, insert a LOG rule just above the DROP rule, then remove it afterwards (run on the node that has the rule):
+
+```bash
+# Example for Scenario 24 (Galera port 4567 blocked); put the LOG rule before the DROP rule
+sudo iptables -I INPUT 1 -p tcp --dport 4567 -m limit --limit 5/second -j LOG --log-prefix "FF-DROP-4567: "
+sudo journalctl -k -f --no-pager | grep --line-buffered "FF-DROP-4567"
+
+# Remove it when finished
+sudo iptables -D INPUT -p tcp --dport 4567 -m limit --limit 5/second -j LOG --log-prefix "FF-DROP-4567: "
+```
+
+The `limit` match keeps a busy port from flooding the journal.
+
+#### G. Manage the logs: size, retention and rotation
+
+```bash
+# Journal size and retention (applies per node)
+sudo journalctl --disk-usage
+sudo journalctl --vacuum-time=14d          # keep two weeks
+sudo journalctl --vacuum-size=500M         # or cap the size
+sudo journalctl --verify                   # check the journal files for corruption
+
+# Make the limits permanent (journald drop-in, on each node)
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/flowfirst.conf > /dev/null << 'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=1G
+MaxRetentionSec=14day
+RateLimitBurst=100000
+EOF
+sudo systemctl restart systemd-journald
+```
+
+The `RateLimitBurst` line matters for FlowFirst: journald's default is 10000 messages per 30 s per service, so a burst of process output (Scenario 40 or 43 at high volume) can be silently dropped. The drop-in raises it to 100000. A dropped-message notice looks like `Suppressed N messages from flowfirst-process2.service`; if you still see it, set `RateLimitIntervalSec=0` to disable the limit.
+
+```bash
+# Look for suppressed lines after a load test
+sudo journalctl --since "1 hour ago" --no-pager | grep -E "Suppressed [0-9]+ messages"
+
+# rsyslog / logrotate for /var/log/messages
+sudo cat /etc/logrotate.d/syslog              # which files are rotated, how often
+sudo logrotate -d /etc/logrotate.conf 2>&1 | grep -A3 "/var/log/messages"      # dry run
+sudo du -sh /var/log /var/log/journal          # who is using the space
+```

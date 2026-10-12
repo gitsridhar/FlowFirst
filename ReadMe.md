@@ -268,6 +268,7 @@ erDiagram
 | [43](#scenario-43-greenthread-metrics-reporter--throughput-monitoring) | Greenthread Metrics Reporter | Greenthreads | Read throughput counters from `/gt/status` and journal |
 | [44](#scenario-44-remote-node-4--process-5-end-to-end-pipeline-execution--database-validation) | Remote Node 4 / Process 5 Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 4)→P2→P4, verify MariaDB audit trail & Swift object storage |
 | [45](#scenario-45-reading-the-mariadb-galera-error-log-across-scenarios) | Reading the MariaDB Galera Error Log | Galera | Locate log, message phrasebook, per-node timeline, cross-node correlation |
+| [46](#scenario-46-reading-the-rabbitmq-broker-log-across-scenarios) | Reading the RabbitMQ Broker Log | RabbitMQ | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 
 ---
 
@@ -837,7 +838,17 @@ The script performs these steps automatically:
 3. Imports keys with `sudo rpm --import <file>`
 4. Writes `/etc/yum.repos.d/rabbitmq.repo` with 4 stanzas using `yum1/yum2.rabbitmq.com` baseurls and GitHub `gpgkey=` URLs
 5. Runs `dnf clean metadata && dnf makecache && dnf install -y erlang rabbitmq-server`
-6. Enables `rabbitmq_management` plugin and starts the service
+6. Writes `cluster_partition_handling = pause_minority` to `/etc/rabbitmq/rabbitmq.conf`, enables the `rabbitmq_management` plugin and starts the service
+
+> **Why `pause_minority`:** if the network splits, a broker that can no longer see a majority of the cluster (at least 2 of 3) pauses itself and stops serving clients. It resumes and resyncs automatically when the network heals. The pipeline processes reconnect to the majority side through `config.py`'s multi-host list. RabbitMQ's default, `ignore`, keeps both sides running independently, so they diverge until an operator restarts one side.
+> **Trade-off:** if two brokers are down at the same time, the third pauses as well and the pipeline stops until one of them returns (see [Scenario 19](#scenario-19-simultaneous-reboot-of-all-three-nodes-cluster-cold-start)).
+>
+> On a cluster installed before this change, apply it on **each of node1–node3**, one node at a time:
+> ```bash
+> echo 'cluster_partition_handling = pause_minority' | sudo tee -a /etc/rabbitmq/rabbitmq.conf
+> sudo systemctl restart rabbitmq-server
+> sudo rabbitmqctl environment | grep cluster_partition_handling   # expect pause_minority
+> ```
 
 ---
 
@@ -3185,6 +3196,13 @@ sudo rabbitmqctl cluster_status | grep "Running Nodes"
 Running Nodes: rabbit@node1  rabbit@node2
 ```
 
+> **RabbitMQ partition handling (`pause_minority`):** node2 can still reach both sides, so this is a *partial* partition. RabbitMQ logs `Partial partition detected`, turns it into a full partition, and `pause_minority` pauses **one of node1 or node3**, whichever ends up in the minority. The output above shows node3 paused. Check on each of node1 and node3:
+> ```bash
+> # On node1 and on node3 — a paused broker has its rabbit app stopped and refuses AMQP clients
+> sudo rabbitmq-diagnostics check_running || echo "this broker is paused (expected on one side)"
+> ```
+> When the DROP rules are removed in 22.6, the paused broker resumes and resyncs automatically. No restart is needed.
+
 #### 22.6 — Restore network connectivity (cleanup)
 
 ```bash
@@ -5488,3 +5506,101 @@ sudo mysql -u root -p -e "SET GLOBAL wsrep_log_conflicts=ON;"   # log certificat
 # Revert when finished
 sudo mysql -u root -p -e "SET GLOBAL wsrep_log_conflicts=OFF;"
 ```
+
+---
+
+## RabbitMQ Log Analysis
+
+### Scenario 46: Reading the RabbitMQ Broker Log Across Scenarios
+
+> **Runs on:** **each of node1–node3**. Each broker writes its own log, so it shows only that node's view of the cluster. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 has no broker; its Process 5 client-side errors are in `journalctl -u flowfirst-process5` on node4.
+
+Use this scenario alongside Scenarios 13, 16–25, 40–42 and 44 to work out from the log what the broker did and why. Exact wording varies between RabbitMQ versions, so the commands below grep for stable keywords rather than whole lines.
+
+#### A. Locate the log
+
+```bash
+# On node1, node2 or node3 (the local broker must be running)
+sudo rabbitmq-diagnostics log_location
+# RHEL default: /var/log/rabbitmq/rabbit@<short-hostname>.log
+
+# If the broker is down, look in the directory and the journal instead
+sudo ls -lt /var/log/rabbitmq/
+sudo journalctl -u rabbitmq-server --since "30 min ago" --no-pager | tail -40
+
+# Last lines without knowing the file name (broker must be running)
+sudo rabbitmq-diagnostics log_tail -N 50
+```
+
+#### B. Message phrasebook — what each line means
+
+| Log keyword (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `Starting RabbitMQ`, `Server startup complete` | Broker boot began / finished; the node accepts AMQP after the second line | 13, 16–19 |
+| `RabbitMQ is asked to stop`, `Successfully stopped RabbitMQ` | Clean shutdown (`systemctl stop`, reboot) | 13, 16–18 |
+| `Waiting for Mnesia tables`, `Successfully synced tables from a peer` | Boot is waiting for a peer that holds the cluster metadata, then got it | 13.2, 16, 18, 19 |
+| `Error while waiting for Mnesia tables`, `timeout_waiting_for_tables` | No peer answered within the retry window — boot will fail; start a peer, or start the node that stopped last first | 19 |
+| `node 'rabbit@nodeX' up`, `rabbit on node 'rabbit@nodeX' up` | A peer broker joined/rejoined this node's view | 13.2, 16, 18, 19 |
+| `node 'rabbit@nodeX' down`, `nodedown`, `net_tick_timeout` | Lost contact with a peer on 25672 (stop, reboot, partition or heavy latency) | 13, 16, 20–22 |
+| `Mnesia(...): ** ERROR ** mnesia_event got {inconsistent_database, running_partitioned_network, ...}` | **Network partition detected.** With `cluster_partition_handling = pause_minority` (set by the install script) the minority side pauses itself | 22 |
+| `Partial partition detected` | One node can see a peer that another node cannot; `pause_minority` pauses one side | 22, 23 |
+| `minority` (e.g. `Cluster minority/secondary status detected - awaiting recovery`) | This broker could not see a majority and **paused**: AMQP listeners are closed and clients fail over to the other brokers | 22, 19 (2 nodes down) |
+| `minority` … `cleared`, followed by `Starting RabbitMQ` / `Server startup complete` | Majority visible again; the paused broker restarts its app and resyncs | 22.6 |
+| `accepting AMQP connection <...> (<client-ip>:<port> -> <node-ip>:5672)` | A pipeline process (or `rabbitmqadmin`) connected; the client IP shows which node's process it is | 13, 25, 42, 44 |
+| `user 'flowuser' authenticated and granted access to vhost '/'` | Login succeeded for that connection | any |
+| `closing AMQP connection ... (... vhost: '/', user: 'flowuser')` | Clean client disconnect (process stopped, or Pacemaker moved it) | 11, 12 |
+| `client unexpectedly closed TCP connection` | Client vanished without closing (process killed, client node rebooted, network drop) | 16–18, 22, 25 |
+| `missed heartbeats from client, timeout: 60s` | Client was silent for longer than `heartbeat=60` (set in `config.py`) — usually a network glitch or a stalled process | 20, 21, 41 |
+| `Closing all connections`, `CONNECTION_FORCED` | An operator ran `rabbitmqctl close_all_connections` / `close_connection` | 42 |
+| `memory resource limit alarm set`, `disk resource limit alarm set` | Broker is **blocking publishers**; clients see blocked connections (`blocked_connection_timeout=300` in `config.py`) | 40, heavy load |
+| `alarm cleared` | Publishers unblocked | 40 |
+| `invalid credentials`, `ACCESS_REFUSED`, `PLAIN login refused` | Wrong `RABBITMQ_USER` / `RABBITMQ_PASSWORD` in that node's `.env` | install, 43 |
+| `Connection attempt from disallowed node`, `Cookie mismatch` | `/var/lib/rabbitmq/.erlang.cookie` differs between nodes — the node cannot join the cluster | install |
+| `[error]`, `crash`, `CRASH REPORT` | Read the lines just above for the cause | any |
+
+#### C. Build a timeline on one node
+
+```bash
+# On the node being investigated (e.g. node3 after Scenario 13)
+LOG=$(sudo rabbitmq-diagnostics log_location 2>/dev/null | grep '\.log$' | head -1)
+LOG=${LOG:-/var/log/rabbitmq/rabbit@$(hostname -s).log}
+sudo grep -E -i "Starting RabbitMQ|startup complete|asked to stop|Mnesia|node .* (up|down)|partition|minority|accepting AMQP|closing AMQP|unexpectedly closed|missed heartbeats|alarm|\[error\]" \
+  "${LOG}" | tail -60
+```
+
+Read top to bottom: peer `down` → clients `unexpectedly closed` / reconnect to the surviving brokers (`accepting AMQP` from new client IPs) → peer `up` / `Successfully synced tables` → `Server startup complete` on the rejoining node.
+
+#### D. Correlate the same event across all three nodes
+
+```bash
+# From any of node1–node3 (uses ssh to each node, including itself)
+SINCE="$(date -d '-15 min' '+%Y-%m-%d %H:%M')"
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  echo "===== ${n} ====="
+  ssh "${n}" "sudo sh -c 'cat /var/log/rabbitmq/rabbit@*.log' \
+    | awk -v s='${SINCE}' '\$0 >= s' \
+    | grep -E -i 'startup complete|asked to stop|node .* (up|down)|partition|minority|unexpectedly closed|missed heartbeats|alarm|\[error\]'"
+done
+```
+
+Lines start with a `YYYY-MM-DD HH:MM:SS` timestamp, which is what the `awk` time filter compares against. Expected for Scenario 13 (stop/start on node3): node1 and node2 each show `node 'rabbit@node3' down`, then `accepting AMQP connection` from the processes that had been on node3's broker, then `node 'rabbit@node3' up`; node3 shows `asked to stop` → `Starting RabbitMQ` → `Successfully synced tables` → `Server startup complete`.
+
+#### E. Watch the log live while running another scenario
+
+```bash
+# On the node under test, in a second terminal, before starting the other scenario
+sudo tail -F /var/log/rabbitmq/rabbit@$(hostname -s).log \
+  | grep --line-buffered -E -i "node .* (up|down)|partition|minority|accepting AMQP|closing AMQP|unexpectedly closed|missed heartbeats|alarm|\[error\]"
+```
+
+#### F. Temporarily increase verbosity (optional)
+
+```bash
+# On each of node1–node3 — runtime only, lost on broker restart
+sudo rabbitmqctl set_log_level debug
+
+# Revert when finished
+sudo rabbitmqctl set_log_level info
+```
+
+Debug level is very noisy under pipeline load; keep it on only for the duration of the test.

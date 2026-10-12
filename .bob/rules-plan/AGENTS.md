@@ -39,3 +39,9 @@ create a blocking socket that bypasses the eventlet loop.
 `flow2_high_threshold`, `flow1_counter_step`, and `flow2_scale_factor` are read from
 `/flowfirst/config/*` znodes via `ConfigWatcher.DataWatch`. Changes via `POST /zk/config`
 propagate to all running processes within seconds without restart.
+
+## RabbitMQ runs `cluster_partition_handling = pause_minority` — it needs ≥3 brokers
+Set in `/etc/rabbitmq/rabbitmq.conf` by `scripts/install_rabbitmq_rhel9.sh`. A broker that loses
+sight of the majority pauses (stops serving AMQP) and recovers by itself; pipeline clients fail over
+via `config.py`'s multi-host list. Consequence: with only 2 brokers, or if 2 of 3 are down, the
+survivor pauses and the whole pipeline stops publishing/consuming. Do not shrink the broker cluster.

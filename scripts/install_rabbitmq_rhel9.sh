@@ -208,9 +208,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Enable management plugin and start service
+# 4. Partition handling, management plugin and service start
+#    pause_minority: a node that can no longer see a majority of the cluster
+#    pauses itself (closes AMQP listeners) and resumes automatically when the
+#    network heals. Clients fail over to the majority side via config.py's
+#    multi-host list. Without this, RabbitMQ defaults to 'ignore' (split-brain
+#    until an operator restarts one side).
 # ---------------------------------------------------------------------------
-echo "[4/5] Enabling rabbitmq_management plugin and starting service ..."
+echo "[4/5] Setting cluster_partition_handling = pause_minority ..."
+RMQ_CONF=/etc/rabbitmq/rabbitmq.conf
+sudo mkdir -p /etc/rabbitmq
+if sudo grep -q '^cluster_partition_handling' "${RMQ_CONF}" 2>/dev/null; then
+    sudo sed -i 's/^cluster_partition_handling.*/cluster_partition_handling = pause_minority/' "${RMQ_CONF}"
+else
+    echo 'cluster_partition_handling = pause_minority' | sudo tee -a "${RMQ_CONF}" > /dev/null
+fi
+
+echo "      Enabling rabbitmq_management plugin and starting service ..."
 sudo rabbitmq-plugins enable rabbitmq_management
 sudo systemctl enable --now rabbitmq-server
 
@@ -234,6 +248,7 @@ echo ""
 echo " Architecture        :  ${ARCH}"
 echo " AMQP Broker Port    :  5672"
 echo " Cluster Bus Port    :  25672"
+echo " Partition handling  :  pause_minority (${RMQ_CONF})"
 echo " Management Web UI   :  http://<node-ip>:15672"
 echo "   Default login     :  guest / guest"
 echo "   Pipeline login    :  flowuser / flowpassword"

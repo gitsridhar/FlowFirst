@@ -179,6 +179,7 @@ sudo ./scripts/install_rabbitmq_rhel9.sh
 # Detects arch at runtime: x86_64 → yum1/yum2.rabbitmq.com, aarch64 → packagecloud.io/rabbitmq
 # Downloads GPG keys from github.com/rabbitmq/signing-keys release 3.0 (Cloudsmith URLs are dead)
 # Enables rabbitmq_management plugin automatically
+# Writes cluster_partition_handling = pause_minority to /etc/rabbitmq/rabbitmq.conf (before first start)
 ```
 
 ### Phase 3 — HAProxy (Nodes 1–3)

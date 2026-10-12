@@ -21,6 +21,8 @@ znode check is the primary barrier that prevents the Galera wsrep certification 
 ## `SWIFT_ENABLED=false` silently skips all object storage calls — it does not raise
 Every `swift_storage.py` function checks `SWIFT_ENABLED` at the top and returns a failure tuple
 without connecting. Process 4 treats a Swift failure as non-fatal (logs it, still acks the message).
+Swift itself is a native 3-node cluster (`swift/setup_swift.sh`, systemd, not Pacemaker) behind HAProxy
+on the VIP (`:8090`); there is no Swift container. Rings are deterministic, so they match on all nodes.
 
 ## MariaDB schema is initialised by Process 4 at startup, not by a migration tool
 `db.init_database()` runs `CREATE TABLE IF NOT EXISTS` on every P4 startup. There is no migration

@@ -109,3 +109,26 @@ backend rabbitmq_amqp_back
     server __NODE1_NAME__ __NODE1_IP__:__RABBITMQ_PORT__ check inter 5s fall 2 rise 2
     server __NODE2_NAME__ __NODE2_IP__:__RABBITMQ_PORT__ check inter 5s fall 2 rise 2
     server __NODE3_NAME__ __NODE3_IP__:__RABBITMQ_PORT__ check inter 5s fall 2 rise 2
+
+#---------------------------------------------------------------------
+# Load balancing for the Swift cluster (proxy port -> LB Port on the VIP)
+#---------------------------------------------------------------------
+# Every node runs a swift-proxy on __SWIFT_PROXY_PORT__ (swift/setup_swift.sh).
+# /healthcheck is answered by the proxy only when it is up.  Large object PUTs
+# can be slow, so the server timeout is raised for this backend.
+frontend swift_front
+    bind *:__SWIFT_LB_PORT__
+    mode http
+    option httplog
+    default_backend swift_back
+
+backend swift_back
+    mode http
+    balance roundrobin
+    option httpchk GET /healthcheck
+    http-check expect status 200
+    timeout server 5m
+    default-server inter 3s fall 2 rise 2
+    server __NODE1_NAME__ __NODE1_IP__:__SWIFT_PROXY_PORT__ check
+    server __NODE2_NAME__ __NODE2_IP__:__SWIFT_PROXY_PORT__ check
+    server __NODE3_NAME__ __NODE3_IP__:__SWIFT_PROXY_PORT__ check

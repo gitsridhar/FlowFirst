@@ -92,7 +92,9 @@ else:
     MARIADB_HOSTS = f"{NODE1_IP},{NODE2_IP},{NODE3_IP}"
 
 # Swift Object Storage Connection Settings
-SWIFT_AUTH_URL = os.getenv("SWIFT_AUTH_URL", f"http://{FLOWFIRST_VIP}:8080/auth/v1.0")
+# Swift is a native 3-node cluster (swift/setup_swift.sh) behind HAProxy on the VIP
+SWIFT_LB_PORT = _int_env("SWIFT_LB_PORT", 8090)
+SWIFT_AUTH_URL = _str_env("SWIFT_AUTH_URL", f"http://{FLOWFIRST_VIP}:{SWIFT_LB_PORT}/auth/v1.0")
 SWIFT_AUTH_VERSION = os.getenv("SWIFT_AUTH_VERSION", "1.0")
 SWIFT_USER = os.getenv("SWIFT_USER", "test:tester")
 SWIFT_KEY = os.getenv("SWIFT_KEY", "testing")

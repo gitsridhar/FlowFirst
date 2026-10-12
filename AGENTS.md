@@ -182,6 +182,19 @@ sudo ./scripts/install_rabbitmq_rhel9.sh
 # Writes cluster_partition_handling = pause_minority to /etc/rabbitmq/rabbitmq.conf (before first start)
 ```
 
+### Phase 2b — Swift Object Store (Nodes 1–3)
+> Native RPM + systemd install (no containers). Node 4 runs no Swift server. Run after Phase 2, before Phase 3.
+```bash
+# Generate ONCE, put the SAME values in .env on node1-3 (script refuses placeholders; never change after data is stored):
+#   SWIFT_HASH_PATH_PREFIX=$(openssl rand -hex 16)   SWIFT_HASH_PATH_SUFFIX=$(openssl rand -hex 16)
+sudo ./swift/setup_swift.sh
+# Uses CentOS Cloud SIG OpenStack repo (SWIFT_OPENSTACK_RELEASE, default epoxy; repo written enabled=0)
+# proxy :8888, account :6202, container :6201, object :6200 + rsyncd + memcached on every node
+# Rings built from NODE1..3_IP (zone per node, 3 replicas, fixed seed) -> byte-identical on all nodes
+# HAProxy publishes it on the VIP at SWIFT_LB_PORT (8090): SWIFT_AUTH_URL=http://<VIP>:8090/auth/v1.0
+```
+> Swift proxy cannot use `:8080` (HAProxy API frontend). Ring changes are manual; the script keeps existing `*.ring.gz`.
+
 ### Phase 3 — HAProxy (Nodes 1–3)
 > RHEL 9 uses predictable NIC names (ens3, ens192, enp0s3) — not eth0. `VIP_NIC` may differ per node.
 ```bash
@@ -198,6 +211,7 @@ sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 
 **HAProxy port layout** (no port collisions):
 - REST API: HAProxy `:8080` → Process 1 backend `:8082`
+- Swift: HAProxy `:8090` → swift-proxy `:8888` on each node
 - MariaDB LB: HAProxy `:3307` → Galera nodes `:3306`
 - RabbitMQ LB: HAProxy `:5673` → RabbitMQ nodes `:5672`
 - Stats dashboard: `:9000` (credentials: `HAPROXY_STATS_USER` / `HAPROXY_STATS_PASS`)

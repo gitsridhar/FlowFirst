@@ -5,12 +5,12 @@ This project implements an enterprise-grade, high-availability, distributed inte
 - **Git, Python 3, Pip, & Pyenv/Virtualenv**: Version-controlled modular codebase running isolated Python virtual environments across all nodes
 - **Chrony NTP Time Synchronisation**: Sub-millisecond cluster clock synchronisation for Galera writesets and Corosync consensus
 - **Virtual IP (VIP) Failover & High Availability**: Managed by **Pacemaker / Corosync** (`IPaddr2`) with zero-downtime VIP migration
-- **HAProxy Load Balancing**: Round-Robin Layer-7 load balancing for REST API (:8080), Layer-4 load balancing for MariaDB Galera (:3307 -> :3306), and RabbitMQ AMQP (:5673 -> :5672) with live statistics dashboard (:9000)
+- **HAProxy Load Balancing**: Round-Robin Layer-7 load balancing for REST API (:8080), Layer-4 load balancing for MariaDB Galera (:3307 -> :3306), RabbitMQ AMQP (:5673 -> :5672), and the Swift object store (:8090 -> :8888) with live statistics dashboard (:9000)
 - **MariaDB Galera Multi-Master Cluster**: Synchronous multi-master replication (`wsrep`), automated Incremental (IST) / State Snapshot Transfers (SST), and quorum consistency across all core nodes
 - **RabbitMQ Message Broker Pool**: Durable message queuing, automated reconnect greenthreads, and reliable cross-node message routing
 - **Apache ZooKeeper**: Distributed coordinator for runtime leader election, live dynamic configuration hot-reloading (without process restart), worker service registry, and atomic deduplication barriers
 - **Eventlet Greenthreads & Non-Blocking I/O**: High-concurrency cooperative multitasking, dedicated per-queue consumer greenpools, cooperative RMQ heartbeats, and live throughput metric collectors
-- **OpenStack Swift Object Storage (`python-swiftclient`)**: Dual-persistence layer providing immutable object archiving and direct REST API retrieval
+- **OpenStack Swift Object Storage (`python-swiftclient`)**: Dual-persistence layer providing immutable object archiving and direct REST API retrieval. Swift runs as a native 3-node cluster (RPM packages + systemd, installed by `swift/setup_swift.sh`): proxy, account, container and object servers on every node, three replicas (one per node), load-balanced by HAProxy on the VIP
 - **Systemd Service Architecture**: Managed systemd service units for `flowfirst-process1` through `flowfirst-process5` with automatic crash recovery
 - **Distributed Multi-Process Pipeline (`process1` – `process5`)**:
   - **Process 1**: REST API producer & health gateway
@@ -33,7 +33,7 @@ This project implements an enterprise-grade, high-availability, distributed inte
 ```mermaid
 graph TD
     Client["Client / curl"] -->|"VIP:8080"| VIP["Pacemaker VIP"]
-    VIP --> HAProxy["HAProxy\nREST :8080 round-robin\nSQL :3307 load-balanced\nRMQ :5673 load-balanced"]
+    VIP --> HAProxy["HAProxy\nREST :8080 round-robin\nSQL :3307 load-balanced\nRMQ :5673 load-balanced\nSwift :8090 load-balanced"]
 
     subgraph Node1[Node 1]
         P1a["P1: REST API"]
@@ -210,6 +210,7 @@ erDiagram
 | **1b** | Nodes 1–3 only | ZooKeeper 3-node ensemble (servers) | `zookeeper/setup_zookeeper.sh` |
 | **1c** | All nodes (1–4) | Raise OS file-descriptor limit for eventlet greenthreads | `ulimit -n 65536` + `/etc/security/limits.d/flowfirst.conf` |
 | **2** | Nodes 1–3 only | RabbitMQ cluster & Erlang install (servers) | `scripts/install_rabbitmq_rhel9.sh` |
+| **2b** | Nodes 1–3 only | Swift object-store cluster (proxy + account/container/object servers, 3-replica rings, tempauth) | `swift/setup_swift.sh` |
 | **3** | Nodes 1–3 only | Identify cluster NIC, set `VIP_NIC` in `.env`, generate HAProxy config | `haproxy/setup_haproxy.sh` |
 | **4** | Nodes 1–3 | Install systemd units for Process 1–4 & target (Pacemaker managed) | `systemd/install_services.sh /opt/flowfirst` |
 | **4 (Remote)** | Node 4 only | Install & enable `flowfirst-process5.service` (runs Process 5 only) | `systemd/install_services.sh /opt/flowfirst --remote` |
@@ -857,6 +858,79 @@ The script performs these steps automatically:
 
 ---
 
+### Phase 2b: Install the Swift Object Store Cluster on Nodes 1–3
+
+> **Install after RabbitMQ (Phase 2) and before HAProxy (Phase 3).** Node 4 does **not** run a Swift server; it only needs `python-swiftclient` (already in `requirements.txt`) and `SWIFT_AUTH_URL` pointing at the VIP.
+
+Swift is installed as a **native service** from RPM packages and managed by plain `systemd` on each node (like MariaDB, RabbitMQ and ZooKeeper), not by Pacemaker. RHEL 9 has no Swift server packages in its own repositories, so the script uses the **CentOS Cloud SIG OpenStack** repository (release set by `SWIFT_OPENSTACK_RELEASE`, default `epoxy` = Swift 2.35). The repo file is written with `enabled=0` and is only enabled for the Swift `dnf install`, so routine `dnf update` runs on the cluster never pull in OpenStack builds of base libraries.
+
+**What runs where (all of it on each of node1, node2 and node3):**
+
+| Component | Port | Purpose |
+|---|---|---|
+| `openstack-swift-proxy` | `8888` (`SWIFT_PROXY_PORT`) | REST/auth front end (tempauth); 8080 is already the FlowFirst API frontend |
+| `openstack-swift-account` / `-container` / `-object` | `6202` / `6201` / `6200` | Storage servers, bound to the node IP |
+| replicators, auditors, updaters, reaper | – | Keep the three replicas consistent and repair after an outage |
+| `rsyncd` | `873` | Replication transport, limited to the three node IPs |
+| `memcached` | `11211` | Token cache shared by **all three** proxies, so a token issued via one node is valid on the others |
+| HAProxy `swift_front` (Phase 3) | `8090` (`SWIFT_LB_PORT`) on the VIP | Clients use `http://${FLOWFIRST_VIP}:8090/auth/v1.0`; health check `GET /healthcheck` |
+
+**How the cluster is formed:** the script builds the account, container and object rings from `NODE1_IP..NODE3_IP` with one **zone per node**, `SWIFT_REPLICAS=3` and a fixed seed, so every node generates **byte-identical** `*.ring.gz` files and nothing has to be copied between nodes. Every object is therefore stored on all three nodes, and one node can fail without losing data or availability (writes need 2 of 3 replicas).
+
+**Before you run it**, generate the two cluster-wide hash secrets **once** and put the **same** values in `/opt/flowfirst/.env` on node1, node2 and node3. They must never change after data is stored. The script refuses to run while they still have the placeholder value:
+
+```bash
+# On ONE node only, then copy the output into .env on all three nodes
+echo "SWIFT_HASH_PATH_PREFIX=$(openssl rand -hex 16)"
+echo "SWIFT_HASH_PATH_SUFFIX=$(openssl rand -hex 16)"
+```
+
+Also review `SWIFT_USER` / `SWIFT_KEY` (the tempauth login, format `<account>:<user>`) and `SWIFT_AUTH_URL` (`http://<VIP>:8090/auth/v1.0`) in `.env` on **every node including node4**.
+
+```bash
+cd /opt/flowfirst
+sudo ./swift/setup_swift.sh
+```
+
+The script performs these steps automatically:
+1. Writes `/etc/yum.repos.d/centos-openstack-<release>.repo` (disabled by default) and imports the CentOS Cloud SIG GPG key
+2. Installs `openstack-swift-proxy/-account/-container/-object`, `memcached`, `rsync-daemon`, `xfsprogs`
+3. Creates the `swift` user and the data directory `${SWIFT_DEVICES_DIR}/${SWIFT_DEVICE}` (default `/srv/node/flowfirst`), verifies it supports extended attributes, and labels it `rsync_data_t` for SELinux
+4. Writes `/etc/swift/swift.conf` with the hash prefix/suffix
+5. Configures `memcached` (listening on `127.0.0.1` and the node IP) and `/etc/rsyncd.conf`
+6. Writes the account, container, object and proxy server configs (originals saved as `*.conf.rpm-orig`)
+7. Builds the three rings (existing `*.ring.gz` files are kept)
+8. Opens the proxy and ring ports; opens `873` and `11211` **only** to the three node IPs
+9. Enables and starts all Swift units, then checks `/healthcheck` and a tempauth login on this node
+
+> **Storage device:** by default the data directory is a plain directory on the root filesystem, which is fine for evaluation. For real data mount a dedicated **XFS** filesystem at `${SWIFT_DEVICES_DIR}/${SWIFT_DEVICE}` on every node and set `SWIFT_MOUNT_CHECK=true` in `.env` before running the script, so Swift refuses to write into an unmounted (empty) mount point.
+
+**Verify** (after the script has run on all three nodes; warnings about unreachable peers on the first nodes are expected):
+
+```bash
+# 1. Rings must be identical on all three nodes
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  ssh "${n}" "cd /etc/swift && sudo md5sum account.ring.gz container.ring.gz object.ring.gz"
+done
+
+# 2. Ring layout: 3 devices, 3 replicas, zones 1-3
+sudo swift-ring-builder /etc/swift/object.builder
+
+# 3. All services active on this node
+systemctl is-active openstack-swift-proxy openstack-swift-account openstack-swift-container \
+  openstack-swift-object openstack-swift-object-replicator memcached rsyncd
+
+# 4. Direct to a node's proxy, then through the VIP once Phase 3/5 is done
+curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" \
+  http://${CURRENT_NODE_IP}:8888/auth/v1.0 | grep -i x-auth-token
+curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" \
+  http://${FLOWFIRST_VIP}:8090/auth/v1.0 | grep -i x-auth-token
+```
+
+> **Changing the ring later** (adding a node or device, changing weights) is **not** automatic. Build the new ring on one node with `swift-ring-builder` and copy the resulting `*.ring.gz` files to `/etc/swift/` on every node, then restart the Swift services. Do not re-run `setup_swift.sh` for that: it keeps the existing rings.
+
+---
+
 ### Phase 3: Identify Your Cluster NIC & Set `VIP_NIC` on Each Node
 
 > **Critical — do this before running `setup_haproxy.sh` or `configure_multinode_resources.sh`.**
@@ -1059,6 +1133,7 @@ When HAProxy and backend services run on the same node, port separation prevents
 - **Process 1 REST API Backend**: Listens on dedicated backend port `8082` (`API_BACKEND_PORT=8082`), avoiding any collision with HAProxy (`8080`) or ZooKeeper AdminServer (`8081`).
 - **MariaDB Galera Load Balancer**: HAProxy frontend listens on dedicated LB port `3307` (`MARIADB_LB_PORT=3307`) and load-balances across node daemons on port `3306`.
 - **RabbitMQ AMQP Load Balancer**: HAProxy frontend listens on dedicated LB port `5673` (`RABBITMQ_LB_PORT=5673`) and load-balances across node daemons on port `5672`.
+- **Swift Load Balancer**: HAProxy frontend listens on dedicated LB port `8090` (`SWIFT_LB_PORT=8090`) and load-balances across the `swift-proxy` daemons on port `8888` (`SWIFT_PROXY_PORT=8888`). The Swift proxy cannot use its conventional port `8080`, which is HAProxy's REST API frontend.
 
 Symptom:
 ```
@@ -1088,6 +1163,7 @@ grep "bind" /etc/haproxy/haproxy.cfg
 #   bind 0.0.0.0:9000            ← Stats dashboard
 #   bind *:3307                  ← MariaDB LB Frontend
 #   bind *:5673                  ← RabbitMQ LB Frontend
+#   bind *:8090                  ← Swift LB Frontend
 ```
 
 ---
@@ -1120,6 +1196,8 @@ grep -E "frontend|backend" /etc/haproxy/haproxy.cfg
 #   backend mariadb_galera_back
 #   frontend rabbitmq_amqp_front
 #   backend rabbitmq_amqp_back
+#   frontend swift_front
+#   backend swift_back
 ```
 
 ---
@@ -1161,7 +1239,7 @@ sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 
 ```
 
 #### Step 4b — Remote Node 4 (`node4` only)
-On Remote Node 4, **only Process 5** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, HAProxy, or Pacemaker) run on Node 4; Process 5 acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`):
+On Remote Node 4, **only Process 5** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, Swift server, HAProxy, or Pacemaker) run on Node 4; Process 5 acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`):
 
 ```bash
 cd /opt/flowfirst
@@ -1235,6 +1313,7 @@ sudo ss -tlnp | grep haproxy
 #   0.0.0.0:9000    ← stats dashboard
 #   0.0.0.0:3307    ← MariaDB LB frontend (proxies to node 3306)
 #   0.0.0.0:5673    ← RabbitMQ LB frontend (proxies to node 5672)
+#   0.0.0.0:8090    ← Swift LB frontend (proxies to node swift-proxy 8888)
 
 # Confirm stats page is reachable via the VIP
 curl -s -u "${HAPROXY_STATS_USER}:${HAPROXY_STATS_PASS}" http://${FLOWFIRST_VIP}:${HAPROXY_STATS_PORT:-9000}/stats | grep -c "pxname"
@@ -4494,7 +4573,18 @@ MARIADB_HOST=127.0.0.1
 MARIADB_USER=flowuser
 MARIADB_PASSWORD=flowpassword
 MARIADB_DB=flowfirst_db
+
+# Swift — there is no Swift container. Swift is installed natively on the cluster
+# (Phase 2b), so single-node development runs with object storage switched off.
+# MariaDB persistence is unaffected; Process 4 prints "Swift store note: Swift
+# storage is disabled" for each message.
+SWIFT_ENABLED=false
 ```
+
+> **Testing Swift on a development machine** needs a real Swift server: either
+> point `SWIFT_AUTH_URL`, `SWIFT_USER` and `SWIFT_KEY` at the cluster's Swift
+> (`http://<VIP>:8090/auth/v1.0`, reachable from your machine), or install Swift
+> on a RHEL 9 VM with `swift/setup_swift.sh`.
 
 ### Step 2 — Start infrastructure containers
 
@@ -4591,6 +4681,7 @@ curl -s http://localhost:8080/zk/health | jq .
 curl -s http://localhost:8080/zk/config | jq .
 
 # Swift Object Storage status & stored objects query
+# (with SWIFT_ENABLED=false this reports "enabled": false; objects need a real Swift server)
 curl -s http://localhost:8080/swift/status | jq .
 curl -s http://localhost:8080/swift/objects | jq .
 # Query specific stored object payload from Swift
@@ -6039,7 +6130,7 @@ sudo crm_report --from "2026-10-12 14:00:00" --to "2026-10-12 14:30:00" /tmp/flo
 
 ### Scenario 50: Reading Swift Logs and Detecting Missing Objects
 
-> **Runs on:** client-side logs (`journalctl -u flowfirst-process4`) on the **current Process 4 leader node** (find it with `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health.process4`); for Flow 3, Process 5 only forwards the message, so Swift errors still appear on the Process 4 leader. The `curl` and `mariadb` reconciliation checks in D run from **any machine that can reach the VIP** (the `mariadb` client is installed on node1–node3). Swift **server** logs are wherever your Swift service runs. This repository does not install one: `SWIFT_AUTH_URL` in each node's `.env` says where it is, and `docker-compose.yml` runs a development all-in-one container (`swift_flowfirst`).
+> **Runs on:** client-side logs (`journalctl -u flowfirst-process4`) on the **current Process 4 leader node** (find it with `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health.process4`); for Flow 3, Process 5 only forwards the message, so Swift errors still appear on the Process 4 leader. The `curl` and `mariadb` reconciliation checks in D run from **any machine that can reach the VIP** (the `mariadb` client is installed on node1–node3). Swift **server** logs (proxy, account, container and object servers, installed by Phase 2b) are in the journal of **each of node1–node3**: a request through the VIP is handled by whichever node HAProxy chose, and the object itself is written to all three nodes, so check all three.
 
 Use this scenario alongside Scenarios 2, 37 and 44, and any scenario that stops RabbitMQ, MariaDB or the network, to find out whether Process 4 stored each payload in Swift, and why not when it did not. Swift failures are **non-fatal by design**: Process 4 prints a note, still writes the MariaDB row and still acknowledges the message, so a Swift outage never shows up as a stuck queue.
 
@@ -6058,7 +6149,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/swift/status | jq .
 
 `"status": "error"` carries an `error` field with the underlying exception text. `"enabled": false` means `SWIFT_ENABLED` is false on the node that answered, and every object write is skipped. Because HAProxy round-robins `/swift/status`, run it a few times to see all three nodes.
 
-> **Check the URL, it is easy to get wrong:** the built-in default for `SWIFT_AUTH_URL` is `http://${FLOWFIRST_VIP}:8080/auth/v1.0` (in `config.py`), but port 8080 on the VIP is HAProxy in front of **Process 1**, which has no `/auth/v1.0` route. `.env.example` sets `http://127.0.0.1:8080/auth/v1.0`, which only works if a Swift proxy really listens on the local node's port 8080 (and that port is also HAProxy's frontend on the VIP holder). Confirm that `curl -sI -H "X-Auth-User: ${SWIFT_USER}" -H "X-Auth-Key: <key>" "${SWIFT_AUTH_URL}"` returns `X-Auth-Token` and `X-Storage-Url` headers before trusting any other result here.
+> **Check the URL, it is easy to get wrong:** `SWIFT_AUTH_URL` must be `http://${FLOWFIRST_VIP}:8090/auth/v1.0` (HAProxy's Swift frontend, `SWIFT_LB_PORT`), the same on every node including node4. Port `8080` on the VIP is HAProxy in front of **Process 1**, which has no `/auth/v1.0` route, and a node-local proxy on `:8888` would bypass the load balancer. Confirm that `curl -sI -H "X-Auth-User: ${SWIFT_USER}" -H "X-Auth-Key: <key>" "${SWIFT_AUTH_URL}"` returns `X-Auth-Token` and `X-Storage-Url` headers before trusting any other result here.
 
 #### B. Message phrasebook — what each line means
 
@@ -6090,12 +6181,14 @@ The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account 
 | `GET /swift/object/<name>` returns `404` with `details.error` containing `ClientException 404` | No such object (never written, or written under a different name) |
 | `GET /swift/objects` returns `502` with `error` | Listing failed (same causes as above) |
 
-**Server side (only if you run Swift yourself):**
+**Server side (Swift daemons on node1–node3, `journalctl` on each node):**
 
 | Where | What to look for |
 |---|---|
-| `docker logs swift_flowfirst` (development container) | Request lines from `proxy-server`, `object-server`, `container-server`, `account-server`: status code, `tx<id>` transaction id and the object path |
-| A packaged Swift service on RHEL | The Swift daemons log to **syslog** (facility `LOCAL0` unless changed), so the lines land in `/var/log/messages` or a Swift-specific file and in the journal; filter with `journalctl -t proxy-server -t object-server -t container-server -t account-server` |
+| `journalctl -t proxy-server -t object-server -t container-server -t account-server` | Request lines from each daemon: status code, `tx<id>` transaction id and the object path. The Swift daemons log to **syslog** (facility `LOCAL0` unless changed), which `rsyslog` and the journal both receive |
+| `journalctl -u openstack-swift-proxy -u openstack-swift-object -u openstack-swift-object-replicator -u rsyncd -u memcached` | Service start/stop, crashes and tracebacks that are not request lines. Replicator output shows whether a returned node is catching up |
+| `/var/log/rsyncd.log` | Replication transfers between nodes (written by `rsyncd`, configured in `/etc/rsyncd.conf`) |
+| `sudo swift-ring-builder /etc/swift/object.builder` and `md5sum /etc/swift/*.ring.gz` | Ring layout, and whether the ring files are identical on all three nodes (a mismatch causes odd 404/503 results) |
 | `401` / `403` on the auth line | Credential or ACL problem |
 | `503` from `proxy-server` with `Timeout` / `ConnectionTimeout` | The proxy could not reach an object server in time |
 | `507` | A device is unmounted or full (`swift-recon -d` shows disk usage, on a node with the recon middleware enabled) |

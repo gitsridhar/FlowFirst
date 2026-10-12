@@ -269,6 +269,7 @@ erDiagram
 | [44](#scenario-44-remote-node-4--process-5-end-to-end-pipeline-execution--database-validation) | Remote Node 4 / Process 5 Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 4)→P2→P4, verify MariaDB audit trail & Swift object storage |
 | [45](#scenario-45-reading-the-mariadb-galera-error-log-across-scenarios) | Reading the MariaDB Galera Error Log | Galera | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 | [46](#scenario-46-reading-the-rabbitmq-broker-log-across-scenarios) | Reading the RabbitMQ Broker Log | RabbitMQ | Locate log, message phrasebook, per-node timeline, cross-node correlation |
+| [47](#scenario-47-reading-the-zookeeper-server--client-logs-across-scenarios) | Reading the ZooKeeper Server & Client Logs | ZooKeeper | Locate logs, server & kazoo phrasebook, election timeline, session expiry correlation |
 
 ---
 
@@ -5604,3 +5605,122 @@ sudo rabbitmqctl set_log_level info
 ```
 
 Debug level is very noisy under pipeline load; keep it on only for the duration of the test.
+
+---
+
+## ZooKeeper Log Analysis
+
+### Scenario 47: Reading the ZooKeeper Server & Client Logs Across Scenarios
+
+> **Runs on:** server logs on **each of node1–node3**. Each ZooKeeper server writes its own log, so it shows only that server's view of the ensemble. Client-side logs (`journalctl -u flowfirst-processN`) are on whichever node runs that process, including **node4** for `flowfirst-process5`. The cross-node loop in D runs from any of node1–node3 over `ssh`.
+
+Use this scenario alongside Scenarios 16–22 and 34–38 to work out from the logs which server led the ensemble, which clients lost their sessions, and why leaders, registrations or config watches changed. Exact wording varies between ZooKeeper and kazoo versions, so the commands below grep for stable keywords rather than whole lines.
+
+#### A. Locate the logs
+
+```bash
+# On node1, node2 or node3 — server log (ZOO_LOG_DIR set by zookeeper/setup_zookeeper.sh)
+sudo ls -lt /var/log/zookeeper/
+# Text log:  zookeeper-zookeeper-server-<hostname>.out
+# version-2/ holds the BINARY transaction log (dataLogDir points at the same directory) — do not grep it
+
+# Startup failures before the JVM writes its log (wrong JAVA_HOME, port in use, bad myid)
+sudo journalctl -u zookeeper --since "30 min ago" --no-pager | tail -40
+
+# Current role of this server, without reading the log
+echo srvr | nc -w2 127.0.0.1 2181 | grep -E "Mode|Zxid"
+```
+
+Client-side (pipeline processes, via kazoo):
+
+```bash
+# On the node running the process (node1–node3 for P1–P4, node4 for P5)
+sudo journalctl -u flowfirst-process2 --since "30 min ago" --no-pager | grep -E -i "zk|zookeeper|kazoo|connection dropped|expired|leader"
+```
+
+> **Note:** the processes do not configure Python `logging`, so only WARNING-and-above messages from `zk.py` and kazoo reach the journal (for example `Config ... unreadable`, `Dedup: duplicate detected`, `Connection dropped`). INFO lines such as `*** NODE ... IS NOW LEADER ***` and `Registered ...` do **not** appear. Use `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health` to see leaders and registrations, along with the processes' own `print` lines (`[P2][gt] ZK ready ...`, `ZK election failed ...`).
+
+#### B. Message phrasebook — what each line means
+
+**Server log (`/var/log/zookeeper/*.out`, node1–node3):**
+
+| Log keyword (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `LOOKING`, `New election`, `Notification:` | This server has no leader and is voting. Short bursts are normal at start-up and after a peer loss | 16–19, 22, 34 |
+| `LEADING`, `LEADER ELECTION TOOK` | This server won the ensemble election (`TOOK - N MS` is how long it took) | 16–19, 34 |
+| `FOLLOWING`, `FOLLOWING - LEADER ELECTION TOOK` | This server joined an elected leader as a follower | 16–19, 34 |
+| `Have quorum of supporters` | Leader has a majority (2 of 3) and starts serving | 16–19 |
+| `Getting a diff from the leader`, `DIFF` / `SNAP` / `TRUNC` | Follower catching up after a restart: DIFF = missing transactions only, SNAP = full snapshot, TRUNC = discard a divergent tail | 16, 18, 19 |
+| `Cannot open channel to N at election address` | Server `N` (myid) is unreachable on 3888 (down, rebooting, or firewall/partition) | 16–18, 22 |
+| `Exception when following the leader`, `shutdown called`, `Shutting down` | Follower lost the leader and goes back to `LOOKING` | 17, 20–22 |
+| `Established session 0x... with negotiated timeout` | A client (pipeline process, `zkCli.sh`) opened a session; the client IP shows which node | 34–38 |
+| `Expiring session 0x..., timeout of ...ms exceeded` | A client went silent past its session timeout. **All its ephemeral znodes are deleted**: the process's registry entry and its election node, so another node takes over leadership | 36, 38, 16–22 |
+| `Closed socket connection`, `Closing session 0x...` | Clean client disconnect (process stopped); its ephemerals are deleted immediately | 11, 12, 38 |
+| `Too many connections from` | A client IP exceeded `maxClientCnxns=120` | heavy load, 39 |
+| `fsync-ing the write ahead log ... took ...ms` | Slow disk on this server — causes client timeouts and elections | 20, 21, load |
+| `Snapshotting:`, `Purge task completed` | Routine snapshot / `autopurge` housekeeping — not an error | any |
+| `Address already in use`, `myid file is missing`, `Invalid configuration` | Start-up failure — see the Phase 1b troubleshooting section | install |
+| `ERROR`, `FATAL` | Read the lines just above for the cause | any |
+
+**Client side (journal of `flowfirst-processN`):**
+
+| Log keyword (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `Connection dropped`, `socket connection broken` | kazoo lost its server; it reconnects to another one in `ZK_HOSTS` and keeps the same session if it does so within the timeout | 16–22 |
+| `expired`, `EXPIRED_SESSION`, `Session has expired` | Reconnect came too late — ephemerals are gone; the process re-registers (`register_process` falls back to `set` on `NodeExistsError`) and re-enters election | 20–22, 36 |
+| `Config ... unreadable`, `Config watch parse error` | Bad value in `/flowfirst/config/*`; the process keeps the default or the previous value | 35 |
+| `Dedup: duplicate detected` | Process 4 skipped a redelivered message because its dedup znode still exists | 37 |
+| `ZK unavailable ... degraded mode`, `ZK election failed ... single-node mode` | Process started without ZooKeeper; check the ensemble before trusting leadership | 19, 34 |
+
+#### C. Build a timeline on one server
+
+```bash
+# On the server being investigated (e.g. node3 after Scenario 16)
+sudo grep -h -E "LOOKING|LEADING|FOLLOWING|ELECTION TOOK|quorum of supporters|DIFF|SNAP|TRUNC|Cannot open channel|Exception when following|Expiring session|ERROR|FATAL" \
+  /var/log/zookeeper/zookeeper-*.out | tail -60
+```
+
+Read top to bottom: peer loss (`Cannot open channel` / `Exception when following`) → `LOOKING` → `LEADING` or `FOLLOWING` with `ELECTION TOOK` → `Expiring session` for clients that were on the lost node → the restarted peer catches up via `DIFF`/`SNAP`.
+
+#### D. Correlate the same event across all three servers
+
+```bash
+# From any of node1–node3 (uses ssh to each node, including itself)
+SINCE="$(date -d '-15 min' '+%Y-%m-%d %H:%M')"
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  echo "===== ${n} ====="
+  ssh "${n}" "sudo sh -c 'cat /var/log/zookeeper/zookeeper-*.out' \
+    | awk -v s='${SINCE}' '\$0 >= s' \
+    | grep -E 'LOOKING|LEADING|FOLLOWING|ELECTION TOOK|Cannot open channel|Expiring session|ERROR'"
+done
+```
+
+Lines start with a `YYYY-MM-DD HH:MM:SS,mmm [myid:N]` prefix; the `awk` time filter compares against the timestamp, and `myid` tells you which server wrote the line. Expected for Scenario 16 (reboot node3 while it is a follower): node1 and node2 show `Cannot open channel to 3`, then `Expiring session` for node3's pipeline clients, and stay `LEADING`/`FOLLOWING` without a new election; node3, after the reboot, shows `LOOKING` → `FOLLOWING` → `DIFF`. If node3 was the ZooKeeper **leader**, node1 and node2 both show `LOOKING` and one of them then shows `LEADING`.
+
+> The ZooKeeper **ensemble** leader (this log) is unrelated to the **pipeline** leader for each process (the kazoo `Election` under `/flowfirst/election/*`). A pipeline leader changes only when its session expires or closes, which appears in the server log as `Expiring session` / `Closing session` for that client's IP.
+
+#### E. Watch the log live while running another scenario
+
+```bash
+# On the server under test, in a second terminal, before starting the other scenario
+sudo tail -F /var/log/zookeeper/zookeeper-zookeeper-server-$(hostname).out \
+  | grep --line-buffered -E "LOOKING|LEADING|FOLLOWING|ELECTION TOOK|Cannot open channel|Expiring session|Closing session|ERROR"
+```
+
+#### F. Temporarily increase verbosity (optional)
+
+ZooKeeper's log level cannot be changed at runtime. Change it one server at a time so the ensemble keeps its quorum:
+
+```bash
+# On one of node1–node3 at a time — ZooKeeper 3.9 uses logback
+sudo cp /opt/zookeeper/conf/logback.xml /opt/zookeeper/conf/logback.xml.bak
+sudo sed -i 's/<root level="INFO">/<root level="DEBUG">/' /opt/zookeeper/conf/logback.xml
+sudo systemctl restart zookeeper
+echo ruok | nc -w2 127.0.0.1 2181    # expect imok before moving to the next server
+
+# Revert when finished
+sudo mv /opt/zookeeper/conf/logback.xml.bak /opt/zookeeper/conf/logback.xml
+sudo systemctl restart zookeeper
+```
+
+Debug level logs every client request; keep it on only for the duration of the test. If the `sed` changes nothing, open `logback.xml` and change the root logger's level by hand.

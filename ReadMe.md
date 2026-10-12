@@ -2104,15 +2104,15 @@ Node List:
 
 Active Resources:
   * Resource Group: vip-haproxy-group:
-    * vip        (ocf::heartbeat:IPaddr2):        Started node1
-    * haproxy    (systemd:haproxy):               Started node1
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1]:
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node1
+    * haproxy-res (systemd:haproxy):               Started node1
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res]:
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2]:
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res]:
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p3-clone [flowfirst-p3]:
+  * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res]:
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p4-clone [flowfirst-p4]:
+  * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res]:
     * Started: [ node1 node2 node3 ]
 ```
 
@@ -2149,8 +2149,8 @@ Cleaned up all resources on all nodes
 
 To clear a **single resource** across all nodes:
 ```bash
-sudo crm_resource -r vip -C
-sudo crm_resource -r flowfirst-p1-clone -C
+sudo crm_resource -r flowfirst-vip -C
+sudo crm_resource -r flowfirst-p1-res-clone -C
 ```
 
 ---
@@ -2159,18 +2159,18 @@ sudo crm_resource -r flowfirst-p1-clone -C
 
 ```bash
 # Where is the VIP currently running?
-sudo crm_resource --resource vip --locate
+sudo crm_resource --resource flowfirst-vip --locate
 ```
 ```
-resource vip is running on: node1
+resource flowfirst-vip is running on: node1
 ```
 
 ```bash
 # Where is each clone instance running?
-sudo crm_resource --resource flowfirst-p1-clone --locate
+sudo crm_resource --resource flowfirst-p1-res-clone --locate
 ```
 ```
-resource flowfirst-p1-clone is running on: node1  node2  node3
+resource flowfirst-p1-res-clone is running on: node1  node2  node3
 ```
 
 ---
@@ -2183,8 +2183,8 @@ sudo crm_resource --resource vip-haproxy-group --move --node node2
 sudo crm_mon -1Ar | grep vip
 ```
 ```
-    * vip        (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy    (systemd:haproxy):               Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy-res (systemd:haproxy):               Started node2
 ```
 
 Remove the forced constraint to let Pacemaker re-balance freely:
@@ -2204,8 +2204,8 @@ sudo pcs node standby node1
 sudo crm_mon -1Ar | grep -E "vip|haproxy"
 ```
 ```
-    * vip        (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy    (systemd:haproxy):               Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy-res (systemd:haproxy):               Started node2
 ```
 
 ```bash
@@ -2248,8 +2248,8 @@ Failed Resource Actions:
 
 Fix the underlying issue on `node3`, then clear the failure:
 ```bash
-sudo crm_resource -r flowfirst-p1-clone -C
-sudo pcs resource refresh flowfirst-p1-clone
+sudo crm_resource -r flowfirst-p1-res-clone -C
+sudo pcs resource refresh flowfirst-p1-res-clone
 ```
 
 ---
@@ -2274,24 +2274,24 @@ Node List:
 
 Full List of Resources:
   * Resource Group: vip-haproxy-group:
-    * vip        (ocf::heartbeat:IPaddr2):        Started node1
-    * haproxy    (systemd:haproxy):               Started node1
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
-    * flowfirst-p1       (systemd:flowfirst-process1):    Started node1
-    * flowfirst-p1       (systemd:flowfirst-process1):    Started node2
-    * flowfirst-p1       (systemd:flowfirst-process1):    Started node3
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
-    * flowfirst-p2       (systemd:flowfirst-process2):    Started node1
-    * flowfirst-p2       (systemd:flowfirst-process2):    Started node2
-    * flowfirst-p2       (systemd:flowfirst-process2):    Started node3
-  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
-    * flowfirst-p3       (systemd:flowfirst-process3):    Started node1
-    * flowfirst-p3       (systemd:flowfirst-process3):    Started node2
-    * flowfirst-p3       (systemd:flowfirst-process3):    Started node3
-  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
-    * flowfirst-p4       (systemd:flowfirst-process4):    Started node1
-    * flowfirst-p4       (systemd:flowfirst-process4):    Started node2
-    * flowfirst-p4       (systemd:flowfirst-process4):    Started node3
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node1
+    * haproxy-res (systemd:haproxy):               Started node1
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
+    * flowfirst-p1-res (systemd:flowfirst-process1):    Started node1
+    * flowfirst-p1-res (systemd:flowfirst-process1):    Started node2
+    * flowfirst-p1-res (systemd:flowfirst-process1):    Started node3
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node1
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node2
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node3
+  * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
+    * flowfirst-p3-res (systemd:flowfirst-process3):    Started node1
+    * flowfirst-p3-res (systemd:flowfirst-process3):    Started node2
+    * flowfirst-p3-res (systemd:flowfirst-process3):    Started node3
+  * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
+    * flowfirst-p4-res (systemd:flowfirst-process4):    Started node1
+    * flowfirst-p4-res (systemd:flowfirst-process4):    Started node2
+    * flowfirst-p4-res (systemd:flowfirst-process4):    Started node3
 
 Daemon Status:
   corosync: active/enabled
@@ -2315,27 +2315,27 @@ This is the surgical approach: stop one process instance on one node while the c
 
 ```bash
 # On node2: stop process2 via Pacemaker (recommended — Pacemaker restarts it automatically)
-sudo pcs resource ban flowfirst-p2-clone node2
+sudo pcs resource ban flowfirst-p2-res-clone node2
 
 # Confirm it is no longer running on node2
 sudo crm_mon -1Ar | grep p2
 ```
 ```
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 2 of 3):
-    * flowfirst-p2       (systemd:flowfirst-process2):    Started node1
-    * flowfirst-p2       (systemd:flowfirst-process2):    Started node3
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 2 of 3):
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node1
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node3
     * Stopped: [ node2 ]
 ```
 
 ```bash
 # Re-allow it on node2 and verify it comes back
-sudo pcs resource clear flowfirst-p2-clone node2
-sudo crm_resource -r flowfirst-p2-clone -C
+sudo pcs resource clear flowfirst-p2-res-clone node2
+sudo crm_resource -r flowfirst-p2-res-clone -C
 sleep 5
 sudo crm_mon -1Ar | grep p2
 ```
 ```
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
 ```
 
@@ -2348,10 +2348,10 @@ sudo crm_mon -1Ar | grep p2
 #### 12.1 — Stop all pipeline processes on all nodes
 
 ```bash
-sudo pcs resource disable flowfirst-p1-clone
-sudo pcs resource disable flowfirst-p2-clone
-sudo pcs resource disable flowfirst-p3-clone
-sudo pcs resource disable flowfirst-p4-clone
+sudo pcs resource disable flowfirst-p1-res-clone
+sudo pcs resource disable flowfirst-p2-res-clone
+sudo pcs resource disable flowfirst-p3-res-clone
+sudo pcs resource disable flowfirst-p4-res-clone
 ```
 
 Confirm they are stopped:
@@ -2359,13 +2359,13 @@ Confirm they are stopped:
 sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 ```
 ```
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (disabled, 0 of 3):
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (disabled, 0 of 3):
     * Stopped: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (disabled, 0 of 3):
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (disabled, 0 of 3):
     * Stopped: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (disabled, 0 of 3):
+  * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (disabled, 0 of 3):
     * Stopped: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (disabled, 0 of 3):
+  * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (disabled, 0 of 3):
     * Stopped: [ node1 node2 node3 ]
 ```
 
@@ -2374,21 +2374,21 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 Re-enable in dependency order: persistence first, then reflectors, then examiner, then producer.
 
 ```bash
-sudo pcs resource enable flowfirst-p4-clone
-sudo pcs resource enable flowfirst-p3-clone
-sudo pcs resource enable flowfirst-p2-clone
-sudo pcs resource enable flowfirst-p1-clone
+sudo pcs resource enable flowfirst-p4-res-clone
+sudo pcs resource enable flowfirst-p3-res-clone
+sudo pcs resource enable flowfirst-p2-res-clone
+sudo pcs resource enable flowfirst-p1-res-clone
 sleep 10
 sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 ```
 ```
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+  * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+  * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
 ```
 
@@ -2511,8 +2511,8 @@ sleep 5
 sudo crm_mon -1Ar | grep -E "vip|haproxy"
 ```
 ```
-    * vip        (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy    (systemd:haproxy):               Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy-res (systemd:haproxy):               Started node2
 ```
 
 #### 15.2 — Confirm HAProxy stats endpoint responds on the new node
@@ -2586,7 +2586,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 sudo crm_mon -1Ar | grep "Clone Set"
 ```
 ```
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 2 of 3):
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 2 of 3):
     * Started: [ node1 node2 ]
     * Stopped: [ node3 ]
 ```
@@ -2608,13 +2608,13 @@ sudo crm_mon -1Ar | grep "Online:"
 sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 ```
 ```
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+  * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+  * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
 ```
 
@@ -2646,10 +2646,10 @@ This is the highest-impact single-node reboot: the Virtual IP, HAProxy, and all 
 #### 17.1 — Identify the current VIP holder
 
 ```bash
-sudo crm_resource --resource vip --locate
+sudo crm_resource --resource flowfirst-vip --locate
 ```
 ```
-resource vip is running on: node1
+resource flowfirst-vip is running on: node1
 ```
 
 #### 17.2 — Gracefully evacuate node1 before rebooting (recommended)
@@ -2664,8 +2664,8 @@ sudo crm_mon -1Ar | grep -E "vip|haproxy|Online"
   * Online: [ node1 node2 node3 ]
   * Standby: [ node1 ]
   ...
-    * vip        (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy    (systemd:haproxy):               Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy-res (systemd:haproxy):               Started node2
 ```
 
 ```bash
@@ -2694,9 +2694,9 @@ sudo crm_mon -1Ar
   * Online: [ node1 node2 node3 ]
 
   * Resource Group: vip-haproxy-group:
-    * vip        (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy    (systemd:haproxy):               Started node2
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
+    * haproxy-res (systemd:haproxy):               Started node2
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
   ...
 ```
@@ -2766,15 +2766,15 @@ sudo crm_mon -1Ar
   * Online: [ node1 node2 node3 ]
 
   * Resource Group: vip-haproxy-group:
-    * vip     (ocf::heartbeat:IPaddr2):   Started node2
-    * haproxy (systemd:haproxy):          Started node2
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):   Started node2
+    * haproxy-res (systemd:haproxy):          Started node2
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+  * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+  * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
 ```
 
@@ -2795,12 +2795,21 @@ A complete power-cycle or simultaneous OS reboot causes the Galera cluster to lo
 
 > ⚠️ **Warning:** Do not run `systemctl start mariadb` on all nodes simultaneously after a cold start — this will result in a split-brain condition. Bootstrap exactly one node first.
 
-#### 19.1 — Identify the most up-to-date Galera node before rebooting
+#### 19.1 — Record the Galera position before rebooting
+
+While MariaDB is running, `grastate.dat` shows `seqno: -1` and `safe_to_bootstrap: 0`; Galera writes the real values only when the node **shuts down**. So before the reboot, record the live position instead:
 
 ```bash
-# On each node before the reboot, note the seqno:
-sudo cat /var/lib/mysql/grastate.dat
+# On each node before the reboot
+sudo mysql -u root -p -e "SHOW STATUS WHERE Variable_name IN ('wsrep_last_committed','wsrep_local_state_uuid');"
 ```
+```
+wsrep_last_committed   2847     ← highest value = most up-to-date node
+wsrep_local_state_uuid xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+After the reboot (19.2) `grastate.dat` holds the saved values and decides the **bootstrap node**:
+
 ```
 # GALERA saved state
 version: 2.1
@@ -2809,13 +2818,22 @@ seqno:   2847          ← highest seqno = most up-to-date node
 safe_to_bootstrap: 1   ← Galera sets this on the last node to leave the cluster
 ```
 
-The node with `safe_to_bootstrap: 1` (or the highest `seqno`) is the **bootstrap node**.
+The node with `safe_to_bootstrap: 1` (or the highest `seqno`) is the **bootstrap node**. With a simultaneous reboot all three nodes may show `safe_to_bootstrap: 0`; in that case pick the highest `seqno`, and set `safe_to_bootstrap: 1` in that node's `grastate.dat` before 19.3.
 
 #### 19.2 — Reboot all three nodes simultaneously
 
 ```bash
 # On each node (or via out-of-band IPMI/iDRAC):
 sudo reboot
+```
+
+After the nodes are back, MariaDB may already be trying to start: the setup tells node2 and node3 to `systemctl enable --now mariadb`, and with no bootstrapped primary it cannot join anything. Check each node, stop it if needed, and read the saved state:
+
+```bash
+# On each node
+systemctl is-active mariadb          # 'activating' or 'failed' is expected without a primary
+sudo systemctl stop mariadb || true
+sudo cat /var/lib/mysql/grastate.dat
 ```
 
 #### 19.3 — Bootstrap the primary Galera node (run on bootstrap node only)
@@ -2889,24 +2907,24 @@ sudo crm_mon -1Ar
   * Online: [ node1 node2 node3 ]
 
   * Resource Group: vip-haproxy-group:
-    * vip     (ocf::heartbeat:IPaddr2):   Started node1
-    * haproxy (systemd:haproxy):          Started node1
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):   Started node1
+    * haproxy-res (systemd:haproxy):          Started node1
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+  * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+  * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
 ```
 
 If any resources did not auto-start:
 ```bash
-sudo pcs resource enable flowfirst-p4-clone
-sudo pcs resource enable flowfirst-p3-clone
-sudo pcs resource enable flowfirst-p2-clone
-sudo pcs resource enable flowfirst-p1-clone
+sudo pcs resource enable flowfirst-p4-res-clone
+sudo pcs resource enable flowfirst-p3-res-clone
+sudo pcs resource enable flowfirst-p2-res-clone
+sudo pcs resource enable flowfirst-p1-res-clone
 sudo crm_resource -C
 ```
 
@@ -2921,7 +2939,7 @@ sleep 5   # allow messages to traverse the pipeline
 
 # Check the last 4 rows in the database (from any node via VIP)
 mysql -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -h ${FLOWFIRST_VIP} ${MARIADB_DB} \
-  -e "SELECT id, flow_type, source_process, JSON_PRETTY(history_trail) \
+  -e "SELECT id, flow_id, item_id, JSON_PRETTY(history_trail) \
       FROM processed_messages ORDER BY id DESC LIMIT 4\G"
 ```
 
@@ -2932,12 +2950,18 @@ sudo rabbitmqctl list_queues name messages consumers
 ```
 Listing queues for vhost / ...
 name                     messages  consumers
-flow1_queue              0         3
-flow1_reflected_queue    0         3
-flow2_queue              0         3
-flow2_examined_queue     0         3
-flow2_reflected_queue    0         3
+flow1_p1_to_p2           0         1
+flow1_p2_to_p3           0         1
+flow1_p3_to_p4           0         1
+flow2_p1_to_p2           0         1
+flow2_p2_to_p3           0         1
+flow2_p3_reflected       0         1
+flow3_p1_to_p5           0         1
+flow3_p5_to_p2           0         1
+flow3_p2_to_p4           0         1
 ```
+
+> Each queue has exactly **one** consumer: only the ZooKeeper-elected leader of each process (and Process 5 on node4) consumes, so `consumers` is `1`, not 3. A `0` means no leader is consuming that queue.
 
 ---
 
@@ -2977,7 +3001,7 @@ This simulates a flaky inter-node network link: high latency and packet loss tha
 # On node2 — identify the cluster-facing interface
 ip route get ${NODE1_IP} | awk '{print $5; exit}'
 # Example output: eth0
-IFACE=eth0
+IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 
 # Add netem qdisc: 300ms delay ± 50ms jitter, 10% packet loss
 sudo tc qdisc add dev ${IFACE} root netem \
@@ -3033,7 +3057,7 @@ If the loss is severe enough to cross the token timeout repeatedly, node2 may be
   * Online: [ node1 node3 ]
   * OFFLINE: [ node2 ]
 
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 2 of 3):
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 2 of 3):
     * Started: [ node1 node3 ]
     * Stopped: [ node2 ]
 ```
@@ -3118,7 +3142,7 @@ sudo crm_mon -1Ar | grep "Online:"
 
 ```bash
 # On node3
-IFACE=eth0
+IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 sudo tc qdisc add dev ${IFACE} root tbf \
     rate 1mbit burst 32kbit latency 400ms
 
@@ -3150,8 +3174,8 @@ sudo tc qdisc change dev ${IFACE} root netem corrupt 2%
 sudo rabbitmqctl list_queues name messages | grep -v "^Listing"
 ```
 ```
-flow1_queue              12     ← messages backing up — node3 consumers struggling
-flow1_reflected_queue    8
+flow1_p1_to_p2           12     ← messages backing up — the Process 2 leader (if on node3) is struggling
+flow1_p2_to_p3           8
 ```
 
 #### 21.4 — Cleanup
@@ -3232,9 +3256,9 @@ Cluster Summary:
   * OFFLINE: [ node3 ]           ← node3 lost quorum as seen from node1+node2 partition
 
   * Resource Group: vip-haproxy-group:
-    * vip     (ocf::heartbeat:IPaddr2):   Started node1
-    * haproxy (systemd:haproxy):          Started node1
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 2 of 3):
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):   Started node1
+    * haproxy-res (systemd:haproxy):          Started node1
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 2 of 3):
     * Started: [ node1 node2 ]
     * Stopped: [ node3 ]
 ```
@@ -3341,13 +3365,13 @@ sudo crm_resource -C
 sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 ```
 ```
-  * Clone Set: flowfirst-p1-clone [flowfirst-p1] (active, 3 of 3):
+  * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p2-clone [flowfirst-p2] (active, 3 of 3):
+  * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p3-clone [flowfirst-p3] (active, 3 of 3):
+  * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
-  * Clone Set: flowfirst-p4-clone [flowfirst-p4] (active, 3 of 3):
+  * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
     * Started: [ node1 node2 node3 ]
 ```
 
@@ -3494,8 +3518,8 @@ Galera routes writes through node2 as an intermediary — degraded but functiona
 ```bash
 # Time a write through the HAProxy VIP
 time mysql -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -h ${FLOWFIRST_VIP} ${MARIADB_DB} \
-  -e "INSERT INTO processed_messages (flow_type,source_process,payload,history_trail)
-      VALUES ('test','glitch_test','{}','[]');"
+  -e "INSERT INTO processed_messages (message_id,flow_id,item_id,initial_data,history_trail,raw_payload)
+      VALUES (UUID(),0,0,'glitch_test','[]','{}');"
 ```
 ```
 real    0m0.847s     ← normally ~10ms; elevated due to Galera flow control
@@ -3539,14 +3563,18 @@ sudo iptables -I OUTPUT -p tcp --sport 5672 -j DROP
 
 The pipeline processes use multi-host `ConnectionParameters`. Within `pika`'s heartbeat interval (default 60 s), or immediately on the next connection attempt, they will fail over to `node1` or `node3`.
 
-Check the process logs on any node:
+Check the process logs on the node whose Process 2 was connected to node2 (the DROP rule stalls an established connection, so expect this after up to two missed heartbeats, about 2 minutes):
 ```bash
-sudo journalctl -u flowfirst-process2 -n 20 --no-pager | grep -E "connect|reconnect|error"
+sudo journalctl -u flowfirst-process2 --since "5 minutes ago" --no-pager | grep -E "raised|Restarting|not ready|RabbitMQ connected|TCP Connection attempt failed"
 ```
 ```
-process2: Connection to 192.168.1.102:5672 failed, trying next host
-process2: Connected to 192.168.1.101:5672
+ERROR [gt] Greenthread 'p2_flow1_consumer' raised: Stream connection lost: ...
+INFO [gt] Restarting 'p2_flow1_consumer' in 2s...
+INFO [gt] [p2-flow1] RabbitMQ connected at 192.168.1.101:5672
 ```
+The consumer greenthread restarts itself and `config.get_connection()` offers the broker list in order (`NODE1_IP`, `NODE2_IP`, `NODE3_IP`), so it reconnects to node1 first; the `RabbitMQ connected at` line names the broker it chose. `[gt] [p2-flow1] RabbitMQ not ready (attempt N/20)` appears only when **no** broker answered, and a `pika` line `TCP Connection attempt failed: ... dest=(... '<node2-ip>', 5672)` only when a broker was tried and unreachable (for example when node1 is down).
+
+> These `[gt]` / `[zk]` lines come from Python `logging`, which `gt.configure_logging()` sends to the journal at `LOG_LEVEL` (default `INFO`). `pika` and `kazoo` are held at WARNING. On a node still running units started before that change, only `print()` lines appear; restart the processes. You can also confirm the new broker with `sudo rabbitmqctl list_connections name peer_host | grep <process-2-node-ip>`.
 
 #### 25.3 — Verify RabbitMQ cluster view
 
@@ -3566,9 +3594,9 @@ Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
 sudo rabbitmqctl list_queues name messages consumers
 ```
 ```
-flow1_queue              0    2     ← 2 consumers (node1 + node3; node2 excluded)
-flow2_queue              0    2
-flow2_examined_queue     0    2
+flow1_p1_to_p2           0    1     ← still 1 consumer (the Process 2 leader, now on node1 or node3 if it was on node2)
+flow2_p1_to_p2           0    1
+flow2_p2_to_p3           0    1
 ```
 
 #### 25.5 — Cleanup
@@ -3578,14 +3606,14 @@ flow2_examined_queue     0    2
 sudo iptables -D INPUT  -p tcp --dport 5672 -j DROP
 sudo iptables -D OUTPUT -p tcp --sport 5672 -j DROP
 
-# Verify 3 consumers restored on all queues
+# Verify every queue still has its single consumer (the leader may stay on its new node)
 sleep 10
 sudo rabbitmqctl list_queues name messages consumers
 ```
 ```
-flow1_queue              0    3
-flow2_queue              0    3
-flow2_examined_queue     0    3
+flow1_p1_to_p2           0    1
+flow2_p1_to_p2           0    1
+flow2_p2_to_p3           0    1
 ```
 
 ---
@@ -3600,7 +3628,7 @@ Simulate a network interface that glitches every 30 seconds — typical of a bad
 
 ```bash
 # On node3 — toggle 5% loss on/off every 30 seconds for 5 cycles
-IFACE=eth0
+IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 for i in $(seq 1 5); do
     echo "[$(date)] Injecting packet loss — cycle ${i}"
     sudo tc qdisc add dev ${IFACE} root netem loss 15% delay 200ms 2>/dev/null || \
@@ -3633,21 +3661,21 @@ Expected oscillation:
 #### 26.3 — Check Pacemaker failure counters building up
 
 ```bash
-sudo pcs resource failcount show flowfirst-p1-clone
+sudo pcs resource failcount show flowfirst-p1-res-clone
 ```
 ```
 Resource Fail Counts:
-  flowfirst-p1: node3 = 3
+  flowfirst-p1-res: node3 = 3
 ```
 
-Once the failcount hits the `migration-threshold` (default 1000), Pacemaker will permanently ban the resource from that node until the count is cleared:
+Once the failcount hits the `migration-threshold`, Pacemaker bans the resource from that node until the count is cleared. The setup scripts never set `migration-threshold`, so it stays at Pacemaker's default of `INFINITY` (shown as `1000000`) and a ban only happens if you set a finite value (`sudo pcs resource meta flowfirst-p1-res-clone migration-threshold=3`). Failures are still counted and visible above:
 
 ```bash
 # Reset failure counters after flapping stops
-sudo crm_resource -r flowfirst-p1-clone -C
-sudo crm_resource -r flowfirst-p2-clone -C
-sudo crm_resource -r flowfirst-p3-clone -C
-sudo crm_resource -r flowfirst-p4-clone -C
+sudo crm_resource -r flowfirst-p1-res-clone -C
+sudo crm_resource -r flowfirst-p2-res-clone -C
+sudo crm_resource -r flowfirst-p3-res-clone -C
+sudo crm_resource -r flowfirst-p4-res-clone -C
 ```
 
 #### 26.4 — Cleanup
@@ -3719,7 +3747,7 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 | jq .
 sleep 5
 mysql -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -h ${FLOWFIRST_VIP} ${MARIADB_DB} \
-  -e "SELECT id, flow_type, source_process FROM processed_messages ORDER BY id DESC LIMIT 4;"
+  -e "SELECT id, flow_id, item_id FROM processed_messages ORDER BY id DESC LIMIT 4;"
 ```
 
 ---
@@ -3776,7 +3804,7 @@ eth0 ${NODE3_IP}/24    # node3
 
 Set a shell variable for all subsequent commands:
 ```bash
-IFACE=eth0
+IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 ```
 
 #### 27.2 — Start background captures on all three nodes simultaneously
@@ -3785,7 +3813,7 @@ Open **three SSH sessions** (one per node) and run on each:
 
 ```bash
 # On node1 — capture all cluster-relevant ports, write to timestamped pcap
-IFACE=eth0
+IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 PCAP_DIR=/var/log/flowfirst/pcap
 sudo mkdir -p ${PCAP_DIR}
 sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node1_$(date +%Y%m%d_%H%M%S).pcap \
@@ -3797,7 +3825,7 @@ echo "tcpdump PID: ${TCPDUMP_PID}"
 
 ```bash
 # On node2
-IFACE=eth0
+IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 PCAP_DIR=/var/log/flowfirst/pcap
 sudo mkdir -p ${PCAP_DIR}
 sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node2_$(date +%Y%m%d_%H%M%S).pcap \
@@ -3808,7 +3836,7 @@ TCPDUMP_PID=$!
 
 ```bash
 # On node3
-IFACE=eth0
+IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 PCAP_DIR=/var/log/flowfirst/pcap
 sudo mkdir -p ${PCAP_DIR}
 sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node3_$(date +%Y%m%d_%H%M%S).pcap \
@@ -3932,13 +3960,13 @@ sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep "Flags \[F" | head -10
 
 ### Scenario 29: REST API / HAProxy Round-Trip Verification
 
-> **Runs on:** the **current VIP holder** (`sudo crm_resource --resource vip --locate`), since only it carries VIP traffic.
+> **Runs on:** the **current VIP holder** (`sudo crm_resource --resource flowfirst-vip --locate`), since only it carries VIP traffic.
 
 #### 29.1 — Capture REST API traffic while sending requests
 
 ```bash
 # On the node currently holding the VIP (e.g., node1)
-IFACE=eth0
+IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 sudo tcpdump -i ${IFACE} -s 0 -w /tmp/rest_api.pcap \
     'tcp port 8080' &
 TCPDUMP_PID=$!
@@ -3990,13 +4018,13 @@ node3
 
 Confirm in the pcap that the destination backend IPs rotate:
 ```bash
-sudo tcpdump -r /tmp/rest_api.pcap -nn 'dst port 8080' \
+sudo tcpdump -r /tmp/rest_api.pcap -nn 'dst port 8082' \
     | awk '{print $5}' | sort | uniq -c | sort -rn
 ```
 ```
-   3 192.168.1.101.8080:
-   3 192.168.1.102.8080:
-   3 192.168.1.103.8080:
+   3 192.168.1.101.8082:
+   3 192.168.1.102.8082:
+   3 192.168.1.103.8082:
 ```
 
 > ✅ Even distribution confirms HAProxy round-robin is functioning.
@@ -4071,7 +4099,7 @@ sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
 #### 30.4 — Measure Corosync token inter-arrival time (heartbeat interval)
 
 ```bash
-sudo tcpdump -r /tmp/corosync.pcap -nn -tt 'udp port 5405 and src ${NODE1_IP}' \
+sudo tcpdump -r /tmp/corosync.pcap -nn -tt "udp port 5405 and src ${NODE1_IP}" \
     | awk '{print $1}' \
     | awk 'NR>1{printf "%.3fms\n", ($1-prev)*1000} {prev=$1}' \
     | sort -n | awk 'BEGIN{n=0;s=0} {n++;s+=$1} END{printf "avg=%.1fms  n=%d\n",s/n,n}'
@@ -4091,9 +4119,9 @@ avg=999.8ms  n=147     ← token circulates approximately every 1 second (Corosy
 #### 31.1 — Capture Galera replication traffic during a DB write
 
 ```bash
-# On node1 — capture Galera ports
+# On node1 — capture Galera ports, plus MariaDB client port 3306 (used by 31.4)
 sudo tcpdump -i ${IFACE} -s 0 -w /tmp/galera.pcap \
-    'tcp port 4567 or tcp port 4568 or tcp port 4444' &
+    'tcp port 4567 or tcp port 4568 or tcp port 4444 or tcp port 3306' &
 TCPDUMP_PID=$!
 
 # Trigger a write through the pipeline (process4 will INSERT into MariaDB)
@@ -4140,12 +4168,15 @@ sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 4567 and not tcp[tcpflags] & tcp-
 #### 31.4 — Correlate Galera replication with MariaDB query volume
 
 ```bash
-# Count MariaDB client queries captured alongside Galera replication
+# Count MariaDB client segments captured alongside Galera replication
+# (port 3306 is included in the 31.1 capture filter; without it this count is 0)
 sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 3306' | wc -l
 ```
 ```
 24     ← 24 TCP segments on port 3306 (query + result + EOF packets)
 ```
+
+> The number depends on which node Process 4 writes to. Only traffic that crosses node1's interface is captured, so a leader on node2 or node3 that writes to its own local MariaDB shows `0` here; the Galera replication packets in 31.2–31.3 still appear.
 
 #### 31.5 — Examine MariaDB protocol greeting and query round-trip
 
@@ -4253,7 +4284,7 @@ avg RTT: 201.4ms (n=4)     ← 200ms injected delay is clearly visible
 ```bash
 # Corosync token timing during glitch — compare with Scenario 30.4 baseline
 echo "=== Glitch Corosync token inter-arrival ==="
-sudo tcpdump -r /tmp/glitch.pcap -nn -tt 'udp port 5405 and src ${NODE2_IP}' \
+sudo tcpdump -r /tmp/glitch.pcap -nn -tt "udp port 5405 and src ${NODE2_IP}" \
     | awk '{print $1}' \
     | awk 'NR>1{printf "%.1fms\n",($1-prev)*1000}{prev=$1}' \
     | sort -n | tail -5
@@ -4302,7 +4333,7 @@ This scenario captures a single Flow 1 message from HTTP POST all the way to Mar
 ```bash
 # Run this on node1, node2, node3 in parallel (3 SSH sessions)
 NODE=$(hostname)
-IFACE=eth0
+IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 PCAP_DIR=/var/log/flowfirst/pcap
 sudo mkdir -p ${PCAP_DIR}
 sudo tcpdump -i ${IFACE} -s 0 \
@@ -4890,10 +4921,11 @@ ssh ${NODE2_IP} "sudo systemctl stop flowfirst-process2"
 #### D. Watch the ZK election on node1 or node3
 
 ```bash
-sudo journalctl -u flowfirst-process2 -f --no-pager | grep "LEADER\|election\|Reconnect"
-# Expected within ~10 seconds:
-# [Process 2] *** NODE node1 IS NOW LEADER ***
-# [Process 2] LEADER — consuming 'flow1_p1_to_p2' and 'flow2_p1_to_p2'
+sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "LEADER|election|flow[12]-consumer"
+# Expected within ~10 seconds (the first line is the INFO log from zk.py):
+# INFO [zk] [process2] *** NODE node1 IS NOW LEADER ***
+# [P2][gt] flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
+# [P2][gt] flow2-consumer greenthread started — consuming 'flow2_p1_to_p2'
 ```
 
 #### E. Verify all 5 messages were processed (no loss, no duplicates)
@@ -4951,8 +4983,9 @@ sudo rabbitmqadmin -u "${RABBITMQ_USER}" -p "${RABBITMQ_PASSWORD}" publish \
 
 ```bash
 sudo journalctl -u flowfirst-process4 -f --no-pager | grep -i "dedup\|duplicate"
-# Expected:
-# [Process 4] [Flow 1] DUPLICATE detected via ZK dedup — skipping insert for <message_id>
+# Expected (one pair of lines per redelivered message):
+# WARNING [zk] Dedup: duplicate detected for <message_id> — skipping insert.
+# [P4][gt] [Flow 1] DUPLICATE via ZK dedup — skipping insert for <message_id>
 ```
 
 #### D. Verify no duplicate row was inserted
@@ -4979,7 +5012,7 @@ mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_D
 
 ### Scenario 38: ZooKeeper Service Registry — Observe Live Process Registration
 
-> **Runs on:** `zkCli.sh` on any of node1–node3; `ssh` steps from **node1 or node3**; `curl` from any machine that can reach the VIP (node1–node4 or a workstation).
+> **Runs on:** `zkCli.sh` on any of node1–node3; `pcs` steps from **any cluster node**; `curl` from any machine that can reach the VIP (node1–node4 or a workstation).
 
 Verify the ephemeral service registry updates in real time as processes start and stop.
 
@@ -5002,9 +5035,11 @@ EOF
 
 #### B. Stop Process 3 on node2 and observe the ephemeral znode disappear
 
+Process 3 is managed by Pacemaker, which would restart a unit stopped with `systemctl stop` within seconds (the znode would barely disappear). Ban the clone from node2 instead; Pacemaker then stops it there and does not restart it:
+
 ```bash
-# Stop process3 on node2
-ssh ${NODE2_IP} "sudo systemctl stop flowfirst-process3"
+# Stop process3 on node2 (kept down until the ban is cleared in C)
+sudo pcs resource ban flowfirst-p3-res-clone node2
 
 # Watch the registry — node2 should disappear within the ZK session timeout (~10s)
 sleep 12
@@ -5020,8 +5055,8 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq '.zk_registered_workers.process
 #### C. Restart Process 3 on node2 and watch it re-register
 
 ```bash
-ssh ${NODE2_IP} "sudo systemctl start flowfirst-process3"
-sleep 3
+sudo pcs resource clear flowfirst-p3-res-clone node2
+sleep 5
 
 /opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
   ls /flowfirst/registry/process3
@@ -5157,7 +5192,7 @@ mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_D
 sudo journalctl -u flowfirst-process2 --since "2 minutes ago" --no-pager \
   | grep "Throughput Report"
 # Expected lines like:
-# [gt][process2] ── Throughput Report ──
+# INFO [gt][process2] ── Throughput Report ──
 #   flow1_processed: total=20  +20 in last 60s
 #   flow2_processed: total=20  +20 in last 60s
 #   active_greenthreads: ['p2_flow1_consumer', 'p2_flow2_consumer', ...]
@@ -5234,8 +5269,10 @@ after 2 seconds without operator intervention or process restart.
 #### A. Identify the RabbitMQ node that Process 2 on node1 is connected to
 
 ```bash
-sudo journalctl -u flowfirst-process2 -n 20 --no-pager | grep "Connected to RabbitMQ"
-# Example: [gt] [p2-flow1] RabbitMQ connected at ${NODE2_IP}:5672
+sudo journalctl -u flowfirst-process2 --since "1 hour ago" --no-pager | grep "RabbitMQ connected at" | tail -3
+# Example: INFO [gt] [p2-flow1] RabbitMQ connected at 192.168.1.102:5672
+# (config.get_connection() tries NODE1_IP first, so this is normally node1; it names node2 only
+#  if node1's broker was unreachable when the greenthread connected.)
 ```
 
 #### B. Force-drop the RabbitMQ connection on that node
@@ -5250,11 +5287,12 @@ ssh ${NODE2_IP} "sudo rabbitmqctl close_all_connections 'greenthread restart tes
 ```bash
 sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "restart|Reconnect|consumer greenthread|not ready"
 # Expected sequence (within ~10 seconds):
-# [gt] Greenthread 'p2_flow1_consumer' raised: <connection error>
-# [gt] Restarting 'p2_flow1_consumer' in 2s...
-# [gt] [p2-flow1] RabbitMQ not ready (attempt 1/20): ... — retrying in 5s...
-# [gt] [p2-flow1] RabbitMQ connected at ${NODE2_IP}:5672
+# ERROR [gt] Greenthread 'p2_flow1_consumer' raised: <connection error>
+# INFO [gt] Restarting 'p2_flow1_consumer' in 2s...
+# INFO [gt] [p2-flow1] RabbitMQ connected at 192.168.1.101:5672
 # [P2][gt] flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
+# (a WARNING "RabbitMQ not ready (attempt 1/20): ... — retrying in 5s..." appears before the
+#  'connected' line only if no broker answered the first attempt)
 ```
 
 #### D. Confirm no messages were lost during the restart window
@@ -5338,7 +5376,7 @@ sudo journalctl -u flowfirst-process2 --since "1 minute ago" --no-pager \
   | grep -A 10 "Throughput Report"
 
 # Expected output on the leader node:
-# [gt][process2] ── Throughput Report ──
+# INFO [gt][process2] ── Throughput Report ──
 #   flow1_processed: total=25  +25 in last 15s
 #   flow2_processed: total=25  +25 in last 15s
 #   active_greenthreads: ['p2_flow1_consumer', 'p2_flow2_consumer', ...]
@@ -5733,7 +5771,7 @@ Client-side (pipeline processes, via kazoo):
 sudo journalctl -u flowfirst-process2 --since "30 min ago" --no-pager | grep -E -i "zk|zookeeper|kazoo|connection dropped|expired|leader"
 ```
 
-> **Note:** the processes do not configure Python `logging`, so only WARNING-and-above messages from `zk.py` and kazoo reach the journal (for example `Config ... unreadable`, `Dedup: duplicate detected`, `Connection dropped`). INFO lines such as `*** NODE ... IS NOW LEADER ***` and `Registered ...` do **not** appear. Use `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health` to see leaders and registrations, along with the processes' own `print` lines (`[P2][gt] ZK ready ...`, `ZK election failed ...`).
+> **Note:** `zk.py` and kazoo log through Python `logging`, which `gt.configure_logging()` sends to the journal at `LOG_LEVEL` (default `INFO`; `kazoo` is held at WARNING). So `INFO [zk] ... *** NODE ... IS NOW LEADER ***` and `Registered ...` lines do appear, alongside warnings such as `Config ... unreadable`, `Dedup: duplicate detected` and kazoo's `Connection dropped`. `DEBUG` lines (for example per-message dedup first-seen) need `LOG_LEVEL=DEBUG` in `.env` and a process restart. The processes' own `print` lines (`[P2][gt] ZK ready ...`, `ZK election failed ...`) are also there, and `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health` shows leaders and registrations.
 
 #### B. Message phrasebook — what each line means
 
@@ -6162,7 +6200,7 @@ The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account 
 | `Stored in Swift object storage: flowN/<message_id>.json` | The object write succeeded; the name is `flow<flow>/<message_id>.json` | 2, 44 |
 | `Swift store note: Swift storage is disabled` | `SWIFT_ENABLED` is false on this node. Printed for **every** message; nothing is stored | install |
 | `Swift store note: <error text>` | The write failed (see the error rows below). The message was still acknowledged and the MariaDB row was written | any Swift outage |
-| `Failed to put object '<name>' in container '<c>': <error>` | The same failure, logged by `swift_storage.py` with its logger (a WARNING-or-higher line, so it reaches the journal) | any Swift outage |
+| `Failed to put object '<name>' in container '<c>': <error>` | The same failure, logged by `swift_storage.py` with its logger (a WARNING line) | any Swift outage |
 | `Could not ensure container '<c>' exists: <error>` | Container create/check failed, usually auth or connectivity | install |
 | `Auth GET failed: <url> 401 Unauthorized` | Wrong `SWIFT_USER` / `SWIFT_KEY` for that node's `.env` | install |
 | `Auth GET failed: <url> 404 Not Found` | `SWIFT_AUTH_URL` points at something that is not a Swift auth endpoint (for example HAProxy to Process 1; see the note in A) | install |
@@ -6205,7 +6243,7 @@ sudo journalctl -u flowfirst-process4 --since "30 min ago" --no-pager \
 
 Read top to bottom: `Stored in Swift object storage` lines stop → first `Swift store note:` / `Failed to put object` → (fault cleared) → `Stored in Swift object storage` resumes. The messages between the first failure and the first success are the ones **missing from Swift** (see D).
 
-> **Output delay:** the systemd units do not set `PYTHONUNBUFFERED`, and `print()` output to the journal is block-buffered by Python. Lines from `process4.py` can therefore appear in bursts, or only after the buffer fills or the process restarts. If the log looks quiet while messages are flowing, trust MariaDB and the REST API checks in D rather than the journal's timing, or add `Environment=PYTHONUNBUFFERED=1` to the unit files and `systemctl daemon-reload`.
+> **Output delay:** the unit files set `Environment=PYTHONUNBUFFERED=1`, so `print()` output reaches the journal immediately. On a node installed **before** that line was added, the lines from `process4.py` can appear in bursts (Python block-buffers `print()` when stdout is not a terminal). Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes (`sudo pcs resource restart flowfirst-p4-res-clone` for the clones). Check with `systemctl show flowfirst-process4 -p Environment`.
 
 #### D. Reconcile MariaDB and Swift (find objects that were never stored)
 
@@ -6282,11 +6320,17 @@ Use this scenario alongside Scenarios 16–26 (reboots and network faults), and 
 
 | Source | Where to read it | What it holds |
 |---|---|---|
-| systemd journal | `journalctl` | Everything: kernel, systemd, every service's stdout/stderr (including `flowfirst-processN`, MariaDB, RabbitMQ, ZooKeeper, HAProxy, Corosync, Pacemaker) |
+| systemd journal | `journalctl` | Everything: kernel, systemd, every service's stdout/stderr (including `flowfirst-processN`, MariaDB, RabbitMQ, ZooKeeper, HAProxy, Corosync, Pacemaker). For `flowfirst-processN` this is both the `print()` lines (`[P2][gt] ...`) and the Python `logging` lines (`INFO [gt] ...`, `WARNING [zk] ...`), see the note below |
 | `/var/log/messages` | `sudo less /var/log/messages` | rsyslog's copy of the journal's general messages (kernel, systemd, sshd, chronyd, NetworkManager, firewalld, most daemons). Authentication lines go to `/var/log/secure` and cron to `/var/log/cron` instead |
 | `/var/log/audit/audit.log` | `sudo ausearch ...` | SELinux denials (`type=AVC`) and audit events, written by `auditd`, **not** by rsyslog |
 | `dmesg` / `journalctl -k` | `sudo dmesg -T` | Kernel ring buffer: NIC link changes, OOM killer, disk errors, `iptables` LOG targets |
 | Per-service files | See Scenarios 45–50 | `/var/log/mariadb/`, `/var/log/rabbitmq/`, `/var/log/zookeeper/`, `/var/log/pacemaker/`, `/var/log/cluster/` |
+
+**FlowFirst process output in the journal and in `/var/log/messages`.** Each process unit sets `SyslogIdentifier=flowfirst-pN` (`flowfirst-p1` … `flowfirst-p5`; Process 5 runs on node4). A node installed before Process 5's unit had this line tags its lines `python`: re-run `systemd/install_services.sh /opt/flowfirst --remote` and restart the unit, or use `-u flowfirst-process5`. `gt.configure_logging()` sends the `gt`, `zk` and `swift_storage` loggers to stdout, so they travel the same way as the `print()` lines: into the journal, and from there into `/var/log/messages` via rsyslog. Three consequences:
+
+- **Filter by identifier or unit.** `sudo journalctl -t flowfirst-p4 --since "30 min ago"` (or `-u flowfirst-process4`) works on the journal; in `/var/log/messages` grep for `flowfirst-p4\[`.
+- **Severity is not preserved.** journald stores every stdout line as priority `info`, so `journalctl -p warning` does **not** list FlowFirst `WARNING`/`ERROR` lines. Search for the level prefix instead: `journalctl -u flowfirst-process4 --no-pager | grep -E "(WARNING|ERROR) "`. The prefix comes from `LOG_LEVEL` (default `INFO`; set `DEBUG` in `.env` and restart the processes for more, `WARNING` for less).
+- **Multi-line records are split in the text file.** The 60-second `Throughput Report` is one multi-line message. `journalctl` shows it as one entry, while rsyslog writes control characters escaped (`#012` instead of a newline) onto a single long line in `/var/log/messages`. Use `journalctl` for those reports.
 
 `/var/log/messages` and the journal overlap, but they are **not identical**: `/var/log/messages` is a text file that `logrotate` rotates weekly, and the journal can be size-limited or discarded at reboot. When a line is missing from one, check the other.
 
@@ -6318,6 +6362,7 @@ sudo journalctl --list-boots | tail -2          # survives the next reboot
 | `Out of memory: Killed process N (name)`, `oom-kill:`, `invoked oom-killer` | The kernel killed a process for lack of RAM. The victim is named in the line (often `java` for ZooKeeper, `mariadbd`, `beam.smp` for RabbitMQ, or a `python` pipeline process) | heavy load, 40 |
 | `systemd[1]: <unit>.service: Main process exited, code=killed, status=9/KILL` | A unit was SIGKILLed (the OOM killer or `kill -9`); check for the OOM line just above | 38, 42 |
 | `<unit>.service: Failed with result 'exit-code'` / `'timeout'` / `'signal'` | The unit stopped abnormally. `Scheduled restart job, restart counter is at N` follows when `Restart=` applies (the FlowFirst units use `Restart=always`) | 11, 38 |
+| `flowfirst-pN[pid]: ERROR [gt] Greenthread '<name>' raised: ...` followed by `INFO [gt] Restarting '<name>' in 2s...` | A pipeline consumer crashed and restarted itself (Scenario 42). Repeats mean the cause is still there (RabbitMQ, MariaDB or ZooKeeper unreachable). The lines come from the process, not from systemd, so `Failed with result` is **not** logged for them | 22–25, 42 |
 | `<unit>.service: Start request repeated too quickly`, `Failed with result 'start-limit-hit'` | systemd gave up restarting a crashing unit; clear with `sudo systemctl reset-failed <unit>` | 38 |
 | `NetworkManager[...]: <info> device (ens3): state change`, `kernel: ... NIC Link is Down` / `Up` | A NIC link changed (cable, hypervisor, `ip link set down`). VIP moves, Corosync `link is down` and Galera suspicion usually follow within seconds | 16–25 |
 | `kernel: IN=... OUT=... SRC=... DST=... PROTO=... DPT=...` | A packet matched an `iptables ... -j LOG` rule. The `DPT` shows which port. The README's `DROP` rules do **not** log; add a LOG rule before them to see drops (see F) | 22–25 |
@@ -6350,6 +6395,10 @@ sudo journalctl --since "2026-10-12 14:00:00" --until "2026-10-12 14:30:00" -o s
 
 # Kernel only
 sudo journalctl -k --since "30 min ago" --no-pager
+
+# FlowFirst pipeline processes only: warnings and errors by prefix (journald stores them as priority info, so -p cannot filter them)
+sudo journalctl -t flowfirst-p1 -t flowfirst-p2 -t flowfirst-p3 -t flowfirst-p4 -t flowfirst-p5 --since "30 min ago" --no-pager \
+  | grep -E "(WARNING|ERROR|CRITICAL) "
 ```
 
 Read a reboot from the bottom of the old boot (`journalctl -b -1`): clean shutdowns end with `Reached target Shutdown` and `systemd-shutdown`; a crash or power loss ends abruptly with no shutdown lines. On a node you rebooted with `sudo reboot`, expect the clean ending.
@@ -6430,7 +6479,7 @@ EOF
 sudo systemctl restart systemd-journald
 ```
 
-The `RateLimitBurst` line matters for FlowFirst: journald's default is 10000 messages per 30 s per service, so a burst of process output (Scenario 40 or 43 at high volume) can be silently dropped. The drop-in raises it to 100000. A dropped-message notice looks like `Suppressed N messages from flowfirst-process2.service`; if you still see it, set `RateLimitIntervalSec=0` to disable the limit.
+The `RateLimitBurst` line matters for FlowFirst: journald's default is 10000 messages per 30 s per service, so a burst of process output (Scenario 40 or 43 at high volume) can be silently dropped. The drop-in raises it to 100000. A dropped-message notice looks like `Suppressed N messages from flowfirst-process2.service`; if you still see it, set `RateLimitIntervalSec=0` to disable the limit. The processes also log `INFO` lines (greenthread starts and restarts, RabbitMQ and ZooKeeper connects, leader changes), which adds to the volume during reconnect storms; `LOG_LEVEL=WARNING` in `.env` removes them.
 
 ```bash
 # Look for suppressed lines after a load test

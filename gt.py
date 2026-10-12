@@ -60,6 +60,7 @@ Usage pattern (in each processX.py):
 import logging
 import os
 import signal
+import sys
 import time as _stdlib_time
 from collections import defaultdict
 from typing import Callable, Optional
@@ -76,6 +77,35 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _patched = False
+_logging_configured = False
+
+
+def configure_logging():
+    """
+    Send FlowFirst log records (gt, zk, swift_storage) to stdout -> journald.
+
+    No process configures Python logging itself, so without this only WARNING and
+    above would be emitted (via logging's last-resort handler) and every
+    log.info() line in gt.py / zk.py / swift_storage.py would be silently lost.
+    Level comes from LOG_LEVEL (default INFO). Chatty third-party libraries stay
+    at WARNING so their connection chatter does not flood the journal.
+    journald adds its own timestamp, so the format carries only level + message.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    level_name = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+    level = getattr(logging, level_name, None)
+    if not isinstance(level, int):
+        level = logging.INFO
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(level)
+    for noisy in ("pika", "kazoo", "urllib3", "swiftclient"):
+        logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
+    _logging_configured = True
 
 
 def monkey_patch():
@@ -97,6 +127,7 @@ def monkey_patch():
         builtins=False,   # do NOT patch builtins — breaks some stdlib internals
     )
     _patched = True
+    configure_logging()   # after patching, so the handler's lock is cooperative
     log.info("[gt] eventlet monkey-patch applied.")
 
 

@@ -9,11 +9,13 @@ User=flowuser
 Group=flowuser
 WorkingDirectory=/opt/flowfirst
 EnvironmentFile=-/opt/flowfirst/.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/flowfirst/.venv/bin/python /opt/flowfirst/process5.py
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=flowfirst-p5
 LimitNOFILE=65536
 TimeoutStopSec=5s
 KillMode=mixed

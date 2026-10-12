@@ -298,15 +298,15 @@ def check_and_mark_processed(message_id: str) -> bool:
     Returns False if the message was already processed
                   (the caller should skip / ack-without-insert).
 
-    The dedup znode is created as ephemeral so it is automatically removed
-    when the ZooKeeper session ends (process crash/restart). Stale znodes from
-    long-running sessions are reaped periodically by the p4_dedup_reaper
-    greenthread in process4.py using ZK_DEDUP_TTL_MS as the age threshold.
+    The dedup znode is persistent so it survives a Process 4 leader crash and
+    blocks re-insertion of the redelivered message by the new leader. Old
+    znodes are removed by the p4_dedup_reaper greenthread in process4.py once
+    they are older than ZK_DEDUP_TTL_MS (default 5 minutes).
     """
     path = f"{_DEDUP_ROOT}/{message_id}"
     zk = get_client()
     try:
-        zk.create(path, b"1", ephemeral=True, makepath=True)
+        zk.create(path, b"1", makepath=True)
         log.debug("[zk] Dedup: first-seen %s — proceeding with insert.", message_id)
         return True
     except NodeExistsError:

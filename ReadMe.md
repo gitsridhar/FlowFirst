@@ -1245,8 +1245,18 @@ sudo journalctl -u haproxy -n 30 --no-pager
 > Every `${FLOWFIRST_VIP}`, `${NODE1_IP}`, `${NODE2_IP}`, `${NODE3_IP}`,
 > `${MARIADB_USER}`, `${MARIADB_PASSWORD}`, `${MARIADB_DB}` reference below
 > resolves from that single `.env` — **no IP addresses are hardcoded**.
+>
+> **Where to run commands.** Each scenario starts with a **Runs on** line, and a `# On nodeX` comment marks any step that runs somewhere else. General rules:
+> - `pcs`, `crm_mon`, `crm_resource`, `corosync-cfgtool`: any cluster member (node1–node3). They act cluster-wide, so `pcs resource ban X node2` need not run on node2.
+> - `sudo mysql -u root -p` (no `-h`), `rabbitmqctl`, `rabbitmqadmin`, `zkCli.sh -server 127.0.0.1:2181`: node1–node3 only, and they talk to the **local** service, which must be running.
+> - `journalctl -u flowfirst-processN`: local logs only. Only the ZooKeeper-elected leader does the work, so read logs on the leader node (`curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health`).
+> - `tc`, `iptables`, `tcpdump`: affect or capture only the node they run on.
+> - `curl http://${FLOWFIRST_VIP}…` and `mysql -h ${FLOWFIRST_VIP} …`: any machine that can reach the VIP (node1–node4 or a workstation; `mysql` needs a mariadb client).
+> - node4 runs only `flowfirst-process5`, with no local MariaDB, RabbitMQ, ZooKeeper or Pacemaker.
 
 ### Scenario 1: Invoke REST API via Virtual IP & Verify Round-Robin Load Balancing
+
+> **Runs on:** any machine that can reach the VIP (node1–node4 or a workstation).
 
 Send requests directly to the **Virtual IP (`${FLOWFIRST_VIP}:${API_PORT:-8080}`)**:
 
@@ -1296,6 +1306,8 @@ node3
 ---
 
 ### Scenario 2: End-to-End Flow Execution & Database Content Examination
+
+> **Runs on:** `scripts/test_flows_and_inspect_db.sh` and the `mariadb` commands: node1, node2 or node3 (a mariadb client is needed). `curl` commands: any machine that can reach the VIP (node1–node4 or a workstation).
 
 This scenario executes Flow 1 and Flow 2 through the REST API, follows the messages through RabbitMQ and intermediate modifications, and inspects the resulting table rows and JSON audit trails stored in MariaDB Galera.
 
@@ -1443,6 +1455,8 @@ ORDER BY id DESC LIMIT 1\G
 
 ### Scenario 3: Synchronous Multi-Master Galera Replication Verification
 
+> **Runs on:** node1, node2 or node3 (each query targets a specific node IP with `-h`).
+
 Query **Node 1**, **Node 2**, and **Node 3** directly to confirm that writes from any node are immediately synchronized across all nodes:
 
 ```bash
@@ -1460,6 +1474,8 @@ mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} 
 ---
 
 ### Scenario 4: Galera Node Outage & Automatic Quorum Resynchronization
+
+> **Runs on:** stop/start steps on **node3**; `check_galera_status.sh` and local `mysql` checks on **node1 or node2** (node3's MariaDB is down); `curl` from any machine that can reach the VIP (node1–node4 or a workstation).
 
 1. **Simulate failure of Galera Node 3:**
    ```bash
@@ -1483,6 +1499,8 @@ mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} 
 ---
 
 ### Scenario 5: Galera IST — Incremental State Transfer
+
+> **Runs on:** stop/start, `grastate.dat` and IST log checks on **node3** (the joiner); donor `wsrep_last_committed` checks on **node1 or node2**; the state-watch loop on **node1**.
 
 #### What IST is and when it is used
 
@@ -1601,6 +1619,8 @@ sudo grep -i "IST\|incremental" /var/log/mariadb/mariadb.log | tail -5
 ---
 
 ### Scenario 6: Galera SST — State Snapshot Transfer
+
+> **Runs on:** `galera.cnf` edits on **each of node1–node3** (rolling restart node3 → node2 → node1); `grastate.dat` edit, start and SST log checks on **node3**; donor checks (`wsrep_local_state_comment`, `ps … rsync`) on the donor, normally **node1**.
 
 #### What SST is and when it is used
 
@@ -1730,6 +1750,8 @@ sudo watch -n2 "ps aux | grep mariadb-backup | grep -v grep"
 ---
 
 ### Scenario 7: `gcache.size` Impact on IST vs SST
+
+> **Runs on:** config changes and restarts on **each of node1–node3** in turn (node3 → node2 → node1); the 7.3 IST/SST test on **node3**; `SET GLOBAL` in 7.4 on **all three nodes**, donor check on **node1**; 7.5 queries on any cluster member (node1, node2 or node3).
 
 #### How gcache.size determines IST or SST
 
@@ -1924,6 +1946,8 @@ SHOW STATUS WHERE Variable_name IN (
 
 ### Scenario 8: Node Failure & Virtual IP (VIP) Failover
 
+> **Runs on:** any cluster member (node1, node2 or node3) — preferably **node2 or node3**, since node1 is put into standby.
+
 1. **Put Node 1 into standby mode:**
    ```bash
    sudo pcs node standby node1
@@ -1946,6 +1970,8 @@ SHOW STATUS WHERE Variable_name IN (
 
 ### Scenario 9: HAProxy Real-Time Statistics Dashboard
 
+> **Runs on:** a browser or `curl` on any machine that can reach the VIP (node1–node4 or a workstation).
+
 Access the live stats dashboard to view real-time frontend and backend health metrics for both the REST API and MariaDB Galera cluster:
 - **URL:** `http://${FLOWFIRST_VIP}:${HAPROXY_STATS_PORT:-9000}` (from `.env`)
 - **Username:** `${HAPROXY_STATS_USER}` (from `.env`, default: `admin`)
@@ -1954,6 +1980,8 @@ Access the live stats dashboard to view real-time frontend and backend health me
 ---
 
 ### Scenario 10: Pacemaker Cluster Validation with `crm_mon` & `crm_resource`
+
+> **Runs on:** any cluster member (node1, node2 or node3) (`pcs`/`crm_*` commands are cluster-wide). In 10.7 the underlying fault is repaired on the affected node (node3); clean-up can run from any member.
 
 Use these commands on **any cluster node** to confirm that all Pacemaker resources are running, correctly distributed, and healthy.
 
@@ -2185,6 +2213,8 @@ These scenarios cover stopping and starting individual pipeline services, groups
 
 ### Scenario 11: Stop & Start a Single Pipeline Process on One Node
 
+> **Runs on:** any cluster member (node1, node2 or node3) (`pcs resource ban/clear` acts cluster-wide; it does not need to run on the target node). `journalctl` shows only the local node's logs.
+
 This is the surgical approach: stop one process instance on one node while the clones on the other two nodes continue to serve traffic.
 
 ```bash
@@ -2216,6 +2246,8 @@ sudo crm_mon -1Ar | grep p2
 ---
 
 ### Scenario 12: Stop & Start All Four Pipeline Processes (Cluster-Wide)
+
+> **Runs on:** any cluster member (node1, node2 or node3).
 
 #### 12.1 — Stop all pipeline processes on all nodes
 
@@ -2280,13 +2312,15 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 
 ### Scenario 13: Stop & Start RabbitMQ on a Single Node
 
+> **Runs on:** stop/start on **node3**; `rabbitmqctl cluster_status` after the stop on **node1 or node2** (node3's broker is down); after the restart, any of node1–node3.
+
 #### 13.1 — Stop RabbitMQ on node3
 
 ```bash
 # On node3
 sudo systemctl stop rabbitmq-server
 
-# Verify the remaining 2-node RabbitMQ cluster still has quorum
+# On node1 or node2 — verify the remaining 2-node RabbitMQ cluster still has quorum
 sudo rabbitmqctl cluster_status
 ```
 ```
@@ -2314,6 +2348,8 @@ Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
 ---
 
 ### Scenario 14: Stop & Start MariaDB Galera on a Single Node
+
+> **Runs on:** stop/start on **node2**; the `wsrep_cluster_size` check after the stop on **node1 or node3** (node2's MariaDB is down); after the restart, any of node1–node3.
 
 #### 14.1 — Stop MariaDB on node2
 
@@ -2366,6 +2402,8 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"
 
 ### Scenario 15: Stop & Start HAProxy on a Single Node
 
+> **Runs on:** `pcs`/`crm_*` commands on any cluster member (node1, node2 or node3); the HAProxy stats `curl` on any machine that can reach the VIP (node1–node4 or a workstation).
+
 HAProxy runs under Pacemaker as part of `vip-haproxy-group`. Do **not** manipulate it directly with `systemctl` — use `pcs resource` so Pacemaker stays in control.
 
 #### 15.1 — Disable the VIP + HAProxy group (stops on current node, migrates to another)
@@ -2405,6 +2443,8 @@ These scenarios cover rebooting individual nodes, all nodes sequentially, and al
 ---
 
 ### Scenario 16: Reboot a Single Node (Node3) — Zero Pipeline Downtime
+
+> **Runs on:** 16.1 and 16.4 on **node1**; the 16.2 reboot on **node3**; 16.3 checks on **node1 or node2** (node3 is down).
 
 The cluster retains quorum (2 of 3 nodes remain) and all cloned resources continue on the surviving nodes.
 
@@ -2503,6 +2543,8 @@ sudo crm_resource -C
 
 ### Scenario 17: Reboot the Node Hosting the VIP (Node1) — Forced Failover
 
+> **Runs on:** 17.1–17.2 on any cluster member (node1, node2 or node3) (prefer node2); the 17.3 reboot on **node1**; 17.4 checks on **node2 or node3** while node1 is down.
+
 This is the highest-impact single-node reboot: the Virtual IP, HAProxy, and all process clones on node1 must migrate before node1 goes offline.
 
 #### 17.1 — Identify the current VIP holder
@@ -2575,10 +2617,12 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 
 ### Scenario 18: Sequential Rolling Reboot of All Three Nodes
 
+> **Runs on:** steps 1–2 from **node1**; step 3 (node1 reboot) from **node2 or node3** — a script cannot poll for the node it is running on to come back. Post-reboot validation on any cluster member (node1, node2 or node3).
+
 Reboot one node at a time, waiting for full rejoin before rebooting the next. Quorum is maintained throughout.
 
 ```bash
-# === STEP 1: Reboot node3 ===
+# === STEP 1: Reboot node3 (run steps 1–2 from node1) ===
 ssh node3 'sudo reboot'
 
 # Wait for node3 to come back (poll from node1)
@@ -2602,6 +2646,7 @@ sudo crm_resource -C
 sleep 5
 
 # === STEP 3: Reboot node1 (VIP holder — evacuate first) ===
+# Run this step from node2 or node3 — node1 is the one being rebooted
 sudo pcs node standby node1
 sleep 10   # allow VIP migration to complete
 
@@ -2647,6 +2692,8 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq .                     # expect 
 ---
 
 ### Scenario 19: Simultaneous Reboot of All Three Nodes (Cluster Cold Start)
+
+> **Runs on:** 19.1–19.2 on **each of node1–node3**; 19.3 `galera_new_cluster` on the **bootstrap node only**; 19.4 on the **other two nodes**; 19.5 `pcs cluster start` on each node (or `pcs cluster start --all` from one node); 19.6 on any cluster member (node1, node2 or node3); 19.7 `curl` from any machine that can reach the VIP (node1–node4 or a workstation), `rabbitmqctl` on node1–node3.
 
 A complete power-cycle or simultaneous OS reboot causes the Galera cluster to lose quorum. Galera **requires a manual bootstrap** of the primary component on whichever node has the most up-to-date data before the other nodes can rejoin.
 
@@ -2824,6 +2871,8 @@ All faults are **temporary and fully reversible**. Every sub-scenario includes t
 
 ### Scenario 20: Soft Network Degradation — Latency & Packet Loss (`tc netem`)
 
+> **Runs on:** `tc` commands affect only the local NIC: 20.1, 20.4 and 20.5 on **node2**; observation in 20.2–20.3 on **node1 or node3**; 20.6 `curl` from any machine that can reach the VIP (node1–node4 or a workstation); in 20.7, `tc` on **node2**, `crm_*` on any member.
+
 This simulates a flaky inter-node network link: high latency and packet loss that keeps the node reachable but causes Corosync token timeouts, Galera replication lag, and RabbitMQ connection retries.
 
 #### 20.1 — Inject 300 ms delay + 10 % packet loss on node2's cluster interface
@@ -2967,6 +3016,8 @@ sudo crm_mon -1Ar | grep "Online:"
 
 ### Scenario 21: High Bandwidth Throttling — Simulating a Saturated Link
 
+> **Runs on:** **node3** (the throttled node), except `crm_resource` and `rabbitmqctl list_queues`, which can run on any cluster member (node1, node2 or node3).
+
 #### 21.1 — Limit node3's cluster interface to 1 Mbit/s
 
 ```bash
@@ -3018,6 +3069,8 @@ sudo crm_resource -C
 ---
 
 ### Scenario 22: Hard Network Partition — `iptables` DROP Between Two Nodes
+
+> **Runs on:** `iptables` rules are local: in 22.2 and 22.6 they run on **node1 and node3** (both sides of the partition); 22.3–22.4 on **node2**; 22.5 on **node1**; in 22.7 `pcs cluster start` on **node3**, then checks on **node1**.
 
 This is the most dangerous fault: node2 can reach node1 and node3, but node1 and node3 **cannot reach each other**. This creates a split-brain candidate situation where Corosync must fence one side.
 
@@ -3199,6 +3252,8 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 
 ### Scenario 23: Selective Port-Level Block — Corosync Ring Only
 
+> **Runs on:** `iptables` on **node1 and node2**; `corosync-cfgtool` and `mysql` checks on **node1**; 23.3 on **node1 or node3**; in 23.4 `pcs cluster start` on **node2**.
+
 Rather than dropping all traffic, this scenario blocks **only Corosync's UDP port 5405** between two nodes — simulating a misconfigured firewall rule that leaves SSH/HTTP/MariaDB/RabbitMQ intact but severs cluster heartbeats.
 
 #### 23.1 — Block Corosync UDP 5405 between node1 and node2
@@ -3285,6 +3340,8 @@ sudo crm_mon -1Ar | grep "Online:"
 
 ### Scenario 24: Selective Port-Level Block — Galera Replication Only
 
+> **Runs on:** `iptables` on **node1 and node3**; the 24.2 `mysql` check runs locally on **node3** (a remote `root` login is normally denied); 24.3 queries on any node with a mariadb client.
+
 Block Galera's wsrep replication port (4567) between two nodes while leaving Corosync and RabbitMQ intact.
 
 #### 24.1 — Block Galera replication between node1 and node3
@@ -3363,6 +3420,8 @@ sudo crm_resource -C
 
 ### Scenario 25: Selective Port-Level Block — RabbitMQ AMQP Only
 
+> **Runs on:** `iptables` on **node2**; logs, `rabbitmqctl cluster_status` and `list_queues` on **node1 or node3**.
+
 Block AMQP port 5672 on node2 — RabbitMQ stops accepting connections but Corosync and Galera remain intact.
 
 #### 25.1 — Block AMQP traffic to/from node2
@@ -3429,6 +3488,8 @@ flow2_examined_queue     0    3
 ---
 
 ### Scenario 26: Intermittent Flapping — Periodic Network Glitch
+
+> **Runs on:** the flapping loop on **node3**; the monitor loop on **node1** in a second terminal; failcount checks on any cluster member (node1, node2 or node3).
 
 Simulate a network interface that glitches every 30 seconds — typical of a bad cable or switch port.
 
@@ -3523,7 +3584,7 @@ sudo ./scripts/simulate_network_glitch.sh <command> [node_ip] [options]
 
 ### Post-Glitch Full Health Validation Checklist
 
-Run this on **node1** after any glitch scenario to confirm a clean cluster state:
+Run this on **node1** (or any other cluster member — all of these commands work on node1–node3) after any glitch scenario to confirm a clean cluster state:
 
 ```bash
 # 1. Pacemaker — all 3 nodes online, all clones 3/3
@@ -3592,6 +3653,8 @@ A helper script [`scripts/tcpdump_flows.sh`](scripts/tcpdump_flows.sh) automates
 ---
 
 ### Scenario 27: Capture Setup — Identify Interfaces and Start Captures
+
+> **Runs on:** **each of node1–node3**, in its own terminal (each capture records only the local NIC).
 
 #### 27.1 — Identify the cluster-facing network interface on each node
 
@@ -3664,6 +3727,8 @@ ls -lh ${PCAP_DIR}/   # confirm pcap files are growing
 ---
 
 ### Scenario 28: AMQP Round-Trip — Flow1 & Flow2 Pipeline Execution
+
+> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); stop each capture and analyse its pcap on the **node that captured it** (`$TCPDUMP_PID` exists only in that shell).
 
 With captures running from Scenario 27, trigger both pipeline flows and then examine the AMQP handshake and message delivery round-trips.
 
@@ -3764,6 +3829,8 @@ sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep "Flags \[F" | head -10
 
 ### Scenario 29: REST API / HAProxy Round-Trip Verification
 
+> **Runs on:** the **current VIP holder** (`sudo crm_resource --resource vip --locate`), since only it carries VIP traffic.
+
 #### 29.1 — Capture REST API traffic while sending requests
 
 ```bash
@@ -3850,6 +3917,8 @@ sudo tshark -r /tmp/rest_api.pcap \
 
 ### Scenario 30: Corosync Heartbeat Round-Trip Verification
 
+> **Runs on:** **node1** (capture and analysis).
+
 #### 30.1 — Capture Corosync UDP heartbeats
 
 ```bash
@@ -3913,6 +3982,8 @@ avg=999.8ms  n=147     ← token circulates approximately every 1 second (Corosy
 ---
 
 ### Scenario 31: Galera wsrep Replication Round-Trip Verification
+
+> **Runs on:** **node1** (capture and analysis); the write traffic can come from any node.
 
 #### 31.1 — Capture Galera replication traffic during a DB write
 
@@ -4019,6 +4090,8 @@ sudo tshark -r /tmp/mysql.pcap -d tcp.port==3306,mysql \
 
 ### Scenario 32: Network Round-Trip During Glitch — Before/During/After Comparison
 
+> **Runs on:** captures and analysis on **node1**; `tc` impairment on **node2**.
+
 This scenario combines Scenario 20 (latency injection) with live tcpdump to measure the actual impact of a network glitch on every protocol's round-trip time (RTT).
 
 #### 32.1 — Establish baseline RTTs (clean network)
@@ -4116,6 +4189,8 @@ avg RTT: 0.308ms (n=6)     ← back to sub-millisecond baseline
 ---
 
 ### Scenario 33: tcpdump-Based Full Pipeline Flow Trace
+
+> **Runs on:** captures on **each of node1–node3**; copy the pcaps to one node before running the cross-node loop (it reads only local files); 33.5 on **node3**, as shown.
 
 This scenario captures a single Flow 1 message from HTTP POST all the way to MariaDB INSERT and traces every network hop in the pcap files.
 
@@ -4229,7 +4304,7 @@ sudo ./scripts/tcpdump_flows.sh all [iface] [vip_ip]
 
 ### Post-Capture Round-Trip Verification Checklist
 
-After running any capture scenario, use this checklist to confirm complete network round-trips for every protocol:
+After running any capture scenario, use this checklist to confirm complete network round-trips for every protocol. Run it on the **node that holds the pcap** (the example uses node1's capture):
 
 ```bash
 PCAP=/var/log/flowfirst/pcap/node1_*.pcap   # adjust to your latest file
@@ -4536,6 +4611,8 @@ docker compose down -v
 
 ### Scenario 34: ZooKeeper Ensemble Health & Leader Election Verification
 
+> **Runs on:** the `nc` checks from any of node1–node4 (ZooKeeper's client port must be reachable); `curl` from any machine that can reach the VIP (node1–node4 or a workstation).
+
 Verify the ensemble is healthy and identify which node holds the ZooKeeper leader role.
 
 ```bash
@@ -4580,6 +4657,8 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health
 ---
 
 ### Scenario 35: Live Config Change via ZooKeeper — No Restart Required
+
+> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `zkCli.sh` on any of node1–node3; `journalctl` on the **current Process 2 leader node** (see `/zk/health`).
 
 Change the Flow 2 HIGH threshold and the Flow 1 counter step at runtime. All three running
 Process 2 instances pick up the change within seconds without any restart.
@@ -4662,6 +4741,8 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config -H "Content-Type: applica
 
 ### Scenario 36: ZooKeeper Leader Failover — Kill the Elected Leader Node
 
+> **Runs on:** A, B, E and F `curl`/`mysql` from any machine that can reach the VIP (node1–node4 or a workstation) (`mysql` needs a mariadb client); C via `ssh ${NODE2_IP}` from **node1 or node3** (or run the quoted command directly on node2); D on **node1 or node3** (the surviving candidates).
+
 Verify that when the node holding the Process 2 leader election crashes, the standby
 on another node automatically wins and takes over consuming without message loss.
 
@@ -4685,7 +4766,7 @@ done
 #### C. Kill Process 2 on the leader node (node2)
 
 ```bash
-# On node2 — stop only process2
+# From node1 or node3 — stop only process2 on node2
 ssh ${NODE2_IP} "sudo pcs resource ban flowfirst-p2-res-clone node2"
 # Or forcefully kill the process:
 ssh ${NODE2_IP} "sudo systemctl stop flowfirst-process2"
@@ -4723,6 +4804,8 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process2'
 ---
 
 ### Scenario 37: ZooKeeper Dedup Barrier — Prevent Double-Insert on Failover
+
+> **Runs on:** `mysql` from any node with a mariadb client; `rabbitmqadmin` and `zkCli.sh` on node1–node3; `journalctl` on the **current Process 4 leader node**.
 
 Simulate a Pacemaker failover that re-delivers an already-processed message to
 Process 4 and verify the ZooKeeper dedup barrier prevents a duplicate MariaDB row.
@@ -4780,6 +4863,8 @@ mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_D
 ---
 
 ### Scenario 38: ZooKeeper Service Registry — Observe Live Process Registration
+
+> **Runs on:** `zkCli.sh` on any of node1–node3; `ssh` steps from **node1 or node3**; `curl` from any machine that can reach the VIP (node1–node4 or a workstation).
 
 Verify the ephemeral service registry updates in real time as processes start and stop.
 
@@ -4846,6 +4931,8 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process3'
 
 ### Scenario 39: Verify Greenthread Startup & Pool Status
 
+> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `journalctl` and `/proc/<pid>/limits` checks on **each of node1–node3** (each node runs its own P1–P4 instances).
+
 Confirm all expected greenthreads are running in each process immediately after startup.
 
 ```bash
@@ -4898,6 +4985,8 @@ sudo cat /proc/$(pgrep -f process1.py | head -1)/limits | grep "open files"
 ---
 
 ### Scenario 40: Concurrent Batch Publishing — Greenthread Parallelism in Process 1
+
+> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `rabbitmqctl` on node1–node3; `journalctl` on the **current Process 2 leader node**.
 
 The `/api/batch` endpoint spawns one greenthread per message, publishing Flow 1 and
 Flow 2 messages in parallel rather than sequentially.  This scenario measures the
@@ -4963,6 +5052,8 @@ sudo journalctl -u flowfirst-process2 --since "2 minutes ago" --no-pager \
 
 ### Scenario 41: Per-Queue Greenthread Independence — Flow 1 Blockage Does Not Stall Flow 2
 
+> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `rabbitmqctl` on node1–node3; `journalctl` on the **current Process 2 leader node**.
+
 Each queue in Process 2, 3, and 4 runs in its own greenthread with its own pika
 connection.  A slow or blocked Flow 1 handler should not delay Flow 2 messages.
 
@@ -5019,6 +5110,8 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config \
 
 ### Scenario 42: Greenthread Auto-Restart on RabbitMQ Consumer Failure
 
+> **Runs on:** A and C on the **current Process 2 leader** (assumed node1 below); B from node1 via `ssh` to node2 — `close_all_connections` drops every connection on node2's broker, not just Process 2's.
+
 Consumer greenthreads are spawned with `restart_on_error=True`.  If a consumer
 greenthread crashes (e.g. RabbitMQ connection dropped), it automatically restarts
 after 2 seconds without operator intervention or process restart.
@@ -5072,6 +5165,8 @@ mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_D
 ---
 
 ### Scenario 43: Greenthread Metrics Reporter — Throughput Monitoring
+
+> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `ssh`/`sed`/`pcs` steps on any cluster member (node1, node2 or node3); `journalctl` on each process's **current leader node**. node4's `.env` is not changed by these steps.
 
 Each process emits a structured throughput report every `GT_METRICS_INTERVAL_S` seconds
 (default 60s).  This scenario triggers activity and then reads the metrics.
@@ -5153,6 +5248,8 @@ sudo pcs resource restart flowfirst-p4-res-clone
 ---
 
 ### Scenario 44: Remote Node 4 / Process 5 End-to-End Pipeline Execution & Database Validation
+
+> **Runs on:** A and C on **node4**; B, D and E from any machine that can reach the VIP (node1–node4 or a workstation) (D needs a mariadb client).
 
 Demonstrates cross-node asynchronous inter-process communication spanning the core 3-node cluster and **Remote Node 4 (`node4`)**:
 1. `Process 1` on one of the cluster nodes receives `POST /api/flow3` and prepares the initial message payload.

@@ -267,6 +267,7 @@ erDiagram
 | [42](#scenario-42-greenthread-auto-restart-on-rabbitmq-consumer-failure) | Greenthread Auto-Restart on RMQ Failure | Greenthreads | Kill RMQ connection, greenthread reconnects automatically |
 | [43](#scenario-43-greenthread-metrics-reporter--throughput-monitoring) | Greenthread Metrics Reporter | Greenthreads | Read throughput counters from `/gt/status` and journal |
 | [44](#scenario-44-remote-node-4--process-5-end-to-end-pipeline-execution--database-validation) | Remote Node 4 / Process 5 Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 4)→P2→P4, verify MariaDB audit trail & Swift object storage |
+| [45](#scenario-45-reading-the-mariadb-galera-error-log-across-scenarios) | Reading the MariaDB Galera Error Log | Galera | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 
 ---
 
@@ -5401,4 +5402,89 @@ curl -s http://${FLOWFIRST_VIP}:8080/swift/object/flow3/${MSG_ID}.json | jq .
     "process2_verified_remote": true
   }
 }
+```
+
+---
+
+## MariaDB Log Analysis
+
+### Scenario 45: Reading the MariaDB Galera Error Log Across Scenarios
+
+> **Runs on:** **each of node1–node3**. Each node writes its own error log, so it shows only that node's view of the cluster. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 has no MariaDB log.
+
+Use this scenario alongside Scenarios 4–7, 14, 16–24 and 31 to work out from the log what Galera did and why. Exact wording varies between Galera versions, so the commands below grep for stable keywords rather than whole lines.
+
+#### A. Locate the log
+
+```bash
+# On node1, node2 or node3
+sudo mysql -u root -p -N -e "SELECT @@log_error;"
+# Empty or relative value → RHEL default: /var/log/mariadb/mariadb.log
+
+# Startup / shutdown and the pre-start position recovery (galera_recovery) go to the journal
+sudo journalctl -u mariadb --since "30 min ago" --no-pager | grep -E "WSREP|Recovered position|Started|Stopped"
+```
+
+#### B. Message phrasebook — what each line means
+
+| Log keyword (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `Shifting OPEN -> PRIMARY`, `PRIMARY -> JOINER`, `JOINER -> JOINED`, `JOINED -> SYNCED` | Node state machine during start/rejoin. Ends at `SYNCED` when the node is ready. | 4, 14, 16, 18 |
+| `Shifting SYNCED -> DONOR/DESYNCED`, `DONOR/DESYNCED -> JOINED` | This node is acting as donor for another node's state transfer | 5, 6, 7 (on donor) |
+| `New COMPONENT: primary = yes ... memb_num = N` | New cluster membership formed; `memb_num` is the cluster size | 4, 14, 16–19, 22–24 |
+| `New COMPONENT: primary = no`, `non-Primary` | This node lost quorum and stopped accepting writes | 22, 24 (isolated side) |
+| `suspecting node`, `forgetting`, `inactive` / `went down` | Group communication lost contact with a peer (crash, reboot or network block) | 16, 17, 20–24 |
+| `requested state transfer from`, `State transfer required` | Joiner asked for IST/SST; the line names the joiner and the chosen donor | 5, 6, 7 |
+| `Prepared IST receiver`, `Receiving IST`, `IST received` | IST used — only missing write-sets were streamed | 5, 7.3, 21 |
+| `async IST sender` | Donor side of an IST | 5, 7.3 (on donor) |
+| `Initiating SST`, `SST complete`, `wsrep_sst_rsync` | Full SST used (gap exceeded donor `gcache.size`, or `grastate.dat` reset) | 6, 7.4 |
+| `IST will be unavailable`, `not found in gcache`, `Failed to prepare for incremental state transfer` | Why IST was rejected and SST used instead | 6, 7.4 |
+| `SST failed`, `State transfer to ... failed` | State transfer aborted (often a firewall on 4444/4568 or full disk) — node will not reach `SYNCED` | 6, 21, 24 |
+| `It may not be safe to bootstrap`, `safe_to_bootstrap` | Refused bootstrap on a node that was not the last to leave | 19 |
+| `gcomm: bootstrapping new group` | `galera_new_cluster` was run on this node | 19 |
+| `Recovered position` | Last committed seqno found during startup (journal) — use it to choose the bootstrap node | 19 |
+| `Flow-control`, `flow control` | Replication throttled because a slow node's receive queue filled | 20, 21 |
+| `WSREP: cluster conflict`, `BF-BF`, `certification failed` (needs `wsrep_log_conflicts`, see F) | Multi-master write conflict; the app sees deadlock error 1213, which `db.py` retries | 2, 31, concurrent load |
+| `[ERROR]`, `Aborting` | Fatal — mariadb exits; read the lines just above it | any |
+
+#### C. Build a timeline on one node
+
+```bash
+# On the node being investigated (e.g. node3 after Scenario 5/6/16)
+sudo grep -E "Shifting|New COMPONENT|non-Primary|suspecting|forgetting|state transfer|IST|SST|bootstrap|Flow-control|\[ERROR\]|Aborting" \
+  /var/log/mariadb/mariadb.log | tail -60
+```
+
+Read top to bottom: peer loss (`suspecting`/`forgetting`) → new component (`memb_num` drops) → … → rejoin (`requested state transfer`) → `IST`/`SST` → `JOINED -> SYNCED`.
+
+#### D. Correlate the same event across all three nodes
+
+```bash
+# From any of node1–node3 (uses ssh to each node, including itself)
+SINCE="$(date -d '-15 min' '+%Y-%m-%d %H:%M')"
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  echo "===== ${n} ====="
+  ssh "${n}" "sudo awk -v s='${SINCE}' '\$0 >= s' /var/log/mariadb/mariadb.log \
+    | grep -E 'Shifting|New COMPONENT|non-Primary|state transfer|IST|SST|\[ERROR\]'"
+done
+```
+
+Lines start with a `YYYY-MM-DD HH:MM:SS` timestamp, which is what the `awk` time filter compares against. Expected for Scenario 5 (IST to node3): node3 shows `JOINER` → `IST received` → `SYNCED`, the donor shows `SYNCED -> DONOR/DESYNCED` → `JOINED` → `SYNCED`, and the third node shows only `New COMPONENT ... memb_num = 3`.
+
+#### E. Watch the log live while running another scenario
+
+```bash
+# On the node under test, in a second terminal, before starting the other scenario
+sudo tail -F /var/log/mariadb/mariadb.log \
+  | grep --line-buffered -E "Shifting|New COMPONENT|non-Primary|suspecting|state transfer|IST|SST|\[ERROR\]"
+```
+
+#### F. Temporarily increase verbosity (optional)
+
+```bash
+# On each of node1–node3 — runtime only, lost on restart
+sudo mysql -u root -p -e "SET GLOBAL wsrep_log_conflicts=ON;"   # log certification conflicts (see table)
+
+# Revert when finished
+sudo mysql -u root -p -e "SET GLOBAL wsrep_log_conflicts=OFF;"
 ```

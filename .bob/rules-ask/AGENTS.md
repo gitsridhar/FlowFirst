@@ -2,7 +2,7 @@
 
 ## There are no tests, no CI, no linter config
 No `pytest`, no `unittest`, no `tox.ini`, no `.flake8`, no `mypy.ini`. Validation is manual
-via `scripts/test_flows_and_inspect_db.sh` and the 44-scenario playbook in `ReadMe.md`.
+via `scripts/test_flows_and_inspect_db.sh` and the 58-scenario playbook in `ReadMe.md`.
 
 ## `gt.py` is the project's concurrency layer — not a thin import wrapper
 It owns the global `GreenPool`, named greenthread registry, `stop_event`, metrics counters, and
@@ -21,7 +21,7 @@ etc.) is lazily created by `zk.get_client()` → `_ensure_base_paths()` on first
 Nodes 1–3 run processes 1–4 only. Never install process5 on core cluster nodes.
 
 ## `ReadMe.md` (capital R, no extension conflict) is the canonical ops reference
-44 numbered scenarios cover every failure mode, network partition, rolling reboot, and ZK/Galera
+58 numbered scenarios cover every failure mode, network partition, rolling reboot, and ZK/Galera
 recovery. It is the primary runbook. `ReadMe` (no extension) is also present but `ReadMe.md` is
 the one with full content.
 

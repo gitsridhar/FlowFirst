@@ -275,6 +275,13 @@ erDiagram
 | [49](#scenario-49-reading-pacemaker-and-corosync-logs-across-scenarios) | Reading Pacemaker and Corosync Logs | Pacemaker | Phrasebook, DC scheduler lines, `crm_simulate` replay, fail counts, `crm_report` |
 | [50](#scenario-50-reading-swift-logs-and-detecting-missing-objects) | Reading Swift Logs & Detecting Missing Objects | Swift | Client errors, non-fatal failures, MariaDB-vs-Swift reconciliation |
 | [51](#scenario-51-reading-varlogmessages-and-the-systemd-journal-across-scenarios) | Reading `/var/log/messages` & the systemd Journal | Linux | Boots, OOM kills, NIC/link changes, SELinux denials, journal retention |
+| [52](#scenario-52-swift-cluster-health-ring-consistency--replica-placement) | Swift Cluster Health, Ring Consistency & Replica Placement | Swift | ring/`swift.conf` md5, `swift-ring-builder`, `swift-get-nodes`, one replica per node |
+| [53](#scenario-53-swift-node-loss--writes-continue-on-2-of-3-replicas-then-catch-up) | Swift Node Loss & Replication Catch-Up | Swift | 2-of-3 write quorum, `swift_back` DOWN/UP, handoff-free catch-up with the replicator |
+| [54](#scenario-54-swift-device-failure--http-507-error-limiting-and-recovery) | Swift Device Failure (HTTP 507) | Swift | Renamed device, proxy error limiting, replicator "unmounted", restore |
+| [55](#scenario-55-swift-object-corruption--auditor-quarantine-and-replica-repair) | Swift Object Corruption & Auditor Repair | Swift | Corrupt one replica, auditor quarantine, `swift-recon -q`, repair from good copies |
+| [56](#scenario-56-swift-token-cache-memcached-failure--401-re-auth-then-503-when-all-caches-are-down) | Swift Token Cache (memcached) Failure | Swift | One cache down gives 401 + re-auth; all down gives 503 at login; HAProxy cannot see it |
+| [57](#scenario-57-swift-credential-failures--wrong-key-key-rotation-and-token-lifetime) | Swift Credential Failures & Key Rotation | Swift | Wrong key 401, non-fatal `Swift store note`, rotating the tempauth key on all proxies |
+| [58](#scenario-58-total-swift-outage-during-the-pipeline--detect-and-back-fill-from-mariadb) | Total Swift Outage & Back-Fill from MariaDB | Swift | All proxies down, 7 s retry delay per message, rebuild missing objects from `raw_payload` |
 
 ---
 
@@ -895,7 +902,7 @@ sudo ./swift/setup_swift.sh
 The script performs these steps automatically:
 1. Writes `/etc/yum.repos.d/centos-openstack-<release>.repo` (disabled by default) and imports the CentOS Cloud SIG GPG key
 2. Installs `openstack-swift-proxy/-account/-container/-object`, `memcached`, `rsync-daemon`, `xfsprogs`
-3. Creates the `swift` user and the data directory `${SWIFT_DEVICES_DIR}/${SWIFT_DEVICE}` (default `/srv/node/flowfirst`), verifies it supports extended attributes, and labels it `rsync_data_t` for SELinux
+3. Creates the `swift` user and the data directory `${SWIFT_DEVICES_DIR}/${SWIFT_DEVICE}` (default `/srv/node/flowfirst`), verifies it supports extended attributes, adds a `.ismount` marker when it is a plain directory (so `swift-recon` does not report it as unmounted), and labels it `rsync_data_t` for SELinux
 4. Writes `/etc/swift/swift.conf` with the hash prefix/suffix
 5. Configures `memcached` (listening on `127.0.0.1` and the node IP) and `/etc/rsyncd.conf`
 6. Writes the account, container, object and proxy server configs (originals saved as `*.conf.rpm-orig`)
@@ -3966,9 +3973,11 @@ sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep "Flags \[F" | head -10
 
 ```bash
 # On the node currently holding the VIP (e.g., node1)
-IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
-sudo tcpdump -i ${IFACE} -s 0 -w /tmp/rest_api.pcap \
-    'tcp port 8080' &
+# Capture both hops: client -> HAProxy (8080) and HAProxy -> Process 1 backend (8082).
+# "-i any" is needed because HAProxy reaches this node's own backend over loopback,
+# which a capture on ${VIP_NIC} alone would not see.
+sudo tcpdump -i any -s 0 -w /tmp/rest_api.pcap \
+    'tcp port 8080 or tcp port 8082' &
 TCPDUMP_PID=$!
 
 # Send 3 requests to generate traffic
@@ -3984,7 +3993,7 @@ sudo kill ${TCPDUMP_PID}
 
 ```bash
 sudo tcpdump -r /tmp/rest_api.pcap -nn -A 'tcp port 8080' \
-    | grep -E "POST|HTTP/1|Content-Length|handled_by" | head -20
+    | grep -E "POST|HTTP/1|Content-Length|handled_by" | head -20     # client <-> HAProxy hop
 ```
 ```
 12:00:05.001000 ... POST /api/flow1 HTTP/1.1
@@ -3998,11 +4007,15 @@ sudo tcpdump -r /tmp/rest_api.pcap -nn -A 'tcp port 8080' \
 
 #### 29.3 — Confirm HAProxy load-balancing across 3 nodes
 
-Send 9 requests (3 per node via round-robin) and capture the `handled_by_node` field:
+Send 9 requests (3 per node via round-robin) and capture the `handled_by_node` field. Run this on the VIP holder with a fresh capture, because the 29.1 file holds only its own three requests:
 ```bash
+sudo tcpdump -i any -s 0 -w /tmp/rest_api_rr.pcap 'tcp dst port 8082' &
+TCPDUMP_PID=$!
+sleep 1
 for i in $(seq 1 9); do
   curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq -r .handled_by_node
 done
+sleep 1; sudo kill ${TCPDUMP_PID}
 ```
 ```
 node1
@@ -4016,9 +4029,10 @@ node2
 node3
 ```
 
-Confirm in the pcap that the destination backend IPs rotate:
+Confirm in the pcap that the destination backend IPs rotate. Only the first packet of each connection (SYN without ACK) is counted, so the numbers are connections, not packets (`option http-server-close` gives one backend connection per request):
 ```bash
-sudo tcpdump -r /tmp/rest_api.pcap -nn 'dst port 8082' \
+sudo tcpdump -r /tmp/rest_api_rr.pcap -nn \
+    'tcp dst port 8082 and tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0' \
     | awk '{print $5}' | sort | uniq -c | sort -rn
 ```
 ```
@@ -4032,13 +4046,13 @@ sudo tcpdump -r /tmp/rest_api.pcap -nn 'dst port 8082' \
 #### 29.4 — Verify TCP SYN-SYN/ACK-ACK for every HTTP connection
 
 ```bash
-sudo tshark -r /tmp/rest_api.pcap \
-    -Y 'tcp.flags.syn==1' \
+sudo tshark -r /tmp/rest_api_rr.pcap \
+    -Y 'tcp.flags.syn==1 && tcp.port==8082' \
     -T fields -e frame.time_relative -e ip.src -e ip.dst -e tcp.flags \
     2>/dev/null
 ```
 ```
-0.000000  192.168.1.100  192.168.1.101  0x0002   ← SYN (HAProxy→backend)
+0.000000  192.168.1.100  192.168.1.101  0x0002   ← SYN (HAProxy→backend; the source address is whatever HAProxy connects from)
 0.000080  192.168.1.101  192.168.1.100  0x0012   ← SYN-ACK
 1.001000  192.168.1.100  192.168.1.102  0x0002   ← SYN (next round-robin)
 1.001070  192.168.1.102  192.168.1.100  0x0012   ← SYN-ACK
@@ -6200,7 +6214,7 @@ The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account 
 | `Stored in Swift object storage: flowN/<message_id>.json` | The object write succeeded; the name is `flow<flow>/<message_id>.json` | 2, 44 |
 | `Swift store note: Swift storage is disabled` | `SWIFT_ENABLED` is false on this node. Printed for **every** message; nothing is stored | install |
 | `Swift store note: <error text>` | The write failed (see the error rows below). The message was still acknowledged and the MariaDB row was written | any Swift outage |
-| `Failed to put object '<name>' in container '<c>': <error>` | The same failure, logged by `swift_storage.py` with its logger (a WARNING line) | any Swift outage |
+| `Failed to put object '<name>' in container '<c>': <error>` | The same failure, logged by `swift_storage.py` with its logger (an ERROR line; `Could not ensure container` is a WARNING) | any Swift outage |
 | `Could not ensure container '<c>' exists: <error>` | Container create/check failed, usually auth or connectivity | install |
 | `Auth GET failed: <url> 401 Unauthorized` | Wrong `SWIFT_USER` / `SWIFT_KEY` for that node's `.env` | install |
 | `Auth GET failed: <url> 404 Not Found` | `SWIFT_AUTH_URL` points at something that is not a Swift auth endpoint (for example HAProxy to Process 1; see the note in A) | install |
@@ -6490,3 +6504,560 @@ sudo cat /etc/logrotate.d/syslog              # which files are rotated, how oft
 sudo logrotate -d /etc/logrotate.conf 2>&1 | grep -A3 "/var/log/messages"      # dry run
 sudo du -sh /var/log /var/log/journal          # who is using the space
 ```
+
+---
+
+## Swift Cluster Scenarios
+
+These scenarios exercise the Swift cluster installed by Phase 2b. They assume `SWIFT_ENABLED=true`, Swift running on node1–node3 and HAProxy serving `swift_front` on the VIP. Each one can leave the cluster changed, so the last step of every scenario restores it. Scenario 50 explains how to read the client-side symptoms.
+
+Set these once in each shell (`/opt/flowfirst/.env` provides the rest):
+
+```bash
+cd /opt/flowfirst && set -a && source .env && set +a
+export SWIFT_VIP_URL="http://${FLOWFIRST_VIP}:${SWIFT_LB_PORT:-8090}"
+# Get a token through the VIP (tempauth, auth v1.0). Tokens live 24 h; re-run this block after that or after Scenario 56.
+TOKEN=$(curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" \
+  "${SWIFT_VIP_URL}/auth/v1.0" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-auth-token"{print $2}')
+ACCT="AUTH_${SWIFT_USER%%:*}"          # tempauth storage account: AUTH_<part of SWIFT_USER before the colon>
+echo "token=${TOKEN:0:12}...  account=${ACCT}"
+```
+
+Scenarios 52–58 use `${SWIFT_VIP_URL}`, `${TOKEN}` and `${ACCT}` from this block. Objects created by the tests go under test-only prefixes (`placement/`, `outage/`, `diskfail/`, `corrupt/`; Scenario 58 deliberately keeps its three restored `flow1/` objects) in `${SWIFT_CONTAINER}` and are deleted at the end of each scenario, so they do not disturb the `flow<N>/` objects checked in Scenario 50.
+
+---
+
+### Scenario 52: Swift Cluster Health, Ring Consistency & Replica Placement
+
+> **Runs on:** **any of node1–node3** for the `swift-ring-builder`, `swift-get-nodes` and `swift-recon` commands (they read `/etc/swift/*.ring.gz` locally, and `swift-recon` queries the other nodes' object servers over HTTP). The `ssh` loops run from any of node1–node3. The `curl` checks run from **any machine that can reach the VIP**.
+
+Use this after Phase 2b, after any node reboot (Scenarios 16–19), and before any other Swift scenario, to prove the cluster is healthy and that every object really has one copy on each node.
+
+#### 52.1 — Services, ring files and `swift.conf` agree on all three nodes
+
+```bash
+# All Swift units, memcached and rsyncd active on every node
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  echo "== ${n}"
+  ssh "${n}" "systemctl is-active openstack-swift-proxy openstack-swift-account openstack-swift-container \
+    openstack-swift-object openstack-swift-object-replicator openstack-swift-object-auditor memcached rsyncd | sort | uniq -c"
+done
+
+# Rings and swift.conf (hash secrets) identical everywhere
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  ssh "${n}" "cd /etc/swift && sudo md5sum account.ring.gz container.ring.gz object.ring.gz swift.conf"
+done
+
+# The same comparison done by Swift itself (the object servers' recon middleware answers /recon/ringmd5 and /recon/swiftconfmd5)
+sudo swift-recon object --md5
+```
+
+*Expected:* `active` is reported once per unit on every node (`8 active` per node); all `md5sum` lines match across nodes; `swift-recon` prints `3/3 hosts matched, 0 error[s] while checking hosts.` once for the object ring and once for `swift.conf`. A `!! ... doesn't match on disk md5sum` line names the node whose ring or `swift.conf` differs. A different `swift.conf` hash prefix or suffix on one node is the worst case: that node computes different object locations, so some GETs return 404 even though the data exists.
+
+#### 52.2 — Ring layout
+
+```bash
+sudo swift-ring-builder /etc/swift/object.builder
+```
+
+*Expected (header line, per the defaults in `.env.example`):* `1024 partitions, 3.000000 replicas, 1 regions, 3 zones, 3 devices`, followed by one device line per node in zones 1, 2 and 3, all on port `6200` with device `flowfirst` and weight `100.00`. The `balance` and `dispersion` values should be near `0.00`.
+
+#### 52.3 — Auth and health through the VIP and through each node directly
+
+```bash
+# HAProxy's own health probe target, through the VIP and on each proxy
+curl -s -o /dev/null -w "VIP   %{http_code}\n" "${SWIFT_VIP_URL}/healthcheck"
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  curl -s -o /dev/null -w "${n} %{http_code}\n" "http://${n}:${SWIFT_PROXY_PORT:-8888}/healthcheck"
+done
+
+# A token issued by node1's proxy must be accepted by every proxy (shared memcached)
+TOKEN1=$(curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" \
+  "http://${NODE1_IP}:${SWIFT_PROXY_PORT:-8888}/auth/v1.0" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-auth-token"{print $2}')
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  curl -s -o /dev/null -w "${n} account HEAD %{http_code}\n" -I -H "X-Auth-Token: ${TOKEN1}" \
+    "http://${n}:${SWIFT_PROXY_PORT:-8888}/v1/${ACCT}"
+done
+```
+
+*Expected:* every `/healthcheck` returns `200`, and the account `HEAD` returns `204` on all three nodes. A `401` on node2 or node3 for a token issued by node1 means the proxies are not sharing the same memcached servers (compare `memcache_servers` in `/etc/swift/proxy-server.conf` on each node, and see Scenario 56).
+
+#### 52.4 — Store one object, then find all three copies
+
+```bash
+# Store a test object through the VIP
+echo "swift placement test $(date +%s)" > /tmp/placement.txt
+curl -s -o /dev/null -w "PUT %{http_code}\n" -X PUT -H "X-Auth-Token: ${TOKEN}" \
+  -H "Content-Type: text/plain" --data-binary @/tmp/placement.txt \
+  "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/placement/test1.txt"
+
+# Where does the ring say it lives?
+sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" placement/test1.txt
+```
+
+*Expected:* `PUT 201`. `swift-get-nodes` prints a `Partition` and `Hash` line and then three `Server:Port Device` lines, one per node IP (port `6200`, device `flowfirst`), followed by a `curl -g -I -XHEAD ...` line per node and an `ssh <ip> "ls -lah ${DEVICE:-/srv/node*}/flowfirst/objects/<partition>/<suffix>/<hash>"` line per node. Run each of the three `ssh ... ls` lines (add `sudo`): each node holds a `.data` file of the same size.
+
+To check the replicas directly, paste the three `curl -g -I -XHEAD ...` lines that `swift-get-nodes` printed: they talk to each object server on port `6200`, bypassing the proxy, and all three should return `200 OK` with the same `Etag`.
+
+#### 52.5 — Cluster-wide device checks and clean-up
+
+> **Plain-directory installs report "Not mounted".** The recon middleware always runs a real mount-point check (`check_mount`), even when `mount_check = false` is set for the object server. The default install keeps `/srv/node/flowfirst` on the root filesystem, so without help `swift-recon -u` would list `Not mounted: flowfirst on <ip>:6200` for all three nodes and `-d` would print no usage for them (the objects are stored normally either way). `setup_swift.sh` therefore creates the stub file `/srv/node/flowfirst/.ismount`, which Swift accepts as a mount marker, whenever `SWIFT_MOUNT_CHECK` is not `true` and the directory is not a mount point. On a node installed before that change, create it by hand: `sudo -u swift touch /srv/node/flowfirst/.ismount`. With a dedicated XFS filesystem (`SWIFT_MOUNT_CHECK=true`) no stub is created and a missing mount is reported as it should be.
+
+```bash
+sudo swift-recon object -d -u -q        # disk usage, unmounted devices, quarantined objects
+curl -s -o /dev/null -w "DELETE %{http_code}\n" -X DELETE -H "X-Auth-Token: ${TOKEN}" \
+  "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/placement/test1.txt"
+```
+
+*Expected (with the `.ismount` stub or a real mount):* disk usage lines for 3 hosts, no `Not mounted:` or `Device errors:` lines, and `quarantined_objects` showing `total: 0`. `DELETE 204`. `swift-recon` takes its host list from the ring, so it works from any node. `No hosts returned valid data.` means the object servers' recon middleware is not reachable: check that port `6200` is open between the nodes and `systemctl is-active openstack-swift-object`.
+
+---
+
+### Scenario 53: Swift Node Loss — Writes Continue on 2 of 3 Replicas, Then Catch-Up
+
+> **Runs on:** stop and start on **node3** (the node being failed); the `curl`, `swift-get-nodes` and `swift-recon` checks run from **node1 or node2** (node3's Swift is down) and `curl` from any machine that can reach the VIP. The Process 4 log check runs on the **current Process 4 leader**.
+
+Swift needs `floor(3/2)+1 = 2` replica writes to accept a PUT, so one node can be lost without an outage. This scenario takes node3's Swift down **without** stopping the rest of node3 (Pacemaker, MariaDB and the pipeline keep running), writes objects while it is down, brings it back, and confirms the replicators copy the missing objects to it. Scenarios 17 and 18 already cover whole-node reboots; use this one to study Swift's own behaviour.
+
+#### 53.1 — Stop Swift on node3 and watch HAProxy remove it
+
+```bash
+# On node3 — stop the proxy and the storage servers (keep memcached and rsyncd running)
+sudo systemctl stop openstack-swift-proxy openstack-swift-object openstack-swift-container openstack-swift-account
+
+# On the VIP holder — swift_back should mark node3 DOWN within about 6 s (inter 3s, fall 2)
+echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | awk -F, '$1=="swift_back"{print $1,$2,$18}'
+```
+
+*Expected:* `swift_back node1 UP`, `swift_back node2 UP`, `swift_back node3 DOWN` (and the `BACKEND` line stays `UP`).
+
+#### 53.2 — The pipeline and manual PUTs still work
+
+```bash
+# Manual PUTs through the VIP while node3's Swift is down
+for i in 1 2 3 4 5; do
+  curl -s -o /dev/null -w "PUT $i %{http_code}\n" -X PUT -H "X-Auth-Token: ${TOKEN}" --data-binary "outage-$i" \
+    "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/outage/obj${i}.txt"
+done
+
+# Send pipeline messages; each one is stored by Process 4 via swiftclient
+for i in 1 2 3; do
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
+    -d "{\"item_id\": 53${i}, \"initial_data\": \"swift-node-loss-${i}\"}" | jq -r .payload.message_id
+done
+sleep 10
+# On the Process 4 leader
+sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep -E "Stored in Swift|Swift store note"
+```
+
+*Expected:* all `PUT` lines return `201`; Process 4 prints `Stored in Swift object storage: flow1/<message_id>.json` for each message and no `Swift store note:`. A request that reaches node3's stopped proxy before HAProxy marks it down is a refused connection, which HAProxy re-dispatches to another node (`option redispatch`, `retries 3` in the template defaults); if a client still sees a `5xx`, `swiftclient` retries it (`retries=3`).
+
+#### 53.3 — Only two copies exist while node3 is down
+
+```bash
+sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" outage/obj1.txt
+# Run the printed "ssh <ip> ls" lines for node1 and node2 (each has a .data file) and for node3 (no such directory)
+```
+
+*Expected:* node1 and node2 list the `.data` file; on node3 `ls` reports `No such file or directory` for that object's directory. The proxy would send a missing copy to a **handoff** node, but a 3-node ring with 3 replicas has no spare device, so the object stays at 2 copies until node3 returns. The container listing update for node3's container server is queued as an async pending on the other nodes (`sudo swift-recon object -a`) and is delivered by the `object-updater` after node3 is back (its pass interval is 300 s by default).
+
+#### 53.4 — Start node3 and wait for the replicators
+
+```bash
+# On node3
+sudo systemctl start openstack-swift-account openstack-swift-container openstack-swift-object openstack-swift-proxy
+
+# Replicator passes run every 30 s by default (object-replicator interval); to force one pass now, on node1 AND node2:
+sudo -u swift swift-object-replicator /etc/swift/object-server.conf once -v
+
+# Then check node3 received them
+sudo swift-recon object -r
+ssh ${NODE3_IP} "sudo find /srv/node/flowfirst/objects -name '*.data' | wc -l"
+```
+
+*Expected:* with `-v` the replicator logs to the console and ends with `Object replication complete (once)`. Replication is push-based, which is why it runs on both nodes that hold the objects. `sudo swift-recon object -r` reports `[replication_failure]` and `[replication_attempted]` counters; the failure total can still include the pass during which node3 was down, so judge it after a later full pass. The `.data` count on node3 now includes the `outage/obj1..5.txt` objects. Re-run the `ssh ... ls` lines from 53.3 to see all three copies. HAProxy marks node3 `UP` again after 2 passed checks (`rise 2`, about 6 s).
+
+#### 53.5 — Clean up
+
+```bash
+for i in 1 2 3 4 5; do
+  curl -s -o /dev/null -w "DELETE $i %{http_code}\n" -X DELETE -H "X-Auth-Token: ${TOKEN}" \
+    "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/outage/obj${i}.txt"
+done
+```
+
+Items 531–533 exist in both MariaDB and Swift (Scenario 50 D finds no gap), because Swift never stopped accepting writes.
+
+---
+
+### Scenario 54: Swift Device Failure — HTTP 507, Error Limiting and Recovery
+
+> **Runs on:** the device fault is created and removed on **node3**; the `curl` calls run from any machine that can reach the VIP; `swift-get-nodes` and the proxy and replicator log checks run on **node1 or node2** (read the journal on each of node1–node3, as the proxy that served a request may be any of them).
+
+A Swift device that disappears is answered with `507 Insufficient Storage` by that node's storage servers. The proxy then **error-limits** the node (skips it for a while), so writes carry on with the remaining two replicas. With the default install (`SWIFT_MOUNT_CHECK=false`) Swift only checks that `/srv/node/flowfirst` is a directory, so renaming it is a safe way to simulate a lost disk. With `SWIFT_MOUNT_CHECK=true` (dedicated XFS mount) unmounting the filesystem has the same effect.
+
+#### 54.1 — Take the device away on node3
+
+```bash
+# On node3
+sudo mv /srv/node/flowfirst /srv/node/flowfirst.off
+```
+
+#### 54.2 — The object server answers 507 directly
+
+```bash
+# On node1 or node2 — find the object server URL for an existing object and HEAD node3 directly
+sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" diskfail/obj1.txt | grep "XHEAD"
+# Run the printed curl line whose address is ${NODE3_IP}:6200
+```
+
+*Expected:* `HTTP/1.1 507 Insufficient Storage` from node3 (the object may not exist yet; a missing device is checked before the object is looked up). The same command against node1 or node2 returns `404 Not Found`.
+
+#### 54.3 — Writes still succeed, and the proxy limits node3
+
+```bash
+for i in 1 2 3 4 5; do
+  curl -s -o /dev/null -w "PUT $i %{http_code}\n" -X PUT -H "X-Auth-Token: ${TOKEN}" --data-binary "diskfail-$i" \
+    "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/diskfail/obj${i}.txt"
+done
+
+# On each of node1-node3 (whichever proxies served the PUTs)
+sudo journalctl -t proxy-server --since "2 minutes ago" --no-pager | grep -E "error limited|Insufficient Storage"
+```
+
+*Expected:* every `PUT` returns `201`. The first PUT served by each proxy logs a line of the form `ERROR Node will be error limited for 60.00s: <NODE3_IP>:6200/flowfirst, error: ERROR Insufficient Storage` (`error_suppression_interval` defaults to 60 s). While the node is limited the proxy skips it without trying, so there is no further log line and no added latency. After 60 s the proxy tries node3 again and gets another `507`, so the line repeats at most once a minute per proxy, and only while requests keep arriving.
+
+Pipeline messages sent now (`/api/flow1`) are stored by Process 4 as usual: the `Stored in Swift object storage` line appears and no `Swift store note:` is printed.
+
+#### 54.4 — The replicators notice
+
+```bash
+# On node1 and node2: force a replication pass, then look for the unmounted-device message
+sudo -u swift swift-object-replicator /etc/swift/object-server.conf once -v 2>&1 | grep -E "responded as unmounted|complete"
+```
+
+*Expected:* `<NODE3_IP>:6200/flowfirst responded as unmounted` followed by `Object replication complete (once)`. Nothing can be pushed to node3 until the device returns, and no handoff is used because the 3-node ring has no spare device.
+
+> **Do not use `swift-recon -u` or `-d` to confirm this test.** The recon middleware lists the directories under `/srv/node`, not the devices in the ring. The renamed directory `flowfirst.off` (which still contains the `.ismount` stub) is listed as a healthy extra device and the missing `flowfirst` is not mentioned at all, so `-u` stays silent. On a dedicated XFS mount (`SWIFT_MOUNT_CHECK=true`) a real unmount is reported correctly as `Not mounted: flowfirst on <ip>:6200`. The `507` from 54.2 and the log lines in 54.3 and 54.4 are the reliable signals here.
+
+#### 54.5 — Restore the device and let the replicators catch up
+
+```bash
+# On node3
+sudo mv /srv/node/flowfirst.off /srv/node/flowfirst
+
+# On node1 and node2
+sudo -u swift swift-object-replicator /etc/swift/object-server.conf once -v 2>&1 | grep complete
+
+# Check node3 now holds the objects written during the fault, then delete the test objects
+sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" diskfail/obj1.txt | grep "ls -lah"   # run the node3 line
+for i in 1 2 3 4 5; do
+  curl -s -o /dev/null -w "DELETE $i %{http_code}\n" -X DELETE -H "X-Auth-Token: ${TOKEN}" \
+    "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/diskfail/obj${i}.txt"
+done
+```
+
+*Expected:* the node3 `ls` shows the `.data` file for `diskfail/obj1.txt` after the replication pass; `DELETE` returns `204`. The proxies stop limiting node3 on their own within 60 s of the next successful request, so no restart is needed. The renamed directory must keep its original name, owner (`swift`) and SELinux label (`rsync_data_t`); a `mv` back preserves all three.
+
+---
+
+### Scenario 55: Swift Object Corruption — Auditor Quarantine and Replica Repair
+
+> **Runs on:** the corruption and the auditor run on **node3**; `swift-get-nodes` and the replicator passes run on **node1 and node2** (the replicators on the nodes holding the good copies push the repair); the `curl` calls run from any machine that can reach the VIP.
+
+Swift detects a damaged replica in two ways: the **object auditor** scans the disk on a schedule, and a GET compares the stored metadata with the file it reads. A damaged file is moved to `<device>/quarantined/` (not deleted), and the replicators then copy a good version back from another node. This scenario damages one replica on purpose.
+
+#### 55.1 — Store an object and locate the node3 copy
+
+```bash
+# On node1 or node2
+curl -s -o /dev/null -w "PUT %{http_code}\n" -X PUT -H "X-Auth-Token: ${TOKEN}" --data-binary "corruption test payload" \
+  "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/corrupt/obj1.txt"
+sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" corrupt/obj1.txt > /tmp/corrupt-nodes.txt
+PART=$(awk '/^Partition/{print $2}' /tmp/corrupt-nodes.txt); HASH=$(awk '/^Hash/{print $2}' /tmp/corrupt-nodes.txt)
+echo "partition=${PART} hash=${HASH}"
+# Directory of the replica on every node: /srv/node/flowfirst/objects/<partition>/<last 3 hash chars>/<hash>
+OBJDIR="/srv/node/flowfirst/objects/${PART}/${HASH: -3}/${HASH}"
+ssh ${NODE3_IP} "sudo ls -l ${OBJDIR}"
+```
+
+*Expected:* `PUT 201` and one `<timestamp>.data` file in `${OBJDIR}` on node3 (it is the same path on all three nodes).
+
+#### 55.2 — Corrupt the node3 replica
+
+```bash
+# Append one byte: the file no longer matches the Content-Length stored in its extended attributes
+ssh ${NODE3_IP} "sudo sh -c 'printf x >> ${OBJDIR}/*.data'; sudo ls -l ${OBJDIR}"
+```
+
+*Expected:* the `.data` file is now one byte larger than before (24 bytes instead of 23 for the payload above).
+
+#### 55.3 — Run the auditor on node3
+
+```bash
+# On node3
+sudo -u swift swift-object-auditor /etc/swift/object-server.conf once -v 2>&1 | grep -E "quarantined|completed"
+sudo ls /srv/node/flowfirst/quarantined/objects/
+sudo ls "${OBJDIR}" 2>&1 | head -2          # the object directory is gone from objects/
+```
+
+*Expected:* an `ERROR Object ... failed audit and was quarantined: metadata content-length 23 does not match actual object size 24` line, then an `Object audit (...) "once" mode completed: ... Total quarantined: 1` line. The quarantine directory holds a directory named after the object hash, and `${OBJDIR}` no longer lists the `.data` file. The continuous `openstack-swift-object-auditor` service does the same on its own schedule; the `once` run just does not wait for it.
+
+```bash
+# From node1 or node2
+sudo swift-recon object -q
+```
+
+*Expected:* `[quarantined_objects] low: 0, high: 1, avg: 0.3, total: 1 ...` (node3 reports 1).
+
+#### 55.4 — Repair from the good replicas
+
+```bash
+# On node1 and node2
+sudo -u swift swift-object-replicator /etc/swift/object-server.conf once -v 2>&1 | grep complete
+ssh ${NODE3_IP} "sudo ls -l ${OBJDIR}"
+curl -s -H "X-Auth-Token: ${TOKEN}" "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/corrupt/obj1.txt"; echo
+```
+
+*Expected:* node3 again holds a 23-byte `.data` file (restored by node1's or node2's replicator) and the GET returns `corruption test payload`. Reads were never affected during this test: the proxy returned the data from node1 or node2 regardless of node3's state.
+
+#### 55.5 — Clean up
+
+```bash
+curl -s -o /dev/null -w "DELETE %{http_code}\n" -X DELETE -H "X-Auth-Token: ${TOKEN}" \
+  "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/corrupt/obj1.txt"
+ssh ${NODE3_IP} "sudo sh -c 'rm -rf /srv/node/flowfirst/quarantined/objects/${HASH}*'"
+```
+
+Quarantined files are kept until you remove them. In a real incident leave them until the cause (disk errors in `dmesg`, Scenario 51) is understood, and watch `swift-recon -q` for a count that keeps growing, which points to failing hardware rather than a one-off event.
+
+---
+
+### Scenario 56: Swift Token Cache (memcached) Failure — 401 Re-Auth, Then 503 When All Caches Are Down
+
+> **Runs on:** `systemctl stop|start memcached` on **node3** (then on all three nodes for 56.3); the `curl` calls run from any machine that can reach the VIP; the client-side check runs on the **current Process 4 leader**; the proxy log check runs on **each of node1–node3**.
+
+tempauth keeps its tokens **only in memcached**, and all three proxies share the same three memcached servers (`memcache_servers` in `/etc/swift/proxy-server.conf`). Token lifetime is 24 hours. This scenario shows what a lost cache server does to clients: one lost server costs a re-login, losing all of them stops logins.
+
+#### 56.1 — Baseline: one token works on every proxy
+
+```bash
+# Uses ${TOKEN} and ${ACCT} from the Swift Cluster Scenarios header
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  curl -s -o /dev/null -w "${n} %{http_code}\n" -I -H "X-Auth-Token: ${TOKEN}" "http://${n}:${SWIFT_PROXY_PORT:-8888}/v1/${ACCT}"
+done
+```
+
+*Expected:* `204` from all three.
+
+#### 56.2 — Stop memcached on node3 only
+
+```bash
+# On node3
+sudo systemctl stop memcached
+
+# From any machine: the same token, three proxies
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  curl -s -o /dev/null -w "${n} %{http_code}\n" -I -H "X-Auth-Token: ${TOKEN}" "http://${n}:${SWIFT_PROXY_PORT:-8888}/v1/${ACCT}"
+done
+
+# Logging in again still works: the new token is stored on a surviving cache server
+curl -s -o /dev/null -w "login %{http_code}\n" -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" "${SWIFT_VIP_URL}/auth/v1.0"
+```
+
+*Expected:* the old token returns `204` on every proxy **if its cache entry lived on node1 or node2** and `401` on every proxy if the entry was held by node3's memcached (the entry is found by hashing the token, so all proxies agree). The login returns `200`. Run the loop with a few different tokens (log in again, repeat) to see both outcomes. A `401` here is not an error in Swift: the token was lost with the cache server. The proxies log `Error connecting to memcached: <NODE3_IP>:11211` lines (`sudo journalctl -t proxy-server --since "2 minutes ago" | grep memcached`); after 10 errors in 60 s a proxy stops trying that server for 60 s.
+
+**What the pipeline sees:** `python-swiftclient` handles a `401` itself: it logs in again once and repeats the request, so Process 4 keeps writing and prints `Stored in Swift object storage` with no `Swift store note:`.
+
+```bash
+for i in 1 2 3; do
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
+    -d "{\"item_id\": 56${i}, \"initial_data\": \"memcached-one-down-${i}\"}" | jq -r .payload.message_id
+done
+sleep 10
+# On the Process 4 leader
+sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep -E "Stored in Swift|Swift store note"
+```
+
+*Expected:* three `Stored in Swift object storage: flow1/...` lines.
+
+#### 56.3 — Stop memcached on all three nodes
+
+```bash
+# On each of node1, node2, node3
+sudo systemctl stop memcached
+
+curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" "${SWIFT_VIP_URL}/auth/v1.0" | head -1
+curl -s -o /dev/null -w "old token: %{http_code}\n" -I -H "X-Auth-Token: ${TOKEN}" "${SWIFT_VIP_URL}/v1/${ACCT}"
+```
+
+*Expected:* the login returns `HTTP/1.1 503 Service Unavailable` (tempauth cannot store a new token) and requests with any existing token return `401` (it cannot be looked up). `/healthcheck` still returns `200`, so **HAProxy keeps all three Swift proxies in `swift_back`**: nothing in the load balancer tells you the cache is gone. Send pipeline messages now:
+
+```bash
+for i in 1 2; do
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
+    -d "{\"item_id\": 56${i}9, \"initial_data\": \"memcached-all-down-${i}\"}" | jq -r .payload.message_id
+done
+sleep 30
+# On the Process 4 leader
+sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep -E "Stored in Swift|Swift store note"
+```
+
+*Expected:* `Swift store note: Auth GET failed: http://<VIP>:8090/auth/v1.0 503 Service Unavailable  [first 60 chars of response] b'<html><h1>Service Unavailable</h1><p>The server is currently'` (`python-swiftclient` appends the first 60 bytes of the reply body to its error text; the client retries a `5xx` with 1 s, 2 s and 4 s pauses first, so each message waits about 7 s on Swift before it is acknowledged). Process 4 also logs the same text in an `ERROR Failed to put object 'flow1/<message_id>.json' ...` line just before it. The MariaDB rows are still written. These two items (5619 and 5629) are missing from Swift; Scenario 58 shows how to back-fill.
+
+#### 56.4 — Restore
+
+```bash
+# On each of node1, node2, node3
+sudo systemctl start memcached
+curl -s -o /dev/null -w "login %{http_code}\n" -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" "${SWIFT_VIP_URL}/auth/v1.0"
+```
+
+*Expected:* `login 200`. Memcached starts empty, so every client logs in again once (a `401` followed by the automatic re-login). Refresh `${TOKEN}` with the header block before the next scenario.
+
+---
+
+### Scenario 57: Swift Credential Failures — Wrong Key, Key Rotation and Token Lifetime
+
+> **Runs on:** the `curl` and `swift_storage` checks (A, B) on **any node** that has `/opt/flowfirst` and its `.venv` (node1–node3; node4 has them too but does not call Swift); the `.env` change in C on **all of node1–node3** (Process 4 can run on any of them); the `proxy-server.conf` change in D on **all of node1–node3**.
+
+Credentials sit in two places: `user_<account>_<user> = <key> .admin` in `/etc/swift/proxy-server.conf` on each node (server side), and `SWIFT_USER` / `SWIFT_KEY` in `.env` on each node (client side). A mismatch gives `401` and, because Swift writes are non-fatal, only a `Swift store note:` line, so nothing alerts you.
+
+#### A. Wrong key is refused at login
+
+```bash
+curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: wrong-key" "${SWIFT_VIP_URL}/auth/v1.0" | tr -d '\r' | head -3
+```
+
+*Expected:* `HTTP/1.1 401 Unauthorized` with a `Www-Authenticate: Swift realm="<account>"` header. The same happens for an unknown user.
+
+#### B. What the application reports
+
+```bash
+cd /opt/flowfirst
+SWIFT_KEY=wrong-key .venv/bin/python -c "
+import swift_storage
+print(swift_storage.put_message_object({'message_id': 'cred-test', 'flow': 9}))
+print(swift_storage.get_swift_status())"
+```
+
+*Expected:* `(False, "Auth GET failed: http://<VIP>:8090/auth/v1.0 401 Unauthorized  [first 60 chars of response] b'<html><h1>Unauthorized</h1><p>This server could not verify t'")` and a status dict with `'status': 'error'` and the same text in `error`. The same text is also printed to stderr as `Failed to put object 'flow9/cred-test.json' in container 'flowfirst_messages': ...` (a plain script has no logging set-up, so there is no `ERROR` prefix; the pipeline processes add it through `gt.configure_logging()`). A `401` costs one extra login attempt after a 1 s pause and is then raised, so it fails after about 1 s, unlike the 7 s of retries for the `503` in Scenario 56. The environment variable overrides `.env` because `python-dotenv` does not replace values that are already set.
+
+#### C. Break and fix the client key on the Process 4 side
+
+```bash
+# On each of node1-node3 (the P4 leader can move when the clone restarts)
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  ssh "${n}" "sudo sed -i 's/^SWIFT_KEY=.*/SWIFT_KEY=wrong-key/' /opt/flowfirst/.env"
+done
+sudo pcs resource restart flowfirst-p4-res-clone
+sudo pcs resource restart flowfirst-p1-res-clone      # so /swift/status also uses the changed key
+sleep 10
+
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
+  -d '{"item_id": 5701, "initial_data": "bad-swift-key"}' | jq -r .payload.message_id
+sleep 8
+# On the Process 4 leader
+sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep -E "Swift store note|Persisted to MariaDB"
+curl -s http://${FLOWFIRST_VIP}:8080/swift/status | jq -r '.status, .error'
+
+# Restore the real key (use the value you had; shown here from the shell's loaded copy)
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  ssh "${n}" "sudo sed -i 's|^SWIFT_KEY=.*|SWIFT_KEY=${SWIFT_KEY}|' /opt/flowfirst/.env"
+done
+sudo pcs resource restart flowfirst-p4-res-clone
+sudo pcs resource restart flowfirst-p1-res-clone
+```
+
+*Expected:* `Swift store note: Auth GET failed: ... 401 Unauthorized ...` followed by `Persisted to MariaDB` for item 5701, and `/swift/status` printing `error` and the same `Auth GET failed` text. Item 5701 exists in MariaDB but not in Swift (Scenario 58 shows the back-fill). The processes read `.env` only at start, which is why both clones are restarted.
+
+#### D. Rotating the key on the server side
+
+```bash
+NEWKEY="$(openssl rand -hex 12)"
+ACCOUNT="${SWIFT_USER%%:*}"; SUSER="${SWIFT_USER#*:}"
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  ssh "${n}" "sudo sed -i 's/^user_${ACCOUNT}_${SUSER} = [^ ]* /user_${ACCOUNT}_${SUSER} = ${NEWKEY} /' /etc/swift/proxy-server.conf && sudo systemctl restart openstack-swift-proxy"
+done
+
+curl -s -o /dev/null -w "old key: %{http_code}\n" -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" "${SWIFT_VIP_URL}/auth/v1.0"
+curl -s -o /dev/null -w "new key: %{http_code}\n" -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${NEWKEY}" "${SWIFT_VIP_URL}/auth/v1.0"
+curl -s -o /dev/null -w "old token: %{http_code}\n" -I -H "X-Auth-Token: ${TOKEN}" "${SWIFT_VIP_URL}/v1/${ACCT}"
+```
+
+*Expected:* `old key: 401`, `new key: 200`, and `old token: 204`. **A token issued before the rotation keeps working** until it expires (24 hours) or its cache entry is lost, because tempauth only checks the key when a token is issued. So a rotation does not log existing clients out; it only blocks new logins with the old key. After the rotation, put `NEWKEY` into `SWIFT_KEY` in `.env` on every node and restart Process 4 and Process 1, as in C, or the next login by the pipeline will get a `401`. To undo the test, set `NEWKEY="${SWIFT_KEY}"` and run the same `for` loop again.
+
+> The proxies read `proxy-server.conf` only at start. Editing it on one node leaves the other two accepting the old key, so a load-balanced login may succeed or fail depending on which proxy answers. Always change and restart all three.
+
+---
+
+### Scenario 58: Total Swift Outage During the Pipeline — Detect and Back-Fill from MariaDB
+
+> **Runs on:** the stop and start of the proxies on **each of node1–node3**; the message sends and the reconciliation from **any machine with a `mariadb` client that can reach the VIP** (node1–node3 have it); the log check on the **current Process 4 leader**.
+
+Swift writes are best-effort (Scenario 50), so a Swift outage never stops the pipeline: MariaDB rows are written, messages are acknowledged, and objects are missing afterwards. `put_message_object()` is not retried later and a redelivered message is skipped by the ZooKeeper dedup barrier, so the gap persists until someone fills it. Process 4 stores the same JSON in MariaDB (`raw_payload`) as in Swift, so the missing objects can be rebuilt from the table.
+
+#### 58.1 — Stop every Swift proxy
+
+```bash
+# On each of node1, node2, node3
+sudo systemctl stop openstack-swift-proxy
+
+# HAProxy needs about 6 s (inter 3s, fall 2) to mark all three servers DOWN
+sleep 8
+curl -s -o /dev/null -w "VIP swift: %{http_code}\n" "${SWIFT_VIP_URL}/healthcheck"
+```
+
+*Expected:* `VIP swift: 503` (HAProxy has no healthy server in `swift_back`; the HAProxy log shows `backend swift_back has no server available!`). The storage servers (`6200/6201/6202`) are still running, so no data is lost.
+
+#### 58.2 — Send traffic during the outage
+
+```bash
+for i in 1 2 3; do
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
+    -d "{\"item_id\": 58${i}, \"initial_data\": \"swift-outage-${i}\"}" | jq -r .payload.message_id
+done
+sleep 40
+# On the Process 4 leader
+sudo journalctl -u flowfirst-process4 --since "3 minutes ago" --no-pager | grep -E "Swift store note|Persisted to MariaDB" | tail -8
+```
+
+*Expected:* for each item, `Swift store note: Auth GET failed: http://<VIP>:8090/auth/v1.0 503 Service Unavailable  [first 60 chars of response] b'<html><body><h1>503 Service Unavailable</h1>\nNo server is av'` followed by `Persisted to MariaDB`. The body here is HAProxy's built-in 503 page (the request never reaches a Swift proxy), unlike Scenario 56 where tempauth itself answers. Each message spends about 7 s in the Swift client's retries (1 s + 2 s + 4 s pauses, four login attempts) before the note is printed, and Process 4 handles one message at a time per flow (`prefetch_count=1`), so a long outage slows the pipeline by that amount per message even though nothing fails.
+
+#### 58.3 — Restore Swift
+
+```bash
+# On each of node1, node2, node3
+sudo systemctl start openstack-swift-proxy
+sleep 8
+curl -s -o /dev/null -w "VIP swift: %{http_code}\n" "${SWIFT_VIP_URL}/healthcheck"      # 200 once two checks pass
+curl -s http://${FLOWFIRST_VIP}:8080/swift/status | jq -r .status                        # connected
+```
+
+#### 58.4 — Find the gap and back-fill it from MariaDB
+
+```bash
+M() { mariadb -h "${FLOWFIRST_VIP}" -u "${MARIADB_USER}" -p"${MARIADB_PASSWORD}" "${MARIADB_DB}" "$@"; }
+# -r (raw) is required: without it the client escapes backslashes inside the JSON column
+M -N -B -r -e "SELECT message_id, flow_id, item_id, raw_payload FROM processed_messages WHERE item_id BETWEEN 581 AND 583 AND flow_id = 1" \
+| while IFS=$'\t' read -r mid fid iid payload; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Auth-Token: ${TOKEN}" "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/flow${fid}/${mid}.json")
+    if [ "${code}" = "404" ]; then
+      curl -s -o /dev/null -w "restored flow${fid}/${mid}.json -> %{http_code}\n" -X PUT -H "X-Auth-Token: ${TOKEN}" \
+        -H "Content-Type: application/json" -H "X-Object-Meta-Flow: ${fid}" -H "X-Object-Meta-Message-Id: ${mid}" \
+        -H "X-Object-Meta-Item-Id: ${iid}" --data-binary "${payload}" \
+        "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/flow${fid}/${mid}.json"
+    else
+      echo "flow${fid}/${mid}.json already present (${code})"
+    fi
+  done
+```
+
+*Expected:* `restored flow1/<message_id>.json -> 201` for each of items 581–583 (and the same pass over the items from Scenarios 56 and 57 if you widen the `WHERE` clause: `item_id IN (5619, 5629, 5701)`). Re-running the loop prints `already present (200)` for all of them, so it is safe to repeat. Refresh `${TOKEN}` first if the Scenario 56 or 57 steps invalidated it.
+
+```bash
+# Confirm with the Scenario 50 D count, which should match again
+curl -s "http://${FLOWFIRST_VIP}:8080/swift/object/flow1/$(M -N -B -e 'SELECT message_id FROM processed_messages WHERE item_id = 581 AND flow_id = 1').json" | jq -r .payload.initial_data
+```
+
+*Expected:* `swift-outage-1`. The restored object holds the JSON that Process 4 stored in MariaDB (Process 4 added its `process4_saved_to_mariadb` history step before both writes), formatted compactly rather than with the original indentation. For a larger gap, widen the `WHERE` clause by `created_at` and compare against `/swift/objects?prefix=flow1/` as in Scenario 50 D. A stored object is a copy, not the source of truth: MariaDB remains authoritative, and nothing reads Swift back into the pipeline.

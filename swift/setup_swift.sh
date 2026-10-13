@@ -173,6 +173,15 @@ if ! sudo setfattr -n user.swift_test -v 1 "${_xtest}" 2>/dev/null; then
 fi
 sudo rm -f "${_xtest}"
 
+# swift-recon (-u / -d) always runs a real mount-point check, even with mount_check = false.
+# A plain directory on the root filesystem would be reported "Not mounted", so mark it with
+# the .ismount stub that Swift accepts. Skipped when mount checking is on, where a missing
+# mount must stay visible.
+if [ "${SWIFT_MOUNT_CHECK}" != "true" ] && ! mountpoint -q "${SWIFT_DEVICE_PATH}"; then
+    sudo -u swift touch "${SWIFT_DEVICE_PATH}/.ismount"
+    echo "  Created ${SWIFT_DEVICE_PATH}/.ismount (lets swift-recon treat the plain directory as a device)"
+fi
+
 # rsyncd runs confined (rsync_t) and must be able to write replicated data
 if command -v semanage &>/dev/null && command -v getenforce &>/dev/null \
         && [ "$(getenforce)" != "Disabled" ]; then

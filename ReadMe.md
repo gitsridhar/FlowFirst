@@ -282,6 +282,7 @@ erDiagram
 | [56](#scenario-56-swift-token-cache-memcached-failure--401-re-auth-then-503-when-all-caches-are-down) | Swift Token Cache (memcached) Failure | Swift | One cache down gives 401 + re-auth; all down gives 503 at login; HAProxy cannot see it |
 | [57](#scenario-57-swift-credential-failures--wrong-key-key-rotation-and-token-lifetime) | Swift Credential Failures & Key Rotation | Swift | Wrong key 401, non-fatal `Swift store note`, rotating the tempauth key on all proxies |
 | [58](#scenario-58-total-swift-outage-during-the-pipeline--detect-and-back-fill-from-mariadb) | Total Swift Outage & Back-Fill from MariaDB | Swift | All proxies down, 7 s retry delay per message, rebuild missing objects from `raw_payload` |
+| [59](#scenario-59-reading-the-rest-api-http-request-log-across-scenarios) | Reading the REST API (HTTP) Request Log | REST API | Journal access lines, probe vs real requests, 400/404/500/502 phrasebook, per-node compare, HAProxy correlation |
 
 ---
 
@@ -7061,3 +7062,180 @@ curl -s "http://${FLOWFIRST_VIP}:8080/swift/object/flow1/$(M -N -B -e 'SELECT me
 ```
 
 *Expected:* `swift-outage-1`. The restored object holds the JSON that Process 4 stored in MariaDB (Process 4 added its `process4_saved_to_mariadb` history step before both writes), formatted compactly rather than with the original indentation. For a larger gap, widen the `WHERE` clause by `created_at` and compare against `/swift/objects?prefix=flow1/` as in Scenario 50 D. A stored object is a copy, not the source of truth: MariaDB remains authoritative, and nothing reads Swift back into the pipeline.
+
+---
+
+## HTTP / REST API Log Analysis
+
+### Scenario 59: Reading the REST API (HTTP) Request Log Across Scenarios
+
+> **Runs on:** the `curl` traffic generators from any machine that can reach the VIP. The log itself lives on **each of node1–node3**: every node runs its own Process 1, and HAProxy sends each request to one of them, so a single node's journal holds only the requests that node served. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 runs no Process 1 and has no REST API log.
+
+Process 1 is the only FlowFirst component that speaks HTTP to clients. It has no access-log file: each request becomes one `print()` line in the systemd journal, written by `RestApiHandler.log_message` in [`src/application/process1.py`](src/application/process1.py). Scenario 48 covers the HAProxy side of the same requests. Use this scenario alongside Scenarios 1, 11, 12, 29 and 40–41, and 56–58 for the Swift endpoints, to see which node served a request, what status it returned, and why a request failed. Exact wording of Python's own error lines varies between Python versions, so the commands below grep for stable keywords.
+
+#### A. Locate the log and generate some traffic
+
+```bash
+# On node1, node2 or node3. -o cat prints the bare message without the journal prefix.
+sudo journalctl -u flowfirst-process1 -o cat --since "5 min ago" --no-pager | grep -F '[http]' | tail -5
+```
+```
+[P1][gt][http] 192.168.1.11 — "GET /health HTTP/1.0" 200 -
+[P1][gt][http] 192.168.1.11 — "GET /health HTTP/1.0" 200 -
+```
+
+Each line is `[P1][gt][http] <client ip> — "<request line>" <status> <size>`. Three things to know before reading it:
+
+- **The client IP is HAProxy, not the real client.** Requests that came through the VIP arrive from the VIP holder's node address (normally its primary IP, not the VIP itself). The real client address is in the HAProxy log (Scenario 48, field 1) and in the `X-Forwarded-For` header that HAProxy adds; Process 1 does not log that header.
+- **The size is always `-`.** The handler does not report a response size.
+- **There is no duration.** To get timing, use the `Tr`/`Tt` fields in the HAProxy log, or `curl -w '%{time_total}'`.
+
+Generate one example of each outcome from any machine that can reach the VIP:
+
+```bash
+V=http://${FLOWFIRST_VIP}:8080
+curl -s -o /dev/null -w "GET  /health        -> %{http_code}\n" ${V}/health
+curl -s -o /dev/null -w "GET  /nope          -> %{http_code}\n" ${V}/nope
+curl -s -X POST ${V}/api/flow1 -H "Content-Type: application/json" -d '{"item_id": 5901, "counter": 10}' | jq -r .handled_by_node
+curl -s -o /dev/null -w "POST bad JSON       -> %{http_code}\n" -X POST ${V}/api/flow1 -H "Content-Type: application/json" -d '{bad json'
+curl -s -o /dev/null -w "POST item_id=abc    -> %{http_code}\n" -X POST ${V}/api/flow1 -H "Content-Type: application/json" -d '{"item_id": "abc"}'
+curl -s -o /dev/null -w "GET  limit=abc      -> %{http_code}\n" "${V}/swift/objects?limit=abc"
+```
+
+*Expected output:* `200`, `404`, (a node name), `400`, `500`, `502`. The last one is produced by HAProxy, not by Process 1: the `limit=abc` handler raises an uncaught `ValueError`, so Process 1 prints a traceback and closes the connection without answering (see C). Then read the log on the node named by `handled_by_node` for the `POST`, and on every node for the rest:
+
+```bash
+sudo journalctl -u flowfirst-process1 -o cat --since "2 min ago" --no-pager | grep -v "GET /health HTTP/1.0"
+```
+```
+[P1][gt][http] 192.168.1.11 — "GET /health HTTP/1.1" 200 -
+[P1][gt][http] 192.168.1.11 — "GET /nope HTTP/1.1" 404 -
+[P1][gt] [Flow 1] Published #5901 (counter=10, step=...)
+[P1][gt][http] 192.168.1.11 — "POST /api/flow1 HTTP/1.1" 200 -
+[P1][gt][http] 192.168.1.11 — "POST /api/flow1 HTTP/1.1" 400 -
+[P1][gt] POST /api/flow1 error: invalid literal for int() with base 10: 'abc'
+[P1][gt][http] 192.168.1.11 — "POST /api/flow1 HTTP/1.1" 500 -
+```
+
+The access line is written **after** the response is sent, so a `[P1][gt] [Flow N] Published ...` line or a `POST ... error:` line appears just *before* the access line of the same request. The requests are spread round-robin over three nodes (Scenario 1), so each node shows only about a third of them.
+
+#### B. Health checks versus real requests
+
+HAProxy probes `GET /health` on every backend every 3 s (`inter 3s`), and only from the current VIP holder. That is about 28,800 lines per day on every node, and they will bury everything else. HAProxy's probe normally identifies itself as `HTTP/1.0`; a real client such as `curl` uses `HTTP/1.1`. Confirm on your node before relying on this:
+
+```bash
+sudo journalctl -u flowfirst-process1 -o cat --since "1 min ago" --no-pager | grep -F 'GET /health' | awk -F'"' '{print $2}' | sort | uniq -c
+```
+```
+     20 GET /health HTTP/1.0
+```
+
+Filter out only the probes with `grep -v "GET /health HTTP/1.0"`. Use `grep -v "GET /health"` to drop both probes and manual health checks (the form used in Scenario 48). Because the probes come from the VIP holder, the client IP of the `HTTP/1.0` lines on node2 and node3 tells you which node holds HAProxy right now; it should match `sudo crm_resource --resource flowfirst-vip --locate`.
+
+To see a request that **bypassed** HAProxy, call a node directly on its backend port. The client IP in the log is then your own machine:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://${NODE2_IP}:8082/health         # from a workstation; no HAProxy involved
+# On node2
+sudo journalctl -u flowfirst-process1 -o cat --since "1 min ago" --no-pager | grep -F 'GET /health HTTP/1.1'
+```
+
+#### C. Message phrasebook — what each line means
+
+| Log text (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `"GET /health HTTP/1.0" 200 -` | HAProxy health probe; Process 1 is up | any |
+| `"GET /health HTTP/1.1" 200 -` | A real client called `/health` (through the VIP or directly) | 1, 29 |
+| `"POST /api/flow1" 200 -` (also `flow2`, `flow3`, `batch`) | Message(s) published to RabbitMQ; the response body names `handled_by_node` | 1, 2, 40 |
+| `[Flow N] Published #...` just before a `200` | Confirms the publish happened before the response | 2, 44 |
+| `... 400 -` on a `POST` | Body is not valid JSON, or `/zk/config` is missing `key`/`value` or uses an unknown key | 35 |
+| `... 404 -` | Unknown path or method, or `/swift/object/<name>` not found in Swift | 50, 55 |
+| `[P1][gt] POST <path> error: ...` followed by `... 500 -` | The publish failed or a field has the wrong type; the text after `error:` is the exception | 13, 25, 42 |
+| `"GET /swift/objects..." 502 -` | Swift list failed (proxy down, bad credentials); the body holds the error | 56, 57, 58 |
+| `"OPTIONS ..." 204 -` | Browser CORS pre-flight request | any |
+| `code 501, message Unsupported method ('PUT')` | A method other than GET, POST or OPTIONS (for example `PUT`, `DELETE`) was sent; Python's server answers it itself | any |
+| `code 400, message Bad request syntax`, `Bad request version`, `Bad HTTP/0.9 request type` | Something that is not HTTP reached port 8082, for example a TLS handshake or a port scanner. The request line shows as unreadable bytes. | any |
+| A bare `Traceback (most recent call last):` with no `[http]` line after it | A handler raised an exception that Process 1 did not catch (the eventlet worker prints it to stderr), so no response was written. The client sees a dropped connection and HAProxy typically logs `502` with flags `SH`. Example: `limit=abc` on `/swift/objects`. | 48 |
+| `BrokenPipeError`, `ConnectionResetError` in a traceback | The client (or HAProxy) closed the connection before the response was written. HAProxy shows flags `cD`/`CD`. | 20, 21 |
+| `HTTP accept error:` | The listening socket failed (not an idle timeout, which is filtered out) | any |
+| `HTTP server listening on 0.0.0.0:8082`, `HTTP server stopped.` | Process 1 started or stopped serving on the backend port | 11, 12, 16–19 |
+| `All greenthreads started`, `Shutdown signal` | Process 1 start and stop (same journal) | 11, 12 |
+
+The tracebacks go to stderr, which the unit also sends to the journal, so they appear under the same `-u flowfirst-process1`. Because the handler runs inside the process, a `500` with `error:` means Process 1 caught the problem and answered, whereas a traceback with no access line means it did not.
+
+#### D. Build a timeline and compare the nodes
+
+```bash
+# Requests by client, method, path and status on this node (probes removed; query strings stripped)
+sudo journalctl -u flowfirst-process1 -o cat --since "15 min ago" --no-pager \
+  | grep -F '[http]' | grep -v "GET /health HTTP/1.0" \
+  | sed -E 's/.*\[http\] ([^ ]+) — "([A-Z]+) ([^ ]+) [^"]*" ([0-9]+).*/\1 \2 \3 \4/' \
+  | awk '{sub(/\?.*/,"",$3); n[$1" "$2" "$3" "$4]++} END{for(k in n) print n[k], k}' | sort -k4
+```
+```
+  1 192.168.1.11 GET /nope 404
+  2 192.168.1.11 GET /health 200
+  3 192.168.1.11 POST /api/flow1 200
+  1 192.168.1.11 POST /api/flow1 400
+  1 192.168.1.11 POST /api/flow1 500
+```
+
+Compare the three nodes. This shows whether round-robin is even, and which node served a failing request. The loop runs from any of node1–node3:
+
+```bash
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
+  echo "===== ${n} ====="
+  ssh "${n}" "sudo journalctl -u flowfirst-process1 -o cat --since '15 min ago' --no-pager \
+    | grep -F '[http]' | grep -v 'GET /health HTTP/1.0' \
+    | grep -cE '\" [0-9]{3} '; \
+    sudo journalctl -u flowfirst-process1 -o cat --since '15 min ago' --no-pager \
+    | grep -E 'error:|Traceback| (4|5)[0-9]{2} -'"
+done
+```
+
+For each node the first number is the count of non-probe requests; the lines after it are the errors. To follow one incident across a stop and start of a process (Scenarios 11 and 12), look for a gap in the `HTTP/1.0` probe lines on that node and for `HTTP server stopped.` followed by `HTTP server listening`:
+
+```bash
+sudo journalctl -u flowfirst-process1 -o short-iso --since "30 min ago" --no-pager | grep -E "HTTP server (listening|stopped)|Shutdown signal|All greenthreads started"
+```
+
+#### E. Line up one request with the HAProxy log
+
+The two logs have no shared request ID. Match them by time, path and status:
+
+```bash
+# On the VIP holder (HLOG as in Scenario 48): the request as HAProxy saw it, including the real client and the chosen backend
+sudo grep -E 'POST /api/flow1' ${HLOG} | tail -3
+# On the backend node it names: the same request as Process 1 saw it
+sudo journalctl -u flowfirst-process1 -o short-iso --since "2 min ago" --no-pager | grep -F 'POST /api/flow1'
+```
+
+HAProxy's `flowfirst_api_back/node2` field and the `handled_by_node` value in the response must name the same node as the journal you are reading. Read the two sides together:
+
+| HAProxy log | Process 1 journal | Likely cause |
+|---|---|---|
+| `200` | `200` | Healthy |
+| `500` | `500` with `POST ... error:` | Process 1 answered with an error; the cause is in the `error:` text |
+| `502 ... SH` | traceback, no access line | Handler crashed before answering |
+| `503` with `<NOSRV>` | nothing | No backend was up, so the request never reached Process 1 (Scenarios 12, 19) |
+| `SC` flags, no backend | nothing | Connection refused; Process 1 is stopped on that node (Scenarios 11, 16) |
+| `504 ... sH` | access line shows a late `200`, or nothing | Backend took longer than `timeout server 1m` (Scenarios 20, 21) |
+
+#### F. Watch live while running another scenario
+
+```bash
+# On the node under test, in a second terminal (use '-f' on the journal, not a log file)
+sudo journalctl -u flowfirst-process1 -o cat -f \
+  | grep --line-buffered -v "GET /health HTTP/1.0" \
+  | grep --line-buffered -E '\[http\]|error:|Traceback|HTTP server'
+```
+
+#### G. Manage the log: volume and retention
+
+Process 1 uses `print()` for the request log, not Python's `logging`, so `LOG_LEVEL` in `.env` has no effect on it, and there is no setting to turn the access lines off. Their volume is set by the health probes (about 28,800 lines per day per node) plus your own traffic, and by `/api/batch` (one access line per call, not per message). Retention and rate limits are the journald settings in Scenario 51 G: if a load test produces more than the journal's rate limit, you will see `Suppressed N messages from flowfirst-process1.service` and the missing lines will not be in the journal.
+
+```bash
+# Total journal size on this node, and whether messages were dropped
+sudo journalctl --disk-usage
+sudo journalctl --since "1 hour ago" --no-pager | grep -E "Suppressed [0-9]+ messages.*flowfirst-process1"
+```

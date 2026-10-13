@@ -80,32 +80,88 @@ _patched = False
 _logging_configured = False
 
 
+def _log_process_name() -> str:
+    """'process1' for src/application/process1.py (also under `python -m`)."""
+    return os.path.splitext(os.path.basename(sys.argv[0] or "flowfirst"))[0] or "flowfirst"
+
+
 def configure_logging():
     """
-    Send FlowFirst log records (gt, zk, swift_storage) to stdout -> journald.
+    Send FlowFirst log records to stdout (-> journald) AND to a rotating file.
 
-    No process configures Python logging itself, so without this only WARNING and
-    above would be emitted (via logging's last-resort handler) and every
-    log.info() line in gt.py / zk.py / swift_storage.py would be silently lost.
-    Level comes from LOG_LEVEL (default INFO). Chatty third-party libraries stay
-    at WARNING so their connection chatter does not flood the journal.
-    journald adds its own timestamp, so the format carries only level + message.
+    All of gt.py / zk.py / swift_storage.py / process*.py log through the standard
+    `logging` module; without this only WARNING and above would be emitted (via
+    logging's last-resort handler).
+
+    Environment (read from the process environment or the repo-root .env):
+      LOG_LEVEL         DEBUG | INFO | WARNING | ERROR   (default INFO)
+      LOG_DIR           directory for log files          (default /var/log/flowfirst)
+                        set to an empty string to disable the file handler
+      LOG_MAX_BYTES     rotate a file at this size       (default 52428800 = 50 MiB)
+      LOG_BACKUP_COUNT  rotated files kept per process   (default 7)
+
+    The file is <LOG_DIR>/<process>.log (e.g. process1.log), one per process, so
+    processes never share a file. File lines carry a timestamp; the stdout format
+    does not because journald adds its own. If the directory cannot be created or
+    written, a warning goes to stderr and logging continues on stdout only.
+    Chatty third-party libraries stay at WARNING. Uncaught exceptions are logged
+    at CRITICAL with a traceback so a crash always reaches the file.
     """
     global _logging_configured
     if _logging_configured:
         return
+    try:                                   # honour .env for LOG_* when run by hand
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     level_name = os.getenv("LOG_LEVEL", "INFO").strip().upper()
     level = getattr(logging, level_name, None)
     if not isinstance(level, int):
         level = logging.INFO
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
     root = logging.getLogger()
-    root.addHandler(handler)
     root.setLevel(level)
+
+    stream = logging.StreamHandler(sys.stdout)
+    stream.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    root.addHandler(stream)
+
+    log_dir = os.getenv("LOG_DIR", "/var/log/flowfirst").strip()
+    log_file = None
+    if log_dir:
+        try:
+            from logging.handlers import RotatingFileHandler
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, f"{_log_process_name()}.log")
+            fh = RotatingFileHandler(
+                log_file,
+                maxBytes=int(os.getenv("LOG_MAX_BYTES", "52428800")),
+                backupCount=int(os.getenv("LOG_BACKUP_COUNT", "7")),
+                encoding="utf-8",
+            )
+            fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s"))
+            root.addHandler(fh)
+        except (OSError, ValueError) as e:
+            log_file = None
+            print(f"[gt] WARNING: file logging disabled — cannot use LOG_DIR='{log_dir}': {e}",
+                  file=sys.stderr)
+
     for noisy in ("pika", "kazoo", "urllib3", "swiftclient"):
         logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
+
+    def _log_uncaught(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        logging.getLogger("flowfirst").critical("Uncaught exception", exc_info=(exc_type, exc, tb))
+    sys.excepthook = _log_uncaught
+
     _logging_configured = True
+    if log_file:
+        logging.getLogger("flowfirst").info(
+            "[gt] Logging to %s (level=%s, rotate at %s bytes, keep %s)",
+            log_file, level_name, os.getenv("LOG_MAX_BYTES", "52428800"),
+            os.getenv("LOG_BACKUP_COUNT", "7"))
 
 
 def monkey_patch():

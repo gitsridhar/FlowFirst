@@ -74,7 +74,7 @@ All queues are declared durable via `setup_queues(channel)` before any publish/c
 ## Code Style
 - Python 3 with type hints in function signatures (`src/config/config.py`, `src/swift/swift_storage.py`, `src/zookeeper/zk.py`)
 - `from src.config.config import (NAME1, NAME2, ...)` — named imports only, never `import config` as namespace except in `src/zookeeper/zk.py`
-- `print(f"[PX][gt] ...")` for all runtime log lines (not `logging.*` in process files; `logging` used only in `src/gt/gt.py`, `src/zookeeper/zk.py`, `src/swift/swift_storage.py`; `gt.monkey_patch()` calls `gt.configure_logging()`, which sends those loggers to stdout/journal at `LOG_LEVEL`, default INFO — so never add a second `basicConfig`)
+- `log = logging.getLogger("flowfirst.pN")` in process files; never `print()` for runtime messages. `log.error(..., exc_info=True)` in `except` blocks. `gt.monkey_patch()` calls `gt.configure_logging()`, which sends every logger to stdout/journal and to a rotating `LOG_DIR/<process>.log` (`LOG_LEVEL` default INFO, `LOG_DIR` default `/var/log/flowfirst`, `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT`) — so never add a second `basicConfig`
 - Error handling: `except Exception as e: print(...); ch.basic_nack(..., requeue=False)` — failed messages are dead-lettered, not requeued
 - `autocommit=True` on all MariaDB connections (no explicit `COMMIT` calls)
 - Swift functions return `(bool, str)` or `(bool, data, headers)` tuples — callers check `[0]` for success

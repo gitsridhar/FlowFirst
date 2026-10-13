@@ -3,6 +3,7 @@ from src.gt import gt
 gt.monkey_patch()
 
 import json
+import logging
 import time
 import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -21,6 +22,8 @@ from src.config.config import (
 from src.zookeeper import zk as zklib
 from src.swift import swift_storage
 from urllib.parse import parse_qs
+
+log = logging.getLogger("flowfirst.p1")
 
 # ---------------------------------------------------------------------------
 # Per-process state — each greenthread owns its OWN pika connection+channel.
@@ -85,7 +88,7 @@ def publish_flow1_message(item_id: int = None, custom_data: str = None, counter:
             ),
         )
     gt.metrics_counter["flow1_published"] += 1
-    print(f"[P1][gt] [Flow 1] Published #{item_id} (counter={counter}, step={counter_step})")
+    log.info(f"[Flow 1] Published #{item_id} (counter={counter}, step={counter_step})")
     return payload
 
 
@@ -122,7 +125,7 @@ def publish_flow2_message(item_id: int = None, custom_data: str = None, value: f
             ),
         )
     gt.metrics_counter["flow2_published"] += 1
-    print(f"[P1][gt] [Flow 2] Published #{item_id} (value={value})")
+    log.info(f"[Flow 2] Published #{item_id} (value={value})")
     return payload
 
 
@@ -159,7 +162,7 @@ def publish_flow3_message(item_id: int = None, custom_data: str = None, remote_m
             ),
         )
     gt.metrics_counter["flow3_published"] += 1
-    print(f"[P1][gt] [Flow 3] Published #{item_id} to Remote Node 4 (metric={remote_metric})")
+    log.info(f"[Flow 3] Published #{item_id} to Remote Node 4 (metric={remote_metric})")
     return payload
 
 
@@ -329,11 +332,11 @@ class RestApiHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(404, {"error": "Not Found", "path": self.path})
         except Exception as e:
-            print(f"[P1][gt] POST {path} error: {e}")
+            log.error(f"POST {path} error: {e}", exc_info=True)
             self._send_json(500, {"error": "Internal Server Error", "details": str(e)})
 
     def log_message(self, fmt, *args):
-        print(f"[P1][gt][http] {self.address_string()} — {fmt % args}")
+        log.info(f"[http] {self.address_string()} — {fmt % args}")
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +355,7 @@ def _gt_rmq_heartbeat():
             if _publish_conn and not _publish_conn.is_closed:
                 _publish_conn.process_data_events(time_limit=0)
         except Exception as e:
-            print(f"[P1][gt] heartbeat error: {e}")
+            log.error(f"heartbeat error: {e}", exc_info=True)
         gt.sleep(30)
 
 
@@ -377,7 +380,7 @@ def _gt_http_server():
     # Use GreenPool to handle each request in its own greenthread
     httpd.socket = eventlet.listen((API_HOST, API_BACKEND_PORT))
     pool = eventlet.GreenPool(size=gt.GT_WORKER_CONCURRENCY * 10)
-    print(f"[P1][gt] HTTP server listening on {API_HOST}:{API_BACKEND_PORT} (GreenPool size={gt.GT_WORKER_CONCURRENCY * 10})")
+    log.info(f"HTTP server listening on {API_HOST}:{API_BACKEND_PORT} (GreenPool size={gt.GT_WORKER_CONCURRENCY * 10})")
     try:
         while not gt.is_stopping():
             try:
@@ -390,13 +393,13 @@ def _gt_http_server():
             except Exception as e:
                 # Timeout is normal when idle; log only real errors
                 if not gt.is_stopping() and "timed out" not in str(e).lower():
-                    print(f"[P1][gt] HTTP accept error: {e}")
+                    log.error(f"HTTP accept error: {e}", exc_info=True)
     finally:
         try:
             httpd.server_close()
         except Exception:
             pass
-        print("[P1][gt] HTTP server stopped.")
+        log.info("HTTP server stopped.")
 
 
 def _run_api_server():
@@ -415,12 +418,12 @@ def _run_api_server():
     # Greenthread 4: Metrics reporter
     gt.start_metrics_reporter("process1")
 
-    print(f"[P1][gt] All greenthreads started: {gt.list_greenthreads()}")
-    print(f"[P1][gt] ZK config endpoints live: GET /zk/health  GET /zk/config  POST /zk/config")
+    log.info(f"All greenthreads started: {gt.list_greenthreads()}")
+    log.info(f"ZK config endpoints live: GET /zk/health  GET /zk/config  POST /zk/config")
 
     # Wait for shutdown signal then stop all greenthreads
     gt.stop_event.wait()
-    print("[P1][gt] Shutdown signal — stopping all greenthreads...")
+    log.info("Shutdown signal — stopping all greenthreads...")
     if _publish_conn and not _publish_conn.is_closed:
         _publish_conn.close()
     gt.wait_all()
@@ -429,15 +432,15 @@ def _run_api_server():
 def main():
     global _config_watcher
 
-    print(f"[P1][gt] Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
+    log.info(f"Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
 
     # ZooKeeper: connect, register, config watch
     try:
         zklib.register_service("process1", NODE_NAME)
         _config_watcher = zklib.ConfigWatcher()
-        print(f"[P1][gt] ZK ready. Config: {_config_watcher.get_all()}")
+        log.info(f"ZK ready. Config: {_config_watcher.get_all()}")
     except Exception as e:
-        print(f"[P1][gt] WARNING: ZK unavailable ({e}) — degraded mode.")
+        log.warning(f"ZK unavailable ({e}) — degraded mode.")
         _config_watcher = None
 
     # Leader election
@@ -445,7 +448,7 @@ def main():
         election = zklib.LeaderElection("process1", NODE_NAME)
         election.run(_run_api_server)
     except Exception as e:
-        print(f"[P1][gt] ZK election failed ({e}) — single-node mode.")
+        log.warning(f"ZK election failed ({e}) — single-node mode.")
         _run_api_server()
     finally:
         zklib.close_client()

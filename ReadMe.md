@@ -283,6 +283,7 @@ erDiagram
 | [57](#scenario-57-swift-credential-failures--wrong-key-key-rotation-and-token-lifetime) | Swift Credential Failures & Key Rotation | Swift | Wrong key 401, non-fatal `Swift store note`, rotating the tempauth key on all proxies |
 | [58](#scenario-58-total-swift-outage-during-the-pipeline--detect-and-back-fill-from-mariadb) | Total Swift Outage & Back-Fill from MariaDB | Swift | All proxies down, 7 s retry delay per message, rebuild missing objects from `raw_payload` |
 | [59](#scenario-59-reading-the-rest-api-http-request-log-across-scenarios) | Reading the REST API (HTTP) Request Log | REST API | Journal access lines, probe vs real requests, 400/404/500/502 phrasebook, per-node compare, HAProxy correlation |
+| [60](#scenario-60-pipeline-process-log-files-varlogflowfirst) | Pipeline Process Log Files | Logging | `/var/log/flowfirst/processN.log`, levels, rotation, tracing one message across processes |
 
 ---
 
@@ -3582,7 +3583,7 @@ INFO [gt] [p2-flow1] RabbitMQ connected at 192.168.1.101:5672
 ```
 The consumer greenthread restarts itself and `config.get_connection()` offers the broker list in order (`NODE1_IP`, `NODE2_IP`, `NODE3_IP`), so it reconnects to node1 first; the `RabbitMQ connected at` line names the broker it chose. `[gt] [p2-flow1] RabbitMQ not ready (attempt N/20)` appears only when **no** broker answered, and a `pika` line `TCP Connection attempt failed: ... dest=(... '<node2-ip>', 5672)` only when a broker was tried and unreachable (for example when node1 is down).
 
-> These `[gt]` / `[zk]` lines come from Python `logging`, which `gt.configure_logging()` sends to the journal at `LOG_LEVEL` (default `INFO`). `pika` and `kazoo` are held at WARNING. On a node still running units started before that change, only `print()` lines appear; restart the processes. You can also confirm the new broker with `sudo rabbitmqctl list_connections name peer_host | grep <process-2-node-ip>`.
+> These `[gt]` / `[zk]` lines come from Python `logging`, which `gt.configure_logging()` sends to the journal at `LOG_LEVEL` (default `INFO`). `pika` and `kazoo` are held at WARNING. On a node still running units started before that change, those lines are missing; restart the processes. You can also confirm the new broker with `sudo rabbitmqctl list_connections name peer_host | grep <process-2-node-ip>`.
 
 #### 25.3 — Verify RabbitMQ cluster view
 
@@ -4939,8 +4940,8 @@ ssh ${NODE2_IP} "sudo systemctl stop flowfirst-process2"
 sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "LEADER|election|flow[12]-consumer"
 # Expected within ~10 seconds (the first line is the INFO log from zk.py):
 # INFO [zk] [process2] *** NODE node1 IS NOW LEADER ***
-# [P2][gt] flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
-# [P2][gt] flow2-consumer greenthread started — consuming 'flow2_p1_to_p2'
+# INFO flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
+# INFO flow2-consumer greenthread started — consuming 'flow2_p1_to_p2'
 ```
 
 #### E. Verify all 5 messages were processed (no loss, no duplicates)
@@ -5000,7 +5001,7 @@ sudo rabbitmqadmin -u "${RABBITMQ_USER}" -p "${RABBITMQ_PASSWORD}" publish \
 sudo journalctl -u flowfirst-process4 -f --no-pager | grep -i "dedup\|duplicate"
 # Expected (one pair of lines per redelivered message):
 # WARNING [zk] Dedup: duplicate detected for <message_id> — skipping insert.
-# [P4][gt] [Flow 1] DUPLICATE via ZK dedup — skipping insert for <message_id>
+# WARNING [Flow 1] DUPLICATE via ZK dedup — skipping insert for <message_id>
 ```
 
 #### D. Verify no duplicate row was inserted
@@ -5135,9 +5136,9 @@ for svc in flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-pr
     sudo journalctl -u "${svc}" -n 5 --no-pager | grep -E "\[gt\]|greenthread"
 done
 # Expected per process:
-# [P2][gt] All greenthreads started: ['p2_flow1_consumer', 'p2_flow2_consumer', ...]
-# [P2][gt] flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
-# [P2][gt] flow2-consumer greenthread started — consuming 'flow2_p1_to_p2'
+# INFO All greenthreads started: ['p2_flow1_consumer', 'p2_flow2_consumer', ...]
+# INFO flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
+# INFO flow2-consumer greenthread started — consuming 'flow2_p1_to_p2'
 ```
 
 ```bash
@@ -5305,7 +5306,7 @@ sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "restart|Reconnect
 # ERROR [gt] Greenthread 'p2_flow1_consumer' raised: <connection error>
 # INFO [gt] Restarting 'p2_flow1_consumer' in 2s...
 # INFO [gt] [p2-flow1] RabbitMQ connected at 192.168.1.101:5672
-# [P2][gt] flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
+# INFO flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
 # (a WARNING "RabbitMQ not ready (attempt 1/20): ... — retrying in 5s..." appears before the
 #  'connected' line only if no broker answered the first attempt)
 ```
@@ -5478,8 +5479,8 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow3 \
 # On Remote Node 4:
 sudo journalctl -u flowfirst-process5 --since "1 minute ago" --no-pager
 # Expected output:
-# [P5][gt][Remote Node] Consumed Flow 3 item #9001 (msg_id=7b8f9a2c...)
-# [P5][gt][Remote Node] Reflected to 'flow3_p5_to_p2' (computed=135.5)
+# INFO [Remote Node] Consumed Flow 3 item #9001 (msg_id=7b8f9a2c...)
+# INFO [Remote Node] Reflected to 'flow3_p5_to_p2' (computed=135.5)
 ```
 
 #### D. Validate Database Record & Full Audit Trail in MariaDB
@@ -5786,7 +5787,7 @@ Client-side (pipeline processes, via kazoo):
 sudo journalctl -u flowfirst-process2 --since "30 min ago" --no-pager | grep -E -i "zk|zookeeper|kazoo|connection dropped|expired|leader"
 ```
 
-> **Note:** `src/zookeeper/zk.py` and kazoo log through Python `logging`, which `gt.configure_logging()` sends to the journal at `LOG_LEVEL` (default `INFO`; `kazoo` is held at WARNING). So `INFO [zk] ... *** NODE ... IS NOW LEADER ***` and `Registered ...` lines do appear, alongside warnings such as `Config ... unreadable`, `Dedup: duplicate detected` and kazoo's `Connection dropped`. `DEBUG` lines (for example per-message dedup first-seen) need `LOG_LEVEL=DEBUG` in `.env` and a process restart. The processes' own `print` lines (`[P2][gt] ZK ready ...`, `ZK election failed ...`) are also there, and `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health` shows leaders and registrations.
+> **Note:** `src/zookeeper/zk.py` and kazoo log through Python `logging`, which `gt.configure_logging()` sends to the journal at `LOG_LEVEL` (default `INFO`; `kazoo` is held at WARNING). So `INFO [zk] ... *** NODE ... IS NOW LEADER ***` and `Registered ...` lines do appear, alongside warnings such as `Config ... unreadable`, `Dedup: duplicate detected` and kazoo's `Connection dropped`. `DEBUG` lines (for example per-message dedup first-seen) need `LOG_LEVEL=DEBUG` in `.env` and a process restart. The processes' own lines (`INFO ZK ready ...`, `WARNING ZK election failed ...`) are also there, and `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health` shows leaders and registrations.
 
 #### B. Message phrasebook — what each line means
 
@@ -5996,7 +5997,7 @@ HAProxy's syslog timestamps look like `Oct 12 14:17:31` (no year), which is what
 
 Expected for Scenario 17 (reboot of the VIP holder): the old holder logs `Stopping frontend` / `Proxy ... stopped` (if it shut down cleanly) and nothing after it; the new holder logs `Proxy flowfirst_api_front started` and, since its backends were already healthy, no `is UP` lines unless a backend changed.
 
-> **Noise from the health checks:** Process 1 prints one `[P1][gt][http]` journal line per HTTP request, including HAProxy's own `GET /health` checks every 3 s per backend. When reading `journalctl -u flowfirst-process1`, filter them out with `grep -v "GET /health"`.
+> **Noise from the health checks:** Process 1 logs one `[http]` line per HTTP request, including HAProxy's own `GET /health` checks every 3 s per backend. When reading `journalctl -u flowfirst-process1`, filter them out with `grep -v "GET /health"`.
 
 #### E. Ask HAProxy directly (live state, no log needed)
 
@@ -6258,7 +6259,7 @@ sudo journalctl -u flowfirst-process4 --since "30 min ago" --no-pager \
 
 Read top to bottom: `Stored in Swift object storage` lines stop → first `Swift store note:` / `Failed to put object` → (fault cleared) → `Stored in Swift object storage` resumes. The messages between the first failure and the first success are the ones **missing from Swift** (see D).
 
-> **Output delay:** the unit files set `Environment=PYTHONUNBUFFERED=1`, so `print()` output reaches the journal immediately. On a node installed **before** that line was added, the lines from `src/application/process4.py` can appear in bursts (Python block-buffers `print()` when stdout is not a terminal). Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes (`sudo pcs resource restart flowfirst-p4-res-clone` for the clones). Check with `systemctl show flowfirst-process4 -p Environment`.
+> **Output delay:** the unit files set `Environment=PYTHONUNBUFFERED=1`, so log output reaches the journal immediately. On a node installed **before** that line was added, the lines from `src/application/process4.py` can appear in bursts (Python block-buffers stdout when it is not a terminal). Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes (`sudo pcs resource restart flowfirst-p4-res-clone` for the clones). Check with `systemctl show flowfirst-process4 -p Environment`.
 
 #### D. Reconcile MariaDB and Swift (find objects that were never stored)
 
@@ -6335,16 +6336,16 @@ Use this scenario alongside Scenarios 16–26 (reboots and network faults), and 
 
 | Source | Where to read it | What it holds |
 |---|---|---|
-| systemd journal | `journalctl` | Everything: kernel, systemd, every service's stdout/stderr (including `flowfirst-processN`, MariaDB, RabbitMQ, ZooKeeper, HAProxy, Corosync, Pacemaker). For `flowfirst-processN` this is both the `print()` lines (`[P2][gt] ...`) and the Python `logging` lines (`INFO [gt] ...`, `WARNING [zk] ...`), see the note below |
+| systemd journal | `journalctl` | Everything: kernel, systemd, every service's stdout/stderr (including `flowfirst-processN`, MariaDB, RabbitMQ, ZooKeeper, HAProxy, Corosync, Pacemaker). For `flowfirst-processN` this is the Python `logging` output (`INFO [Flow 1] ...`, `WARNING ZK unavailable ...`), see the note below. The same records are also written to `/var/log/flowfirst/processN.log` (Scenario 60) |
 | `/var/log/messages` | `sudo less /var/log/messages` | rsyslog's copy of the journal's general messages (kernel, systemd, sshd, chronyd, NetworkManager, firewalld, most daemons). Authentication lines go to `/var/log/secure` and cron to `/var/log/cron` instead |
 | `/var/log/audit/audit.log` | `sudo ausearch ...` | SELinux denials (`type=AVC`) and audit events, written by `auditd`, **not** by rsyslog |
 | `dmesg` / `journalctl -k` | `sudo dmesg -T` | Kernel ring buffer: NIC link changes, OOM killer, disk errors, `iptables` LOG targets |
 | Per-service files | See Scenarios 45–50 | `/var/log/mariadb/`, `/var/log/rabbitmq/`, `/var/log/zookeeper/`, `/var/log/pacemaker/`, `/var/log/cluster/` |
 
-**FlowFirst process output in the journal and in `/var/log/messages`.** Each process unit sets `SyslogIdentifier=flowfirst-pN` (`flowfirst-p1` … `flowfirst-p5`; Process 5 runs on node4). A node installed before Process 5's unit had this line tags its lines `python`: re-run `systemd/install_services.sh /opt/flowfirst --remote` and restart the unit, or use `-u flowfirst-process5`. `gt.configure_logging()` sends the `gt`, `zk` and `swift_storage` loggers to stdout, so they travel the same way as the `print()` lines: into the journal, and from there into `/var/log/messages` via rsyslog. Three consequences:
+**FlowFirst process output in the journal and in `/var/log/messages`.** Each process unit sets `SyslogIdentifier=flowfirst-pN` (`flowfirst-p1` … `flowfirst-p5`; Process 5 runs on node4). A node installed before Process 5's unit had this line tags its lines `python`: re-run `systemd/install_services.sh /opt/flowfirst --remote` and restart the unit, or use `-u flowfirst-process5`. `gt.configure_logging()` sends every FlowFirst logger (the five processes, `gt`, `zk` and `swift_storage`) to stdout, so the lines go into the journal, and from there into `/var/log/messages` via rsyslog. It also writes them to a rotating file per process (Scenario 60). Three consequences:
 
 - **Filter by identifier or unit.** `sudo journalctl -t flowfirst-p4 --since "30 min ago"` (or `-u flowfirst-process4`) works on the journal; in `/var/log/messages` grep for `flowfirst-p4\[`.
-- **Severity is not preserved.** journald stores every stdout line as priority `info`, so `journalctl -p warning` does **not** list FlowFirst `WARNING`/`ERROR` lines. Search for the level prefix instead: `journalctl -u flowfirst-process4 --no-pager | grep -E "(WARNING|ERROR) "`. The prefix comes from `LOG_LEVEL` (default `INFO`; set `DEBUG` in `.env` and restart the processes for more, `WARNING` for less).
+- **Severity is not preserved.** journald stores every stdout line as priority `info`, so `journalctl -p warning` does **not** list FlowFirst `WARNING`/`ERROR` lines. Search for the level prefix instead: `journalctl -u flowfirst-process4 --no-pager | grep -E "(WARNING|ERROR) "`. The journal line carries only a level prefix and the message (no timestamp or logger name; the file in `/var/log/flowfirst/` has both). The prefix comes from `LOG_LEVEL` (default `INFO`; set `DEBUG` in `.env` and restart the processes for more, `WARNING` for less).
 - **Multi-line records are split in the text file.** The 60-second `Throughput Report` is one multi-line message. `journalctl` shows it as one entry, while rsyslog writes control characters escaped (`#012` instead of a newline) onto a single long line in `/var/log/messages`. Use `journalctl` for those reports.
 
 `/var/log/messages` and the journal overlap, but they are **not identical**: `/var/log/messages` is a text file that `logrotate` rotates weekly, and the journal can be size-limited or discarded at reboot. When a line is missing from one, check the other.
@@ -7071,7 +7072,7 @@ curl -s "http://${FLOWFIRST_VIP}:8080/swift/object/flow1/$(M -N -B -e 'SELECT me
 
 > **Runs on:** the `curl` traffic generators from any machine that can reach the VIP. The log itself lives on **each of node1–node3**: every node runs its own Process 1, and HAProxy sends each request to one of them, so a single node's journal holds only the requests that node served. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 runs no Process 1 and has no REST API log.
 
-Process 1 is the only FlowFirst component that speaks HTTP to clients. It has no access-log file: each request becomes one `print()` line in the systemd journal, written by `RestApiHandler.log_message` in [`src/application/process1.py`](src/application/process1.py). Scenario 48 covers the HAProxy side of the same requests. Use this scenario alongside Scenarios 1, 11, 12, 29 and 40–41, and 56–58 for the Swift endpoints, to see which node served a request, what status it returned, and why a request failed. Exact wording of Python's own error lines varies between Python versions, so the commands below grep for stable keywords.
+Process 1 is the only FlowFirst component that speaks HTTP to clients. It has no access-log file: each request becomes one `INFO [http]` line, written by `RestApiHandler.log_message` in [`src/application/process1.py`](src/application/process1.py). Scenario 48 covers the HAProxy side of the same requests. Use this scenario alongside Scenarios 1, 11, 12, 29 and 40–41, and 56–58 for the Swift endpoints, to see which node served a request, what status it returned, and why a request failed. Exact wording of Python's own error lines varies between Python versions, so the commands below grep for stable keywords.
 
 #### A. Locate the log and generate some traffic
 
@@ -7080,11 +7081,11 @@ Process 1 is the only FlowFirst component that speaks HTTP to clients. It has no
 sudo journalctl -u flowfirst-process1 -o cat --since "5 min ago" --no-pager | grep -F '[http]' | tail -5
 ```
 ```
-[P1][gt][http] 192.168.1.11 — "GET /health HTTP/1.0" 200 -
-[P1][gt][http] 192.168.1.11 — "GET /health HTTP/1.0" 200 -
+INFO [http] 192.168.1.11 — "GET /health HTTP/1.0" 200 -
+INFO [http] 192.168.1.11 — "GET /health HTTP/1.0" 200 -
 ```
 
-Each line is `[P1][gt][http] <client ip> — "<request line>" <status> <size>`. Three things to know before reading it:
+Each line is `INFO [http] <client ip> — "<request line>" <status> <size>`. Three things to know before reading it:
 
 - **The client IP is HAProxy, not the real client.** Requests that came through the VIP arrive from the VIP holder's node address (normally its primary IP, not the VIP itself). The real client address is in the HAProxy log (Scenario 48, field 1) and in the `X-Forwarded-For` header that HAProxy adds; Process 1 does not log that header.
 - **The size is always `-`.** The handler does not report a response size.
@@ -7108,16 +7109,19 @@ curl -s -o /dev/null -w "GET  limit=abc      -> %{http_code}\n" "${V}/swift/obje
 sudo journalctl -u flowfirst-process1 -o cat --since "2 min ago" --no-pager | grep -v "GET /health HTTP/1.0"
 ```
 ```
-[P1][gt][http] 192.168.1.11 — "GET /health HTTP/1.1" 200 -
-[P1][gt][http] 192.168.1.11 — "GET /nope HTTP/1.1" 404 -
-[P1][gt] [Flow 1] Published #5901 (counter=10, step=...)
-[P1][gt][http] 192.168.1.11 — "POST /api/flow1 HTTP/1.1" 200 -
-[P1][gt][http] 192.168.1.11 — "POST /api/flow1 HTTP/1.1" 400 -
-[P1][gt] POST /api/flow1 error: invalid literal for int() with base 10: 'abc'
-[P1][gt][http] 192.168.1.11 — "POST /api/flow1 HTTP/1.1" 500 -
+INFO [http] 192.168.1.11 — "GET /health HTTP/1.1" 200 -
+INFO [http] 192.168.1.11 — "GET /nope HTTP/1.1" 404 -
+INFO [Flow 1] Published #5901 (counter=10, step=...)
+INFO [http] 192.168.1.11 — "POST /api/flow1 HTTP/1.1" 200 -
+INFO [http] 192.168.1.11 — "POST /api/flow1 HTTP/1.1" 400 -
+ERROR POST /api/flow1 error: invalid literal for int() with base 10: 'abc'
+Traceback (most recent call last):
+  ...
+ValueError: invalid literal for int() with base 10: 'abc'
+INFO [http] 192.168.1.11 — "POST /api/flow1 HTTP/1.1" 500 -
 ```
 
-The access line is written **after** the response is sent, so a `[P1][gt] [Flow N] Published ...` line or a `POST ... error:` line appears just *before* the access line of the same request. The requests are spread round-robin over three nodes (Scenario 1), so each node shows only about a third of them.
+The access line is written **after** the response is sent, so an `INFO [Flow N] Published ...` line or a `POST ... error:` line appears just *before* the access line of the same request. The requests are spread round-robin over three nodes (Scenario 1), so each node shows only about a third of them.
 
 #### B. Health checks versus real requests
 
@@ -7150,7 +7154,7 @@ sudo journalctl -u flowfirst-process1 -o cat --since "1 min ago" --no-pager | gr
 | `[Flow N] Published #...` just before a `200` | Confirms the publish happened before the response | 2, 44 |
 | `... 400 -` on a `POST` | Body is not valid JSON, or `/zk/config` is missing `key`/`value` or uses an unknown key | 35 |
 | `... 404 -` | Unknown path or method, or `/swift/object/<name>` not found in Swift | 50, 55 |
-| `[P1][gt] POST <path> error: ...` followed by `... 500 -` | The publish failed or a field has the wrong type; the text after `error:` is the exception | 13, 25, 42 |
+| `ERROR POST <path> error: ...` (with a traceback) followed by `... 500 -` | The publish failed or a field has the wrong type; the text after `error:` is the exception | 13, 25, 42 |
 | `"GET /swift/objects..." 502 -` | Swift list failed (proxy down, bad credentials); the body holds the error | 56, 57, 58 |
 | `"OPTIONS ..." 204 -` | Browser CORS pre-flight request | any |
 | `code 501, message Unsupported method ('PUT')` | A method other than GET, POST or OPTIONS (for example `PUT`, `DELETE`) was sent; Python's server answers it itself | any |
@@ -7232,10 +7236,143 @@ sudo journalctl -u flowfirst-process1 -o cat -f \
 
 #### G. Manage the log: volume and retention
 
-Process 1 uses `print()` for the request log, not Python's `logging`, so `LOG_LEVEL` in `.env` has no effect on it, and there is no setting to turn the access lines off. Their volume is set by the health probes (about 28,800 lines per day per node) plus your own traffic, and by `/api/batch` (one access line per call, not per message). Retention and rate limits are the journald settings in Scenario 51 G: if a load test produces more than the journal's rate limit, you will see `Suppressed N messages from flowfirst-process1.service` and the missing lines will not be in the journal.
+The request lines are `INFO` records, so `LOG_LEVEL=WARNING` in `.env` (and a restart) turns the access lines off together with the other `INFO` messages; do that only if you accept losing them. The same lines are also in `/var/log/flowfirst/process1.log` with a timestamp, which is easier to grep by time than the journal (Scenario 60). Their volume is set by the health probes (about 28,800 lines per day per node) plus your own traffic, and by `/api/batch` (one access line per call, not per message). Retention and rate limits are the journald settings in Scenario 51 G: if a load test produces more than the journal's rate limit, you will see `Suppressed N messages from flowfirst-process1.service` and the missing lines will not be in the journal.
 
 ```bash
 # Total journal size on this node, and whether messages were dropped
 sudo journalctl --disk-usage
 sudo journalctl --since "1 hour ago" --no-pager | grep -E "Suppressed [0-9]+ messages.*flowfirst-process1"
 ```
+
+---
+
+## Pipeline Process Log Files
+
+### Scenario 60: Pipeline Process Log Files (`/var/log/flowfirst`)
+
+> **Runs on:** **each node that runs a pipeline process**: node1–node3 for Processes 1–4, and node4 for Process 5. Each node's files hold only what that node's processes did. The cross-node trace in D runs from any of node1–node4 over `ssh`.
+
+Every pipeline process logs through Python's `logging` module and writes each record twice: to stdout (the systemd journal) and to its own rotating file, `<LOG_DIR>/processN.log`. The file adds what the journal line lacks: a timestamp, the logger name, and the full traceback of every caught error. Scenarios 47–51 and 59 read the journal; this scenario reads the files.
+
+Settings in `.env` (see `src/config/.env.example`), all optional:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR`. `pika`, `kazoo`, `urllib3` and `swiftclient` are held at `WARNING` regardless. |
+| `LOG_DIR` | `/var/log/flowfirst` | Directory for the files. Blank turns file logging off (journal only). |
+| `LOG_MAX_BYTES` | `52428800` (50 MiB) | A file is rotated when it reaches this size. |
+| `LOG_BACKUP_COUNT` | `7` | Rotated files kept per process (`processN.log.1` … `.7`), so at most 8 files per process. |
+
+The unit files set `LogsDirectory=flowfirst`, so systemd creates `/var/log/flowfirst` owned by `flowuser` when a process starts. Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes on a node installed before this change.
+
+#### A. Find the files and confirm logging started
+
+```bash
+# On each node
+sudo ls -lh /var/log/flowfirst/
+sudo head -3 /var/log/flowfirst/process1.log
+```
+```
+2026-06-15 14:00:01,214 INFO     flowfirst: [gt] Logging to /var/log/flowfirst/process1.log (level=INFO, rotate at 52428800 bytes, keep 7)
+2026-06-15 14:00:01,215 INFO     src.gt.gt: [gt] eventlet monkey-patch applied.
+2026-06-15 14:00:01,300 INFO     flowfirst.p1: Starting (node=node1, pool=1000) ...
+```
+
+If the directory is missing, empty, or the first line is absent, check in this order:
+
+```bash
+sudo journalctl -u flowfirst-process1 -o cat --since "10 min ago" --no-pager | grep -F "file logging disabled"
+grep -E "^LOG_" /opt/flowfirst/.env
+sudo systemctl show flowfirst-process1 -p LogsDirectory
+```
+
+*`file logging disabled — cannot use LOG_DIR`* is a warning, not a failure: the process keeps running and logs to the journal only. The text after it gives the reason (usually permission denied, or `LogsDirectory` missing from an old unit file). A process run by hand as another user needs write access to `LOG_DIR`, or `LOG_DIR=` set to a directory it can write.
+
+#### B. Line format and levels
+
+`<date time,ms> <LEVEL> <logger>: <message>`. The logger name tells you which process wrote it: `flowfirst.p1` … `flowfirst.p5` for the pipeline code, `src.gt.gt`, `src.zookeeper.zk` and `flowfirst.swift` for the shared modules.
+
+| Level | Used for | Example |
+|---|---|---|
+| `INFO` | Normal operation: process start/stop, each message consumed or forwarded, persisted rows, HTTP access lines | `[Flow 1] Persisted to MariaDB (row_id=..., counter=..., steps=...)` |
+| `WARNING` | Degraded but working: ZooKeeper unavailable, election failed, MariaDB init failed, duplicate skipped by the dedup barrier, Swift store failed (the message is still saved to MariaDB) | `[Flow 2] DUPLICATE via ZK dedup — skipping insert for <id>` |
+| `ERROR` | A message or request failed. The record is followed by a traceback. The message is dead-lettered (`requeue=False`). | `[Flow 1] Error: ...` |
+| `CRITICAL` | An uncaught exception ended the process. The traceback is logged before it exits, so a crash is no longer visible only in the journal. | `Uncaught exception` |
+| `DEBUG` | Per-message detail such as the Process 4 history steps and ZK dedup first-seen | `  [process2_examined] @ ...` |
+
+```bash
+# Everything that went wrong on this node today, with tracebacks
+sudo grep -E " (WARNING|ERROR|CRITICAL) " /var/log/flowfirst/process*.log | tail -30
+# Only failed messages, with the first line of the exception
+sudo grep -A3 " ERROR " /var/log/flowfirst/process4.log | tail -20
+```
+
+Unlike the journal (Scenario 51 A), the file has a real level on every line, so `grep " ERROR "` is reliable and does not depend on the `LOG_LEVEL` prefix style.
+
+#### C. Message phrasebook — what each line means
+
+| Log text (grep for) | Meaning | Typical scenarios |
+|---|---|---|
+| `Logging to ... (level=...)` | File logging started; shows the active settings | any |
+| `Starting (node=..., pool=...)` / `All greenthreads started` | Process start-up | 11, 12, 39 |
+| `Shutdown signal` / `... greenthread stopped.` | Clean stop (SIGTERM from systemd or Pacemaker) | 11, 12, 16–19 |
+| `ZK ready` / `ZK service registered` | ZooKeeper connected | 34, 38 |
+| `WARNING ZK unavailable ... degraded mode` / `standalone mode` | ZooKeeper could not be reached; the process runs without leader election or dedup | 36 |
+| `WARNING ZK election failed ... single-node mode` | Election raised an error; the process runs on this node without the leader gate | 36 |
+| `WARNING MariaDB init failed` | Process 4 could not create or check the schema at start-up | 14, 24 |
+| `DUPLICATE via ZK dedup` | Failover re-delivery was caught before the insert | 37 |
+| `Swift store note` | Swift write failed; the row is still in MariaDB | 56–58 |
+| `ERROR [Flow N] Error:` + traceback | One message failed and was dead-lettered | 13, 25, 42 |
+| `ERROR POST ... error:` + traceback | A REST request failed with HTTP 500 | 59 |
+| `ERROR dedup-reaper error` | Process 4 could not clean expired dedup znodes | 37 |
+| `CRITICAL Uncaught exception` | The process crashed; systemd will restart it (`Restart=always`) | any |
+
+#### D. Trace one message across all processes
+
+Every message carries a `message_id`, and Process 4 and Process 5 log it as `msg_id=`. The earlier hops log the `item_id`, so start from the item you sent (Scenario 2) and find its id:
+
+```bash
+# On the node that handled the POST (handled_by_node in the response)
+sudo grep -h "#9001" /var/log/flowfirst/process1.log
+
+# From any of node1–node4: every log line that mentions the item, in time order
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
+  ssh "${n}" "sudo grep -H 'item #9001' /var/log/flowfirst/process*.log 2>/dev/null"
+done | sed -E 's#^/var/log/flowfirst/##' | sort -t: -k2
+```
+
+Expected for a Flow 1 item: lines from `process1.log` (`Published`), `process2.log` (`Received` and `Reflected`), `process3.log` (`Picked up` and `Forwarded`) and `process4.log` (`Consumed` and `Persisted to MariaDB`), each on whichever node held that process's leader role. A hop that is missing from the list shows where the message stopped. Use `grep -B1 -A5` on the `ERROR` line of the next process to read the traceback.
+
+#### E. Watch live while running another scenario
+
+```bash
+# On the node under test, in a second terminal
+sudo tail -F /var/log/flowfirst/process*.log | grep --line-buffered -E " (WARNING|ERROR|CRITICAL) |Traceback"
+```
+
+`tail -F` (capital F) keeps following after rotation.
+
+#### F. Change verbosity or retention
+
+```bash
+# Example: more detail on one node
+sudo sed -i 's/^LOG_LEVEL=.*/LOG_LEVEL=DEBUG/' /opt/flowfirst/.env
+sudo pcs resource restart flowfirst-p4-res-clone      # on node4: sudo systemctl restart flowfirst-process5
+# Revert when finished
+sudo sed -i 's/^LOG_LEVEL=.*/LOG_LEVEL=INFO/' /opt/flowfirst/.env
+```
+
+Settings are read at process start, so a restart is required. `.env` is identical across nodes except for the node identity; change `LOG_*` on every node you want to affect.
+
+#### G. Manage the files: size, rotation and retention
+
+The application rotates its own files, so no `logrotate` rule is needed (and adding one for these files would conflict with the built-in rotation). With the defaults, one process uses at most 8 × 50 MiB = 400 MiB; Processes 1–4 together at most 1.6 GiB per node.
+
+```bash
+sudo du -sh /var/log/flowfirst
+sudo ls -lh /var/log/flowfirst/process4.log*
+# Reduce the footprint: smaller files and fewer backups, then restart the processes (F)
+#   LOG_MAX_BYTES=10485760   LOG_BACKUP_COUNT=3
+```
+
+Rotation renames `process4.log` to `process4.log.1`, shifts the older ones up, and deletes the oldest beyond `LOG_BACKUP_COUNT`. Old data is therefore **lost** once the limit is reached; copy a file off the node before it rotates away if you need it for an incident review. `INFO` volume is mostly one or two lines per message plus the Process 1 access lines, including HAProxy's health probes (about 28,800 per day, Scenario 59 B). If space matters more than detail, `LOG_LEVEL=WARNING` keeps only problems.

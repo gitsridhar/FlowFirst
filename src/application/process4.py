@@ -3,6 +3,7 @@ from src.gt import gt
 gt.monkey_patch()
 
 import json
+import logging
 import time
 import pika
 import eventlet
@@ -18,6 +19,8 @@ from src.swift import swift_storage
 from src.zookeeper import zk as zklib
 
 
+log = logging.getLogger("flowfirst.p4")
+
 def handle_flow1_message(ch, method, properties, body):
     """
     Flow 1 final handler — runs inside the flow1 consumer greenthread.
@@ -26,11 +29,11 @@ def handle_flow1_message(ch, method, properties, body):
     try:
         data   = json.loads(body.decode("utf-8"))
         msg_id = data.get("message_id", "")
-        print(f"\n[P4][gt] [Flow 1] Consumed item #{data.get('item_id')} (msg_id={msg_id})")
+        log.info(f"[Flow 1] Consumed item #{data.get('item_id')} (msg_id={msg_id})")
 
         # ZooKeeper dedup barrier (atomic create — first caller wins)
         if not zklib.check_and_mark_processed(msg_id):
-            print(f"[P4][gt] [Flow 1] DUPLICATE via ZK dedup — skipping insert for {msg_id}")
+            log.warning(f"[Flow 1] DUPLICATE via ZK dedup — skipping insert for {msg_id}")
             gt.metrics_counter["flow1_dedup_skipped"] += 1
             ch.basic_ack(delivery_tag=method.delivery_tag)
             return
@@ -49,16 +52,16 @@ def handle_flow1_message(ch, method, properties, body):
         swift_ok, swift_res = swift_storage.put_message_object(data)
         if swift_ok:
             gt.metrics_counter["flow1_swift_stored"] += 1
-            print(f"[P4][gt] [Flow 1] Stored in Swift object storage: {swift_res}")
+            log.info(f"[Flow 1] Stored in Swift object storage: {swift_res}")
         else:
-            print(f"[P4][gt] [Flow 1] Swift store note: {swift_res}")
+            log.warning(f"[Flow 1] Swift store note: {swift_res}")
 
-        print(f"[P4][gt] [Flow 1] Persisted to MariaDB (row_id={row_id}, "
-              f"counter={data.get('counter')}, steps={len(data.get('history', []))})")
+        log.info(f"[Flow 1] Persisted to MariaDB (row_id={row_id}, "
+                 f"counter={data.get('counter')}, steps={len(data.get('history', []))})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
         gt.sleep(0)
     except Exception as e:
-        print(f"[P4][gt] [Flow 1] Error: {e}")
+        log.error(f"[Flow 1] Error: {e}", exc_info=True)
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -70,10 +73,10 @@ def handle_flow2_message(ch, method, properties, body):
     try:
         data   = json.loads(body.decode("utf-8"))
         msg_id = data.get("message_id", "")
-        print(f"\n[P4][gt] [Flow 2] Consumed item #{data.get('item_id')} (msg_id={msg_id})")
+        log.info(f"[Flow 2] Consumed item #{data.get('item_id')} (msg_id={msg_id})")
 
         if not zklib.check_and_mark_processed(msg_id):
-            print(f"[P4][gt] [Flow 2] DUPLICATE via ZK dedup — skipping insert for {msg_id}")
+            log.warning(f"[Flow 2] DUPLICATE via ZK dedup — skipping insert for {msg_id}")
             gt.metrics_counter["flow2_dedup_skipped"] += 1
             ch.basic_ack(delivery_tag=method.delivery_tag)
             return
@@ -92,19 +95,19 @@ def handle_flow2_message(ch, method, properties, body):
         swift_ok, swift_res = swift_storage.put_message_object(data)
         if swift_ok:
             gt.metrics_counter["flow2_swift_stored"] += 1
-            print(f"[P4][gt] [Flow 2] Stored in Swift object storage: {swift_res}")
+            log.info(f"[Flow 2] Stored in Swift object storage: {swift_res}")
         else:
-            print(f"[P4][gt] [Flow 2] Swift store note: {swift_res}")
+            log.warning(f"[Flow 2] Swift store note: {swift_res}")
 
-        print(f"[P4][gt] [Flow 2] Persisted (row_id={row_id}, "
-              f"status={data.get('examined_status')}, value={data.get('value')})")
+        log.info(f"[Flow 2] Persisted (row_id={row_id}, "
+                 f"status={data.get('examined_status')}, value={data.get('value')})")
         for step in data.get("history", []):
             desc = step.get("modification") or step.get("status") or step.get("database_action")
-            print(f"  [{step.get('stage')}] @ {step.get('timestamp')}: {desc}")
+            log.debug(f"  [{step.get('stage')}] @ {step.get('timestamp')}: {desc}")
         ch.basic_ack(delivery_tag=method.delivery_tag)
         gt.sleep(0)
     except Exception as e:
-        print(f"[P4][gt] [Flow 2] Error: {e}")
+        log.error(f"[Flow 2] Error: {e}", exc_info=True)
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -116,10 +119,10 @@ def handle_flow3_message(ch, method, properties, body):
     try:
         data   = json.loads(body.decode("utf-8"))
         msg_id = data.get("message_id", "")
-        print(f"\n[P4][gt] [Flow 3 - Remote Pipeline] Consumed item #{data.get('item_id')} (msg_id={msg_id})")
+        log.info(f"[Flow 3 - Remote Pipeline] Consumed item #{data.get('item_id')} (msg_id={msg_id})")
 
         if not zklib.check_and_mark_processed(msg_id):
-            print(f"[P4][gt] [Flow 3] DUPLICATE via ZK dedup — skipping insert for {msg_id}")
+            log.warning(f"[Flow 3] DUPLICATE via ZK dedup — skipping insert for {msg_id}")
             gt.metrics_counter["flow3_dedup_skipped"] += 1
             ch.basic_ack(delivery_tag=method.delivery_tag)
             return
@@ -137,16 +140,16 @@ def handle_flow3_message(ch, method, properties, body):
         swift_ok, swift_res = swift_storage.put_message_object(data)
         if swift_ok:
             gt.metrics_counter["flow3_swift_stored"] += 1
-            print(f"[P4][gt] [Flow 3] Stored in Swift object storage: {swift_res}")
+            log.info(f"[Flow 3] Stored in Swift object storage: {swift_res}")
         else:
-            print(f"[P4][gt] [Flow 3] Swift store note: {swift_res}")
+            log.warning(f"[Flow 3] Swift store note: {swift_res}")
 
-        print(f"[P4][gt] [Flow 3] Persisted to MariaDB (row_id={row_id}, "
-              f"remote_val={data.get('remote_computed_value')}, steps={len(data.get('history', []))})")
+        log.info(f"[Flow 3] Persisted to MariaDB (row_id={row_id}, "
+                 f"remote_val={data.get('remote_computed_value')}, steps={len(data.get('history', []))})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
         gt.sleep(0)
     except Exception as e:
-        print(f"[P4][gt] [Flow 3] Error: {e}")
+        log.error(f"[Flow 3] Error: {e}", exc_info=True)
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -157,14 +160,14 @@ def _gt_consume_flow1():
     setup_queues(ch)
     ch.basic_qos(prefetch_count=1)
     ch.basic_consume(queue=QUEUE_FLOW1_P3_TO_P4, on_message_callback=handle_flow1_message, auto_ack=False)
-    print(f"[P4][gt] flow1-consumer greenthread started — consuming '{QUEUE_FLOW1_P3_TO_P4}'")
+    log.info(f"flow1-consumer greenthread started — consuming '{QUEUE_FLOW1_P3_TO_P4}'")
     try:
         while not gt.is_stopping():
             conn.process_data_events(time_limit=1)
             gt.sleep(0)
     finally:
         conn.close()
-        print("[P4][gt] flow1-consumer greenthread stopped.")
+        log.info("flow1-consumer greenthread stopped.")
 
 
 def _gt_consume_flow2():
@@ -174,14 +177,14 @@ def _gt_consume_flow2():
     setup_queues(ch)
     ch.basic_qos(prefetch_count=1)
     ch.basic_consume(queue=QUEUE_FLOW2_P3_REFLECTED, on_message_callback=handle_flow2_message, auto_ack=False)
-    print(f"[P4][gt] flow2-consumer greenthread started — consuming '{QUEUE_FLOW2_P3_REFLECTED}'")
+    log.info(f"flow2-consumer greenthread started — consuming '{QUEUE_FLOW2_P3_REFLECTED}'")
     try:
         while not gt.is_stopping():
             conn.process_data_events(time_limit=1)
             gt.sleep(0)
     finally:
         conn.close()
-        print("[P4][gt] flow2-consumer greenthread stopped.")
+        log.info("flow2-consumer greenthread stopped.")
 
 
 def _gt_consume_flow3():
@@ -191,14 +194,14 @@ def _gt_consume_flow3():
     setup_queues(ch)
     ch.basic_qos(prefetch_count=1)
     ch.basic_consume(queue=QUEUE_FLOW3_P2_TO_P4, on_message_callback=handle_flow3_message, auto_ack=False)
-    print(f"[P4][gt] flow3-consumer greenthread started — consuming '{QUEUE_FLOW3_P2_TO_P4}'")
+    log.info(f"flow3-consumer greenthread started — consuming '{QUEUE_FLOW3_P2_TO_P4}'")
     try:
         while not gt.is_stopping():
             conn.process_data_events(time_limit=1)
             gt.sleep(0)
     finally:
         conn.close()
-        print("[P4][gt] flow3-consumer greenthread stopped.")
+        log.info("flow3-consumer greenthread stopped.")
 
 
 def _gt_zk_health_reporter():
@@ -239,10 +242,10 @@ def _gt_dedup_reaper():
                     pass
             if reaped:
                 gt.metrics_counter["dedup_reaped"] += reaped
-                print(f"[P4][gt] dedup-reaper: removed {reaped} expired znodes "
-                      f"(ttl={ttl_ms}ms, interval={reap_interval}s)")
+                log.info(f"dedup-reaper: removed {reaped} expired znodes "
+                         f"(ttl={ttl_ms}ms, interval={reap_interval}s)")
         except Exception as e:
-            print(f"[P4][gt] dedup-reaper error: {e}")
+            log.error(f"dedup-reaper error: {e}", exc_info=True)
 
 
 def _consume():
@@ -267,36 +270,36 @@ def _consume():
     # Greenthread 6: Metrics reporter
     gt.start_metrics_reporter("process4")
 
-    print(f"[P4][gt] All greenthreads started: {gt.list_greenthreads()}")
+    log.info(f"All greenthreads started: {gt.list_greenthreads()}")
 
     gt.stop_event.wait()
-    print("[P4][gt] Shutdown signal — waiting for greenthreads to finish...")
+    log.info("Shutdown signal — waiting for greenthreads to finish...")
     gt.wait_all()
 
 
 def main():
-    print(f"[P4][gt] Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
+    log.info(f"Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
 
     # MariaDB schema init
     try:
         init_database()
-        print("[P4][gt] MariaDB schema ready.")
+        log.info("MariaDB schema ready.")
     except Exception as e:
-        print(f"[P4][gt] WARNING: MariaDB init failed ({e}).")
+        log.warning(f"MariaDB init failed ({e}).")
 
     # ZooKeeper
     try:
         zklib.register_service("process4", NODE_NAME)
-        print(f"[P4][gt] ZK service registered.")
+        log.info(f"ZK service registered.")
     except Exception as e:
-        print(f"[P4][gt] WARNING: ZK unavailable ({e}) — degraded mode.")
+        log.warning(f"ZK unavailable ({e}) — degraded mode.")
 
     # Leader election
     try:
         election = zklib.LeaderElection("process4", NODE_NAME)
         election.run(_consume)
     except Exception as e:
-        print(f"[P4][gt] ZK election failed ({e}) — single-node mode.")
+        log.warning(f"ZK election failed ({e}) — single-node mode.")
         _consume()
     finally:
         zklib.close_client()

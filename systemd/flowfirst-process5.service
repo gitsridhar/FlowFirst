@@ -10,6 +10,7 @@ Group=flowuser
 WorkingDirectory=/opt/flowfirst
 EnvironmentFile=-/opt/flowfirst/.env
 Environment=PYTHONUNBUFFERED=1
+LogsDirectory=flowfirst
 ExecStart=/opt/flowfirst/.venv/bin/python -m src.application.process5
 Restart=always
 RestartSec=5

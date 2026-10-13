@@ -44,7 +44,10 @@ Never pass `API_PORT` (8080) to `HTTPServer`. Use `API_BACKEND_PORT` (8082).
 Do not add outer retry logic; `insert_processed_message()` already retries 3× with backoff.
 
 ## Logging convention
-- `process*.py`: use `print(f"[PX][gt] ...")` — no `logging` calls
-- `gt.py`, `zk.py`, `swift_storage.py`: use `logging` module with named loggers. Output only reaches the journal because
-  `gt.monkey_patch()` calls `gt.configure_logging()` (root handler on stdout, `LOG_LEVEL`, default INFO; pika/kazoo held at WARNING).
-  A new entry point must call `gt.monkey_patch()` first or its `log.info()` lines are lost. Units set `PYTHONUNBUFFERED=1` so lines are not delayed.
+- All modules (`process*.py`, `gt.py`, `zk.py`, `swift_storage.py`) use the `logging` module with a named logger
+  (`log = logging.getLogger("flowfirst.pN")` in process files). Do not use `print()` for runtime messages.
+- Use `log.warning` for degraded modes/duplicates, `log.error(..., exc_info=True)` inside `except` blocks, `log.debug` for per-item detail.
+- Output reaches the journal AND `LOG_DIR/<process>.log` (rotating) only because `gt.monkey_patch()` calls `gt.configure_logging()`
+  (`LOG_LEVEL` default INFO; `LOG_DIR` default `/var/log/flowfirst`, blank = journal only; `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT`;
+  pika/kazoo held at WARNING). Never add a second `basicConfig`.
+  A new entry point must call `gt.monkey_patch()` first or its log lines are lost. Units set `PYTHONUNBUFFERED=1` and `LogsDirectory=flowfirst`.

@@ -75,7 +75,7 @@ for _var in NODE1_IP NODE2_IP NODE3_IP CURRENT_NODE_IP SWIFT_HASH_PATH_PREFIX SW
 done
 for _var in SWIFT_HASH_PATH_PREFIX SWIFT_HASH_PATH_SUFFIX; do
     if [[ "${!_var}" == changeme* ]]; then
-        echo "ERROR: ${_var} still has the placeholder value from .env.example."
+        echo "ERROR: ${_var} still has the placeholder value from src/config/.env.example."
         echo "  Generate one value and put the SAME value in .env on all 3 nodes:"
         echo "    openssl rand -hex 16"
         exit 1

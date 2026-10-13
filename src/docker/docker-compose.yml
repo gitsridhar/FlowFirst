@@ -29,7 +29,7 @@ services:
       MARIADB_PASSWORD: flowpassword
     volumes:
       - mariadb_data:/var/lib/mysql
-      - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+      - ../sql/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s

@@ -148,30 +148,30 @@ sequenceDiagram
 ### Flow 1: Intermediate Reflection at Process 2 & Galera Persistence
 1. **Client (`curl`)**: Sends `POST /api/flow1` to the Virtual IP `http://${FLOWFIRST_VIP}:8080`.
 2. **HAProxy**: Delivers request to `Process 1` on one of the active cluster nodes (Round-Robin).
-3. **Process 1 ([`process1.py`](process1.py:1))**: Generates payload with UUID, publishes to `flow1_p1_to_p2`.
-4. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, modifies counter (`+10`), logs audit entry, and **reflects** it to `flow1_p2_to_p3`.
-5. **Process 3 ([`process3.py`](process3.py:1))**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment timestamp, and forwards to `flow1_p3_to_p4`.
-6. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow1_p3_to_p4` and stores the payload in both **MariaDB Galera Cluster** via [`db.py`](db.py:1) and **Swift Object Storage** via [`swift_storage.py`](swift_storage.py:1).
+3. **Process 1 ([`process1.py`](src/application/process1.py:1))**: Generates payload with UUID, publishes to `flow1_p1_to_p2`.
+4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Consumes message, modifies counter (`+10`), logs audit entry, and **reflects** it to `flow1_p2_to_p3`.
+5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment timestamp, and forwards to `flow1_p3_to_p4`.
+6. **Process 4 ([`src/application/process4.py`](src/application/process4.py:1))**: Consumes from `flow1_p3_to_p4` and stores the payload in both **MariaDB Galera Cluster** via [`src/db/db.py`](src/db/db.py:1) and **Swift Object Storage** via [`src/swift/swift_storage.py`](src/swift/swift_storage.py:1).
 
 ---
 
 ### Flow 2: Threshold Examination at Process 2 & Reflection at Process 3
 1. **Client (`curl`)**: Sends `POST /api/flow2` to `http://${FLOWFIRST_VIP}:8080`.
 2. **HAProxy**: Delivers request to `Process 1` on one of the active cluster nodes (Round-Robin).
-3. **Process 1 ([`process1.py`](process1.py:1))**: Generates metric payload, publishes to `flow2_p1_to_p2`.
-4. **Process 2 ([`process2.py`](process2.py:1))**: Consumes message, evaluates threshold status (`HIGH`/`NORMAL`), applies 15% scaling factor, and forwards to `flow2_p2_to_p3`.
-5. **Process 3 ([`process3.py`](process3.py:1))**: Consumes from `flow2_p2_to_p3`, seals with verification signature (`verified_by: process3`), and **reflects** to `flow2_p3_reflected`.
-6. **Process 4 ([`process4.py`](process4.py:1))**: Consumes from `flow2_p3_reflected` and persists full history into both the **MariaDB Galera Cluster** and **Swift Object Storage**.
+3. **Process 1 ([`process1.py`](src/application/process1.py:1))**: Generates metric payload, publishes to `flow2_p1_to_p2`.
+4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Consumes message, evaluates threshold status (`HIGH`/`NORMAL`), applies 15% scaling factor, and forwards to `flow2_p2_to_p3`.
+5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Consumes from `flow2_p2_to_p3`, seals with verification signature (`verified_by: process3`), and **reflects** to `flow2_p3_reflected`.
+6. **Process 4 ([`src/application/process4.py`](src/application/process4.py:1))**: Consumes from `flow2_p3_reflected` and persists full history into both the **MariaDB Galera Cluster** and **Swift Object Storage**.
 
 ---
 
 ### Flow 3: Remote Node 4 / Process 5 Pipeline & Persistence
 1. **Client (`curl`)**: Sends `POST /api/flow3` to `http://${FLOWFIRST_VIP}:8080`.
 2. **HAProxy**: Delivers request to `Process 1` on any of the first three nodes (Round-Robin).
-3. **Process 1 ([`process1.py`](process1.py:1))**: Prepares data with UUID and initial metric, publishes to `flow3_p1_to_p5` via RabbitMQ pool.
-4. **Process 5 ([`process5.py`](process5.py:1)) on Remote Node (`node4`)**: Consumes from `flow3_p1_to_p5`, modifies/computes remote transform value, logs audit trail, and **reflects** the modified data back to the RabbitMQ pool on `flow3_p5_to_p2`.
-5. **Process 2 ([`process2.py`](process2.py:1)) on any of the first three nodes**: Consumes from `flow3_p5_to_p2`, verifies the remote transformation, appends audit trail, and publishes to `flow3_p2_to_p4` via RabbitMQ pool.
-6. **Process 4 ([`process4.py`](process4.py:1)) on any of the first three nodes**: Consumes from `flow3_p2_to_p4` and stores the complete history and payload into both the **MariaDB Galera Cluster** via [`db.py`](db.py:1) and **Swift Object Storage** via [`swift_storage.py`](swift_storage.py:1).
+3. **Process 1 ([`process1.py`](src/application/process1.py:1))**: Prepares data with UUID and initial metric, publishes to `flow3_p1_to_p5` via RabbitMQ pool.
+4. **Process 5 ([`process5.py`](src/application/process5.py:1)) on Remote Node (`node4`)**: Consumes from `flow3_p1_to_p5`, modifies/computes remote transform value, logs audit trail, and **reflects** the modified data back to the RabbitMQ pool on `flow3_p5_to_p2`.
+5. **Process 2 ([`process2.py`](src/application/process2.py:1)) on any of the first three nodes**: Consumes from `flow3_p5_to_p2`, verifies the remote transformation, appends audit trail, and publishes to `flow3_p2_to_p4` via RabbitMQ pool.
+6. **Process 4 ([`src/application/process4.py`](src/application/process4.py:1)) on any of the first three nodes**: Consumes from `flow3_p2_to_p4` and stores the complete history and payload into both the **MariaDB Galera Cluster** via [`src/db/db.py`](src/db/db.py:1) and **Swift Object Storage** via [`src/swift/swift_storage.py`](src/swift/swift_storage.py:1).
 
 ---
 
@@ -430,7 +430,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 # 4. Initialise environment configuration
-cp .env.example .env
+cp src/config/.env.example .env
 ```
 
 Then **edit `.env`** on each node. The rules are simple:
@@ -453,11 +453,11 @@ Then **edit `.env`** on each node. The rules are simple:
 | `NODE2_IP` | `${NODE2_IP}` | **Always the IP of node2** |
 | `NODE3_IP` | `${NODE3_IP}` | **Always the IP of node3** |
 | `FLOWFIRST_VIP` | `${FLOWFIRST_VIP}` | Pacemaker Virtual IP — same on all nodes |
-| `RABBITMQ_HOST` | `${FLOWFIRST_VIP}` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
-| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `${NODE1_IP}:5672,${NODE2_IP}:5672,${NODE3_IP}:5672` at runtime from `NODE*_IP`. |
+| `RABBITMQ_HOST` | `${FLOWFIRST_VIP}` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `src/config/config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
+| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `src/config/config.py` builds `${NODE1_IP}:5672,${NODE2_IP}:5672,${NODE3_IP}:5672` at runtime from `NODE*_IP`. |
 | `RABBITMQ_PORT` | `5672` | Literal integer |
 | `MARIADB_HOST` | `${FLOWFIRST_VIP}` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
-| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `config.py` builds `${NODE1_IP},${NODE2_IP},${NODE3_IP}` at runtime. |
+| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `src/config/config.py` builds `${NODE1_IP},${NODE2_IP},${NODE3_IP}` at runtime. |
 | `MARIADB_PORT` | `3306` | Literal integer |
 
 #### Concrete `.env` for each node
@@ -466,21 +466,21 @@ Then **edit `.env`** on each node. The rules are simple:
 ```
 NODE_NAME=node1
 CURRENT_NODE_IP=192.168.1.101
-# everything else identical — see .env.example
+# everything else identical — see src/config/.env.example
 ```
 
 **node2** (`/opt/flowfirst/.env`):
 ```
 NODE_NAME=node2
 CURRENT_NODE_IP=192.168.1.102
-# everything else identical — see .env.example
+# everything else identical — see src/config/.env.example
 ```
 
 **node3** (`/opt/flowfirst/.env`):
 ```
 NODE_NAME=node3
 CURRENT_NODE_IP=192.168.1.103
-# everything else identical — see .env.example
+# everything else identical — see src/config/.env.example
 ```
 
 > **⚠️ `python-dotenv` does not expand `${VAR}` references**
@@ -490,7 +490,7 @@ CURRENT_NODE_IP=192.168.1.103
 > `int("${RABBITMQ_PORT}")` → `ValueError: invalid literal for int()`.
 >
 > **Rule:** every value in `.env` must be a plain literal — no `$VAR` or
-> `${VAR}` anywhere. `config.py` guards against this with `_int_env` /
+> `${VAR}` anywhere. `src/config/config.py` guards against this with `_int_env` /
 > `_str_env` helpers that warn and fall back to defaults, but the `.env`
 > file is always the right place to fix it.
 
@@ -610,12 +610,12 @@ done
 | `ZK_HEAP_MB` | `256` | JVM heap size (MB) |
 | `ZK_TIMEOUT` | `10` | Kazoo session timeout (seconds) |
 | `ZK_DEDUP_TTL_MS` | `300000` | How long Process 4 dedup znodes live (ms) |
-| `ZK_HOSTS` | *(auto)* | Leave blank — `config.py` builds from `NODE*_IP` |
+| `ZK_HOSTS` | *(auto)* | Leave blank — `src/config/config.py` builds from `NODE*_IP` |
 
 #### ZooKeeper znode tree
 
 > **Note on timing:** The `/flowfirst` znode hierarchy is **not** created by `setup_zookeeper.sh`.
-> It is lazily initialised by the Python pipeline (`zk.py`) the **very first time any FlowFirst process (`process1` – `process4`) connects to ZooKeeper** (in Phase 5 / Scenario 1).
+> It is lazily initialised by the Python pipeline (`src/zookeeper/zk.py`) the **very first time any FlowFirst process (`process1` – `process4`) connects to ZooKeeper** (in Phase 5 / Scenario 1).
 >
 > If you connect with `zkCli.sh` immediately after installing ZooKeeper in Phase 1b, `/flowfirst` does not exist yet (`ls /` will only show `[zookeeper]`). This is expected.
 
@@ -692,7 +692,7 @@ If you want to manually create and seed the base znodes and default config befor
 ```bash
 cd /opt/flowfirst
 source .venv/bin/activate
-python3 -c "import zk; zk.get_client(); print('Base znodes and default config seeded successfully.')"
+python3 -c "from src.zookeeper import zk; zk.get_client(); print('Base znodes and default config seeded successfully.')"
 ```
 
 #### ZooKeeper Troubleshooting Reference
@@ -783,7 +783,7 @@ print('monkey-patch OK — pika imported after patch')
 "
 
 # Confirm gt.py loads cleanly
-python -c "import gt; gt.monkey_patch(); print('gt.py OK, pool size:', gt.GT_POOL_SIZE)"
+python -c "from src.gt import gt; gt.monkey_patch(); print('gt.py OK, pool size:', gt.GT_POOL_SIZE)"
 ```
 
 #### Greenthread `.env` variables
@@ -853,7 +853,7 @@ The script performs these steps automatically:
 5. Runs `dnf clean metadata && dnf makecache && dnf install -y erlang rabbitmq-server`
 6. Writes `cluster_partition_handling = pause_minority` to `/etc/rabbitmq/rabbitmq.conf`, enables the `rabbitmq_management` plugin and starts the service
 
-> **Why `pause_minority`:** if the network splits, a broker that can no longer see a majority of the cluster (at least 2 of 3) pauses itself and stops serving clients. It resumes and resyncs automatically when the network heals. The pipeline processes reconnect to the majority side through `config.py`'s multi-host list. RabbitMQ's default, `ignore`, keeps both sides running independently, so they diverge until an operator restarts one side.
+> **Why `pause_minority`:** if the network splits, a broker that can no longer see a majority of the cluster (at least 2 of 3) pauses itself and stops serving clients. It resumes and resyncs automatically when the network heals. The pipeline processes reconnect to the majority side through `src/config/config.py`'s multi-host list. RabbitMQ's default, `ignore`, keeps both sides running independently, so they diverge until an operator restarts one side.
 > **Trade-off:** if two brokers are down at the same time, the third pauses as well and the pipeline stops until one of them returns (see [Scenario 19](#scenario-19-simultaneous-reboot-of-all-three-nodes-cluster-cold-start)).
 >
 > On a cluster installed before this change, apply it on **each of node1–node3**, one node at a time:
@@ -1152,7 +1152,7 @@ OSError: [Errno 98] Address already in use
 
 Fix:
 1. Process 1 binds to `API_BACKEND_PORT=8082` while HAProxy binds to `API_PORT=8080` and routes to `node:8082`.
-2. Ensure no manually launched Python processes (`python process1.py`) or unmanaged systemd instances are holding port 8082 before Pacemaker starts `flowfirst-p1-res-clone`:
+2. Ensure no manually launched Python processes (`python -m src.application.process1`) or unmanaged systemd instances are holding port 8082 before Pacemaker starts `flowfirst-p1-res-clone`:
    ```bash
    # Kill manual instances across nodes:
    sudo pkill -f 'python.*process1\.py' || true
@@ -4581,7 +4581,7 @@ Run the full pipeline on a single developer machine using Docker Compose for
 RabbitMQ, MariaDB, and ZooKeeper — no cluster hardware required.
 
 > **Port note:** ZooKeeper's internal admin server runs on container port `8080`.
-> The `docker-compose.yml` maps it to host port **`8081`** to avoid collision with
+> The `src/docker/docker-compose.yml` maps it to host port **`8081`** to avoid collision with
 > Process 1's REST API which listens on host port `8080`.
 
 ### Step 1 — Create a local `.env`
@@ -4589,11 +4589,11 @@ RabbitMQ, MariaDB, and ZooKeeper — no cluster hardware required.
 Copy the example and override for localhost / Docker defaults:
 
 ```bash
-cp .env.example .env
+cp src/config/.env.example .env
 ```
 
 Edit `.env` — change **only** these values for local dev (everything else stays
-as-is from `.env.example`):
+as-is from `src/config/.env.example`):
 
 ```ini
 # Per-node identity — use your local hostname
@@ -4608,12 +4608,12 @@ NODE3_IP=127.0.0.1
 # ZooKeeper — single local container
 ZK_HOSTS=127.0.0.1:2181
 
-# RabbitMQ — matches docker-compose.yml credentials
+# RabbitMQ — matches src/docker/docker-compose.yml credentials
 RABBITMQ_HOST=127.0.0.1
 RABBITMQ_USER=flowuser
 RABBITMQ_PASSWORD=flowpassword
 
-# MariaDB — matches docker-compose.yml credentials
+# MariaDB — matches src/docker/docker-compose.yml credentials
 MARIADB_HOST=127.0.0.1
 MARIADB_USER=flowuser
 MARIADB_PASSWORD=flowpassword
@@ -4635,10 +4635,10 @@ SWIFT_ENABLED=false
 
 ```bash
 # Start RabbitMQ, MariaDB, and ZooKeeper containers
-docker compose up -d
+docker compose -f src/docker/docker-compose.yml up -d
 
 # Wait for all containers to be healthy (up to ~30 s)
-docker compose ps
+docker compose -f src/docker/docker-compose.yml ps
 # All three services must show: health: healthy
 ```
 
@@ -4672,26 +4672,26 @@ Start in reverse order (consumers before producers) so no messages are lost:
 
 ```bash
 # Terminal 1 — Process 4 (final consumer / DB persister)
-python process4.py
+python -m src.application.process4
 
 # Terminal 2 — Process 3 (reflector / forwarder)
-python process3.py
+python -m src.application.process3
 
 # Terminal 3 — Process 2 (examiner / reflector)
-python process2.py
+python -m src.application.process2
 
 # Terminal 4 — Process 1 (REST API producer)
-python process1.py
+python -m src.application.process1
 ```
 
 Or run all four in the background from a single terminal:
 
 ```bash
 source .venv/bin/activate
-python process4.py > /tmp/p4.log 2>&1 &
-python process3.py > /tmp/p3.log 2>&1 &
-python process2.py > /tmp/p2.log 2>&1 &
-python process1.py > /tmp/p1.log 2>&1 &
+python -m src.application.process4 > /tmp/p4.log 2>&1 &
+python -m src.application.process3 > /tmp/p3.log 2>&1 &
+python -m src.application.process2 > /tmp/p2.log 2>&1 &
+python -m src.application.process1 > /tmp/p1.log 2>&1 &
 echo "All four processes started (PIDs: $(pgrep -f 'python process[1-4]' | tr '\n' ' '))"
 ```
 
@@ -4759,10 +4759,10 @@ ORDER BY id DESC LIMIT 1\G"
 pkill -f 'python process[1-4].py' 2>/dev/null || true
 
 # Stop containers
-docker compose down
+docker compose -f src/docker/docker-compose.yml down
 
 # Or stop and delete all data volumes (full reset)
-docker compose down -v
+docker compose -f src/docker/docker-compose.yml down -v
 ```
 
 ---
@@ -5142,7 +5142,7 @@ done
 ```bash
 # 4. Verify OS-level file descriptor limit is in effect
 # (Pacemaker-managed processes use LimitNOFILE=65536 from the unit file)
-sudo cat /proc/$(pgrep -f process1.py | head -1)/limits | grep "open files"
+sudo cat /proc/$(pgrep -f src.application.process1 | head -1)/limits | grep "open files"
 # Expected: Max open files   65536   65536   files
 ```
 
@@ -5610,7 +5610,7 @@ sudo journalctl -u mariadb --since "30 min ago" --no-pager | grep -E "WSREP|Reco
 | `gcomm: bootstrapping new group` | `galera_new_cluster` was run on this node | 19 |
 | `Recovered position` | Last committed seqno found during startup (journal) — use it to choose the bootstrap node | 19 |
 | `Flow-control`, `flow control` | Replication throttled because a slow node's receive queue filled | 20, 21 |
-| `WSREP: cluster conflict`, `BF-BF`, `certification failed` (needs `wsrep_log_conflicts`, see F) | Multi-master write conflict; the app sees deadlock error 1213, which `db.py` retries | 2, 31, concurrent load |
+| `WSREP: cluster conflict`, `BF-BF`, `certification failed` (needs `wsrep_log_conflicts`, see F) | Multi-master write conflict; the app sees deadlock error 1213, which `src/db/db.py` retries | 2, 31, concurrent load |
 | `[ERROR]`, `Aborting` | Fatal — mariadb exits; read the lines just above it | any |
 
 #### C. Build a timeline on one node
@@ -5698,9 +5698,9 @@ sudo rabbitmq-diagnostics log_tail -N 50
 | `user 'flowuser' authenticated and granted access to vhost '/'` | Login succeeded for that connection | any |
 | `closing AMQP connection ... (... vhost: '/', user: 'flowuser')` | Clean client disconnect (process stopped, or Pacemaker moved it) | 11, 12 |
 | `client unexpectedly closed TCP connection` | Client vanished without closing (process killed, client node rebooted, network drop) | 16–18, 22, 25 |
-| `missed heartbeats from client, timeout: 60s` | Client was silent for longer than `heartbeat=60` (set in `config.py`) — usually a network glitch or a stalled process | 20, 21, 41 |
+| `missed heartbeats from client, timeout: 60s` | Client was silent for longer than `heartbeat=60` (set in `src/config/config.py`) — usually a network glitch or a stalled process | 20, 21, 41 |
 | `Closing all connections`, `CONNECTION_FORCED` | An operator ran `rabbitmqctl close_all_connections` / `close_connection` | 42 |
-| `memory resource limit alarm set`, `disk resource limit alarm set` | Broker is **blocking publishers**; clients see blocked connections (`blocked_connection_timeout=300` in `config.py`) | 40, heavy load |
+| `memory resource limit alarm set`, `disk resource limit alarm set` | Broker is **blocking publishers**; clients see blocked connections (`blocked_connection_timeout=300` in `src/config/config.py`) | 40, heavy load |
 | `alarm cleared` | Publishers unblocked | 40 |
 | `invalid credentials`, `ACCESS_REFUSED`, `PLAIN login refused` | Wrong `RABBITMQ_USER` / `RABBITMQ_PASSWORD` in that node's `.env` | install, 43 |
 | `Connection attempt from disallowed node`, `Cookie mismatch` | `/var/lib/rabbitmq/.erlang.cookie` differs between nodes — the node cannot join the cluster | install |
@@ -5785,7 +5785,7 @@ Client-side (pipeline processes, via kazoo):
 sudo journalctl -u flowfirst-process2 --since "30 min ago" --no-pager | grep -E -i "zk|zookeeper|kazoo|connection dropped|expired|leader"
 ```
 
-> **Note:** `zk.py` and kazoo log through Python `logging`, which `gt.configure_logging()` sends to the journal at `LOG_LEVEL` (default `INFO`; `kazoo` is held at WARNING). So `INFO [zk] ... *** NODE ... IS NOW LEADER ***` and `Registered ...` lines do appear, alongside warnings such as `Config ... unreadable`, `Dedup: duplicate detected` and kazoo's `Connection dropped`. `DEBUG` lines (for example per-message dedup first-seen) need `LOG_LEVEL=DEBUG` in `.env` and a process restart. The processes' own `print` lines (`[P2][gt] ZK ready ...`, `ZK election failed ...`) are also there, and `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health` shows leaders and registrations.
+> **Note:** `src/zookeeper/zk.py` and kazoo log through Python `logging`, which `gt.configure_logging()` sends to the journal at `LOG_LEVEL` (default `INFO`; `kazoo` is held at WARNING). So `INFO [zk] ... *** NODE ... IS NOW LEADER ***` and `Registered ...` lines do appear, alongside warnings such as `Config ... unreadable`, `Dedup: duplicate detected` and kazoo's `Connection dropped`. `DEBUG` lines (for example per-message dedup first-seen) need `LOG_LEVEL=DEBUG` in `.env` and a process restart. The processes' own `print` lines (`[P2][gt] ZK ready ...`, `ZK election failed ...`) are also there, and `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health` shows leaders and registrations.
 
 #### B. Message phrasebook — what each line means
 
@@ -6205,7 +6205,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/swift/status | jq .
 
 #### B. Message phrasebook — what each line means
 
-**Client side (`journalctl -u flowfirst-process4`, produced by `process4.py` and `swift_storage.py`):**
+**Client side (`journalctl -u flowfirst-process4`, produced by `src/application/process4.py` and `src/swift/swift_storage.py`):**
 
 The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account HEAD failed` texts below are **exception messages from `python-swiftclient`**. They are not separate log lines: they appear inside the `Swift store note: ...` and `Failed to put object ... : ...` lines.
 
@@ -6214,7 +6214,7 @@ The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account 
 | `Stored in Swift object storage: flowN/<message_id>.json` | The object write succeeded; the name is `flow<flow>/<message_id>.json` | 2, 44 |
 | `Swift store note: Swift storage is disabled` | `SWIFT_ENABLED` is false on this node. Printed for **every** message; nothing is stored | install |
 | `Swift store note: <error text>` | The write failed (see the error rows below). The message was still acknowledged and the MariaDB row was written | any Swift outage |
-| `Failed to put object '<name>' in container '<c>': <error>` | The same failure, logged by `swift_storage.py` with its logger (an ERROR line; `Could not ensure container` is a WARNING) | any Swift outage |
+| `Failed to put object '<name>' in container '<c>': <error>` | The same failure, logged by `src/swift/swift_storage.py` with its logger (an ERROR line; `Could not ensure container` is a WARNING) | any Swift outage |
 | `Could not ensure container '<c>' exists: <error>` | Container create/check failed, usually auth or connectivity | install |
 | `Auth GET failed: <url> 401 Unauthorized` | Wrong `SWIFT_USER` / `SWIFT_KEY` for that node's `.env` | install |
 | `Auth GET failed: <url> 404 Not Found` | `SWIFT_AUTH_URL` points at something that is not a Swift auth endpoint (for example HAProxy to Process 1; see the note in A) | install |
@@ -6257,7 +6257,7 @@ sudo journalctl -u flowfirst-process4 --since "30 min ago" --no-pager \
 
 Read top to bottom: `Stored in Swift object storage` lines stop → first `Swift store note:` / `Failed to put object` → (fault cleared) → `Stored in Swift object storage` resumes. The messages between the first failure and the first success are the ones **missing from Swift** (see D).
 
-> **Output delay:** the unit files set `Environment=PYTHONUNBUFFERED=1`, so `print()` output reaches the journal immediately. On a node installed **before** that line was added, the lines from `process4.py` can appear in bursts (Python block-buffers `print()` when stdout is not a terminal). Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes (`sudo pcs resource restart flowfirst-p4-res-clone` for the clones). Check with `systemctl show flowfirst-process4 -p Environment`.
+> **Output delay:** the unit files set `Environment=PYTHONUNBUFFERED=1`, so `print()` output reaches the journal immediately. On a node installed **before** that line was added, the lines from `src/application/process4.py` can appear in bursts (Python block-buffers `print()` when stdout is not a terminal). Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes (`sudo pcs resource restart flowfirst-p4-res-clone` for the clones). Check with `systemctl show flowfirst-process4 -p Environment`.
 
 #### D. Reconcile MariaDB and Swift (find objects that were never stored)
 
@@ -6560,7 +6560,7 @@ sudo swift-recon object --md5
 sudo swift-ring-builder /etc/swift/object.builder
 ```
 
-*Expected (header line, per the defaults in `.env.example`):* `1024 partitions, 3.000000 replicas, 1 regions, 3 zones, 3 devices`, followed by one device line per node in zones 1, 2 and 3, all on port `6200` with device `flowfirst` and weight `100.00`. The `balance` and `dispersion` values should be near `0.00`.
+*Expected (header line, per the defaults in `src/config/.env.example`):* `1024 partitions, 3.000000 replicas, 1 regions, 3 zones, 3 devices`, followed by one device line per node in zones 1, 2 and 3, all on port `6200` with device `flowfirst` and weight `100.00`. The `balance` and `dispersion` values should be near `0.00`.
 
 #### 52.3 — Auth and health through the VIP and through each node directly
 
@@ -6936,7 +6936,7 @@ curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass:
 ```bash
 cd /opt/flowfirst
 SWIFT_KEY=wrong-key .venv/bin/python -c "
-import swift_storage
+from src.swift import swift_storage
 print(swift_storage.put_message_object({'message_id': 'cred-test', 'flow': 9}))
 print(swift_storage.get_swift_status())"
 ```

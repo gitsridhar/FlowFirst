@@ -1,5 +1,5 @@
 # IMPORTANT: monkey_patch() must be the very first call, before any other import.
-import gt
+from src.gt import gt
 gt.monkey_patch()
 
 import json
@@ -8,7 +8,7 @@ import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 import pika
-from config import (
+from src.config.config import (
     NODE_NAME,
     API_HOST,
     API_BACKEND_PORT,
@@ -18,8 +18,8 @@ from config import (
     QUEUE_FLOW3_P1_TO_P5,
     GT_METRICS_INTERVAL_S,
 )
-import zk as zklib
-import swift_storage
+from src.zookeeper import zk as zklib
+from src.swift import swift_storage
 from urllib.parse import parse_qs
 
 # ---------------------------------------------------------------------------
@@ -358,7 +358,7 @@ def _gt_rmq_heartbeat():
 
 def _gt_zk_health_reporter():
     """Periodic greenthread: writes this node's health state to ZooKeeper."""
-    import zk as _zk
+    from src.zookeeper import zk as _zk
     while not gt.is_stopping():
         try:
             _zk._update_health("process1", NODE_NAME, "leader")

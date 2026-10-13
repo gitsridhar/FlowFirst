@@ -1,12 +1,12 @@
 # IMPORTANT: monkey_patch() must be the very first call, before any other import.
-import gt
+from src.gt import gt
 gt.monkey_patch()
 
 import json
 import time
 import pika
 import eventlet
-from config import (
+from src.config.config import (
     NODE_NAME,
     setup_queues,
     QUEUE_FLOW1_P1_TO_P2,
@@ -16,7 +16,7 @@ from config import (
     QUEUE_FLOW3_P5_TO_P2,
     QUEUE_FLOW3_P2_TO_P4,
 )
-import zk as zklib
+from src.zookeeper import zk as zklib
 
 # ZooKeeper config watcher — hot-reloads thresholds and scale factors
 _config_watcher = None

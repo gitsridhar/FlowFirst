@@ -3,7 +3,7 @@ import logging
 from typing import Optional, Dict, Any, List, Tuple
 from swiftclient.client import Connection, ClientException
 
-from config import (
+from src.config.config import (
     SWIFT_AUTH_URL,
     SWIFT_AUTH_VERSION,
     SWIFT_USER,

@@ -9,18 +9,18 @@ FlowFirst is a Python 3 distributed pipeline on RHEL 9.6 — no web framework, n
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # then edit — set NODE_NAME, CURRENT_NODE_IP, and all node IPs
+cp src/config/.env.example .env   # then edit — set NODE_NAME, CURRENT_NODE_IP, and all node IPs
 ```
 
 ## Running Processes
 Processes are run directly. Under Pacemaker, use `systemd/` units. For local dev:
 ```bash
 source .venv/bin/activate
-python process1.py   # REST API (listens on API_BACKEND_PORT=8082; HAProxy fronts on 8080)
-python process2.py   # Message transformer/examiner
-python process3.py   # Acknowledgment sealer
-python process4.py   # MariaDB + Swift persistence engine
-python process5.py   # Remote worker (Node 4 only)
+python -m src.application.process1   # REST API (listens on API_BACKEND_PORT=8082; HAProxy fronts on 8080)
+python -m src.application.process2   # Message transformer/examiner
+python -m src.application.process3   # Acknowledgment sealer
+python -m src.application.process4   # MariaDB + Swift persistence engine
+python -m src.application.process5   # Remote worker (Node 4 only)
 ```
 
 ## End-to-End Testing
@@ -37,10 +37,10 @@ curl -s -X POST http://<VIP>:8080/api/flow1 -H "Content-Type: application/json" 
 
 ### `gt.monkey_patch()` MUST be the very first call in every process entry point
 ```python
-import gt
+from src.gt import gt
 gt.monkey_patch()   # must precede ALL other imports (pika, kazoo, pymysql, etc.)
 ```
-`gt.py` patches stdlib socket/time/threading/select via eventlet. Any import before this breaks cooperative concurrency.
+`src/gt/gt.py` patches stdlib socket/time/threading/select via eventlet. Any import before this breaks cooperative concurrency.
 
 ### Each pika consumer greenthread MUST own its own `BlockingConnection`
 `pika.BlockingConnection` is not thread-safe or greenthread-safe. Every greenthread that consumes or publishes must call `gt.get_rmq_connection_with_retry(label)` independently — never share a connection across greenthreads.
@@ -61,27 +61,27 @@ Each process entry point wraps its worker in `zklib.LeaderElection("processN", N
 
 ## `.env` Rules
 - `python-dotenv` does **not** expand `${VAR}` shell references — use **literal values only**
-- `RABBITMQ_HOSTS` and `MARIADB_HOSTS` must be **left blank**; `config.py` builds them from `NODE*_IP` at runtime
+- `RABBITMQ_HOSTS` and `MARIADB_HOSTS` must be **left blank**; `src/config/config.py` builds them from `NODE*_IP` at runtime
 - Only `NODE_NAME` and `CURRENT_NODE_IP` differ per node; everything else is identical across all nodes
-- `config.py` uses `_int_env()` / `_str_env()` guards that warn and fall back to defaults when unexpanded shell references are detected
+- `src/config/config.py` uses `_int_env()` / `_str_env()` guards that warn and fall back to defaults when unexpanded shell references are detected
 
-## Queue Names (from `config.py`)
+## Queue Names (from `src/config/config.py`)
 All queues are declared durable via `setup_queues(channel)` before any publish/consume:
 - Flow 1: `flow1_p1_to_p2` → `flow1_p2_to_p3` → `flow1_p3_to_p4`
 - Flow 2: `flow2_p1_to_p2` → `flow2_p2_to_p3` → `flow2_p3_reflected`
 - Flow 3: `flow3_p1_to_p5` → `flow3_p5_to_p2` → `flow3_p2_to_p4`
 
 ## Code Style
-- Python 3 with type hints in function signatures (`config.py`, `swift_storage.py`, `zk.py`)
-- `from config import (NAME1, NAME2, ...)` — named imports only, never `import config` as namespace except in `zk.py`
-- `print(f"[PX][gt] ...")` for all runtime log lines (not `logging.*` in process files; `logging` used only in `gt.py`, `zk.py`, `swift_storage.py`; `gt.monkey_patch()` calls `gt.configure_logging()`, which sends those loggers to stdout/journal at `LOG_LEVEL`, default INFO — so never add a second `basicConfig`)
+- Python 3 with type hints in function signatures (`src/config/config.py`, `src/swift/swift_storage.py`, `src/zookeeper/zk.py`)
+- `from src.config.config import (NAME1, NAME2, ...)` — named imports only, never `import config` as namespace except in `src/zookeeper/zk.py`
+- `print(f"[PX][gt] ...")` for all runtime log lines (not `logging.*` in process files; `logging` used only in `src/gt/gt.py`, `src/zookeeper/zk.py`, `src/swift/swift_storage.py`; `gt.monkey_patch()` calls `gt.configure_logging()`, which sends those loggers to stdout/journal at `LOG_LEVEL`, default INFO — so never add a second `basicConfig`)
 - Error handling: `except Exception as e: print(...); ch.basic_nack(..., requeue=False)` — failed messages are dead-lettered, not requeued
 - `autocommit=True` on all MariaDB connections (no explicit `COMMIT` calls)
 - Swift functions return `(bool, str)` or `(bool, data, headers)` tuples — callers check `[0]` for success
 
 ## Infrastructure Notes
 - Process 1 listens on `API_BACKEND_PORT` (8082); HAProxy fronts it on `API_PORT` (8080) — never bind to 8080 directly
-- MariaDB deadlocks (errno 1213/1205) are retried up to 3× with backoff in `db.py` — this is expected Galera wsrep behaviour
+- MariaDB deadlocks (errno 1213/1205) are retried up to 3× with backoff in `src/db/db.py` — this is expected Galera wsrep behaviour
 - ZooKeeper `/flowfirst` znode tree is lazily created on first process connection, not by setup scripts
 - `config.get_connection()` attaches `conn._connected_to` (non-standard attribute) so callers can log which RabbitMQ node was chosen
 
@@ -109,7 +109,7 @@ sudo chown -R $USER:$USER /opt/flowfirst
 cd /opt/flowfirst
 python3 -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip && pip install -r requirements.txt
-cp .env.example .env
+cp src/config/.env.example .env
 # Edit .env: set NODE_NAME and CURRENT_NODE_IP to THIS node's identity.
 # All other variables are identical on every node (literal values only — no ${VAR}).
 ```
@@ -128,9 +128,9 @@ cp .env.example .env
 | `NODE1_IP` / `NODE2_IP` / `NODE3_IP` / `NODE4_IP` | Actual IPs of each node |
 | `FLOWFIRST_VIP` | Pacemaker Virtual IP |
 | `RABBITMQ_HOST` | Set to `FLOWFIRST_VIP` (single-host fallback only) |
-| `RABBITMQ_HOSTS` | **Leave blank** — `config.py` builds from `NODE*_IP:5672` |
+| `RABBITMQ_HOSTS` | **Leave blank** — `src/config/config.py` builds from `NODE*_IP:5672` |
 | `MARIADB_HOST` | Set to `FLOWFIRST_VIP` (routes through HAProxy) |
-| `MARIADB_HOSTS` | **Leave blank** — `config.py` builds from `NODE*_IP` |
+| `MARIADB_HOSTS` | **Leave blank** — `src/config/config.py` builds from `NODE*_IP` |
 | `VIP_NIC` | Physical cluster NIC name on **this** node (e.g. `ens3`, `enp0s3`) — may differ per node |
 
 ### Phase 1 — MariaDB Galera Cluster (Nodes 1–3)

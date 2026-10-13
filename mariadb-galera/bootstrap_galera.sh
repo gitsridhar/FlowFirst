@@ -45,10 +45,10 @@ GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 
-# 4. Import table schema if init_db.sql exists
-if [ -f "${ROOT_DIR}/init_db.sql" ]; then
-    echo "Importing table schema from init_db.sql..."
-    sudo mariadb -u "${DB_USER}" -p"${DB_PASS}" "${DB_NAME}" < "${ROOT_DIR}/init_db.sql"
+# 4. Import table schema if src/sql/init_db.sql exists
+if [ -f "${ROOT_DIR}/src/sql/init_db.sql" ]; then
+    echo "Importing table schema from src/sql/init_db.sql..."
+    sudo mariadb -u "${DB_USER}" -p"${DB_PASS}" "${DB_NAME}" < "${ROOT_DIR}/src/sql/init_db.sql"
 fi
 
 echo ""

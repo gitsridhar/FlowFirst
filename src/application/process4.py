@@ -1,21 +1,21 @@
 # IMPORTANT: monkey_patch() must be the very first call, before any other import.
-import gt
+from src.gt import gt
 gt.monkey_patch()
 
 import json
 import time
 import pika
 import eventlet
-from config import (
+from src.config.config import (
     NODE_NAME,
     setup_queues,
     QUEUE_FLOW1_P3_TO_P4,
     QUEUE_FLOW2_P3_REFLECTED,
     QUEUE_FLOW3_P2_TO_P4,
 )
-from db import init_database, insert_processed_message
-import swift_storage
-import zk as zklib
+from src.db.db import init_database, insert_processed_message
+from src.swift import swift_storage
+from src.zookeeper import zk as zklib
 
 
 def handle_flow1_message(ch, method, properties, body):

@@ -10,7 +10,7 @@ Group=flowuser
 WorkingDirectory=/opt/flowfirst
 EnvironmentFile=-/opt/flowfirst/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/flowfirst/.venv/bin/python /opt/flowfirst/process1.py
+ExecStart=/opt/flowfirst/.venv/bin/python -m src.application.process1
 Restart=always
 RestartSec=3s
 StandardOutput=journal

@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 # ZooKeeper connection settings (read from environment / config)
 # ---------------------------------------------------------------------------
 try:
-    import config as _cfg
+    from src.config import config as _cfg
     _ZK_HOSTS = _cfg.ZK_HOSTS
     _ZK_TIMEOUT = _cfg.ZK_TIMEOUT
     _DEDUP_TTL_MS = _cfg.ZK_DEDUP_TTL_MS

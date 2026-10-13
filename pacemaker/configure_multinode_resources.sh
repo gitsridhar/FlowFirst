@@ -65,7 +65,7 @@ echo "  Stopping any standalone/unmanaged process instances on cluster nodes..."
 for node in "${NODE1_IP}" "${NODE2_IP}" "${NODE3_IP}"; do
     ssh -o BatchMode=yes -o ConnectTimeout=3 "${node}" \
         "sudo systemctl stop flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4 2>/dev/null || true; \
-         sudo pkill -f 'python.*process[1-4]\.py' 2>/dev/null || true" 2>/dev/null || true
+         sudo pkill -f 'python.*process[1-4]' 2>/dev/null || true" 2>/dev/null || true
 done
 
 # 2. Configure Virtual IP (IPaddr2 resource agent)

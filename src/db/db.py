@@ -2,7 +2,7 @@ import json
 import time
 import pymysql
 from pymysql.cursors import DictCursor
-from config import (
+from src.config.config import (
     MARIADB_HOST,
     MARIADB_PORT,
     MARIADB_USER,

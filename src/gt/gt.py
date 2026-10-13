@@ -34,7 +34,7 @@ This module provides:
    snapshots them every GT_METRICS_INTERVAL_S seconds and prints a summary.
 
 Usage pattern (in each processX.py):
-    import gt                        # import before anything else
+    from src.gt import gt            # import before anything else
     gt.monkey_patch()                # patch stdlib immediately
 
     # ... rest of imports ...
@@ -319,7 +319,7 @@ def get_rmq_connection_with_retry(label: str, max_attempts: int = 20):
     Sleeps eventlet.sleep(5) between attempts so other greenthreads run.
     Returns a connected pika.BlockingConnection.
     """
-    from config import get_connection   # imported here to respect monkey-patch order
+    from src.config.config import get_connection   # imported here to respect monkey-patch order
     for attempt in range(1, max_attempts + 1):
         try:
             conn = get_connection()

@@ -12,6 +12,8 @@ from src.config.config import (
     setup_queues,
     QUEUE_FLOW3_P1_TO_P5,
     QUEUE_FLOW3_P5_TO_P2,
+    GT_PREFETCH_COUNT,
+    GT_CONSUMERS_PER_QUEUE,
 )
 from src.zookeeper import zk as zklib
 
@@ -70,7 +72,7 @@ def _gt_consume_flow3():
     conn = gt.get_rmq_connection_with_retry("p5-flow3")
     ch = conn.channel()
     setup_queues(ch)
-    ch.basic_qos(prefetch_count=1)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
     ch.basic_consume(queue=QUEUE_FLOW3_P1_TO_P5, on_message_callback=handle_flow3_message, auto_ack=False)
     log.info(f"[Remote Node] flow3-consumer greenthread started — consuming '{QUEUE_FLOW3_P1_TO_P5}'")
     try:
@@ -96,7 +98,7 @@ def _consume():
     gt.register_signal_handlers()
 
     # Greenthread 1: Flow 3 Consumer
-    gt.spawn("p5_flow3_consumer", _gt_consume_flow3, restart_on_error=True)
+    gt.spawn_consumers("p5_flow3_consumer", _gt_consume_flow3, GT_CONSUMERS_PER_QUEUE)
 
     # Greenthread 2: ZooKeeper Health Reporter
     gt.periodic("p5_zk_health", _gt_zk_health_reporter, 30)

@@ -64,6 +64,12 @@ API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = _int_env("API_PORT", 8080)
 API_BACKEND_PORT = _int_env("API_BACKEND_PORT", 8082)
 
+# Scale parameters (defaults reproduce the original fixed behaviour).
+# API_REQUEST_POOL_SIZE: concurrent HTTP requests one Process 1 serves; 0 = GT_WORKER_CONCURRENCY * 10 (40).
+# API_LISTEN_BACKLOG: pending-connection queue of the Process 1 socket (the kernel caps it at net.core.somaxconn).
+API_REQUEST_POOL_SIZE = max(0, _int_env("API_REQUEST_POOL_SIZE", 0))
+API_LISTEN_BACKLOG = max(1, _int_env("API_LISTEN_BACKLOG", 50))
+
 # RabbitMQ Connection Settings
 RABBITMQ_PORT = _int_env("RABBITMQ_PORT", 5672)
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", FLOWFIRST_VIP)
@@ -123,6 +129,10 @@ QUEUE_FLOW3_P2_TO_P4 = "flow3_p2_to_p4"
 GT_POOL_SIZE          = int(os.getenv("GT_POOL_SIZE",          "1000"))
 GT_WORKER_CONCURRENCY = int(os.getenv("GT_WORKER_CONCURRENCY", "4"))
 GT_METRICS_INTERVAL_S = int(os.getenv("GT_METRICS_INTERVAL_S", "60"))
+# GT_CONSUMERS_PER_QUEUE: consumer greenthreads (each with its own RabbitMQ connection) per queue in P2-P5.
+# GT_PREFETCH_COUNT: unacknowledged messages RabbitMQ may hand to one consumer at a time.
+GT_CONSUMERS_PER_QUEUE = max(1, _int_env("GT_CONSUMERS_PER_QUEUE", 1))
+GT_PREFETCH_COUNT      = max(1, _int_env("GT_PREFETCH_COUNT", 1))
 
 # ZooKeeper connection settings
 ZK_CLIENT_PORT    = _int_env("ZK_CLIENT_PORT", 2181)

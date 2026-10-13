@@ -46,6 +46,15 @@ SWIFT_LB_PORT="${SWIFT_LB_PORT:-8090}"
 HAPROXY_STATS_PORT="${HAPROXY_STATS_PORT:-9000}"
 HAPROXY_STATS_USER="${HAPROXY_STATS_USER:-admin}"
 HAPROXY_STATS_PASS="${HAPROXY_STATS_PASS:-admin123}"
+# Scale limits (defaults = the values that were previously hard-coded in the template)
+HAPROXY_MAXCONN="${HAPROXY_MAXCONN:-4000}"                      # global: max concurrent connections for the whole process
+HAPROXY_FRONTEND_MAXCONN="${HAPROXY_FRONTEND_MAXCONN:-3000}"    # defaults: max concurrent connections per frontend
+for _var in HAPROXY_MAXCONN HAPROXY_FRONTEND_MAXCONN; do
+    if ! [[ "${!_var}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: ${_var} must be a positive integer (got '${!_var}')."
+        exit 1
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Pre-flight: discover and validate the cluster NIC
@@ -166,6 +175,8 @@ sed \
     -e "s/__HAPROXY_STATS_PORT__/${HAPROXY_STATS_PORT}/g" \
     -e "s/__HAPROXY_STATS_USER__/${HAPROXY_STATS_USER}/g" \
     -e "s/__HAPROXY_STATS_PASS__/${HAPROXY_STATS_PASS}/g" \
+    -e "s/__HAPROXY_MAXCONN__/${HAPROXY_MAXCONN}/g" \
+    -e "s/__HAPROXY_FRONTEND_MAXCONN__/${HAPROXY_FRONTEND_MAXCONN}/g" \
     "${SCRIPT_DIR}/haproxy.cfg.template" | sudo tee /etc/haproxy/haproxy.cfg > /dev/null
 
 # 5. Open firewall ports

@@ -18,6 +18,8 @@ from src.config.config import (
     QUEUE_FLOW2_P1_TO_P2,
     QUEUE_FLOW3_P1_TO_P5,
     GT_METRICS_INTERVAL_S,
+    API_REQUEST_POOL_SIZE,
+    API_LISTEN_BACKLOG,
 )
 from src.zookeeper import zk as zklib
 from src.swift import swift_storage
@@ -378,9 +380,11 @@ def _gt_http_server():
     # eventlet.listen() creates and binds the non-blocking green socket.
     httpd = HTTPServer((API_HOST, API_BACKEND_PORT), RestApiHandler, bind_and_activate=False)
     # Use GreenPool to handle each request in its own greenthread
-    httpd.socket = eventlet.listen((API_HOST, API_BACKEND_PORT))
-    pool = eventlet.GreenPool(size=gt.GT_WORKER_CONCURRENCY * 10)
-    log.info(f"HTTP server listening on {API_HOST}:{API_BACKEND_PORT} (GreenPool size={gt.GT_WORKER_CONCURRENCY * 10})")
+    httpd.socket = eventlet.listen((API_HOST, API_BACKEND_PORT), backlog=API_LISTEN_BACKLOG)
+    pool_size = API_REQUEST_POOL_SIZE or gt.GT_WORKER_CONCURRENCY * 10
+    pool = eventlet.GreenPool(size=pool_size)
+    log.info(f"HTTP server listening on {API_HOST}:{API_BACKEND_PORT} "
+             f"(GreenPool size={pool_size}, listen backlog={API_LISTEN_BACKLOG})")
     try:
         while not gt.is_stopping():
             try:

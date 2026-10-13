@@ -284,6 +284,7 @@ erDiagram
 | [58](#scenario-58-total-swift-outage-during-the-pipeline--detect-and-back-fill-from-mariadb) | Total Swift Outage & Back-Fill from MariaDB | Swift | All proxies down, 7 s retry delay per message, rebuild missing objects from `raw_payload` |
 | [59](#scenario-59-reading-the-rest-api-http-request-log-across-scenarios) | Reading the REST API (HTTP) Request Log | REST API | Journal access lines, probe vs real requests, 400/404/500/502 phrasebook, per-node compare, HAProxy correlation |
 | [60](#scenario-60-pipeline-process-log-files-varlogflowfirst) | Pipeline Process Log Files | Logging | `/var/log/flowfirst/processN.log`, levels, rotation, tracing one message across processes |
+| [61](#scenario-61-scalability-test--thousands-of-concurrent-api-invocations-four-node-cluster) | Scalability Test — Thousands of Concurrent API Invocations | Scale | `scripts/load_test_api.py` step test, scale parameters, bottleneck table, queue drain, DB cross-check |
 
 ---
 
@@ -796,6 +797,10 @@ python -c "from src.gt import gt; gt.monkey_patch(); print('gt.py OK, pool size:
 | `GT_WORKER_CONCURRENCY` | `4` | Concurrent HTTP handlers in Process 1 |
 | `GT_METRICS_INTERVAL_S` | `60` | Seconds between throughput log lines |
 | `GT_DEDUP_REAP_INTERVAL_S` | `600` | Seconds between ZK dedup znode reap runs |
+| `API_REQUEST_POOL_SIZE` | `0` | HTTP requests one Process 1 serves at once; `0` = `GT_WORKER_CONCURRENCY` × 10 (40). See Scenario 61 |
+| `API_LISTEN_BACKLOG` | `50` | Connections the kernel queues for Process 1 while all request slots are busy. See Scenario 61 |
+| `GT_CONSUMERS_PER_QUEUE` | `1` | Consumer greenthreads per queue in Processes 2–5, each with its own RabbitMQ connection. See Scenario 61 |
+| `GT_PREFETCH_COUNT` | `1` | Unacknowledged messages RabbitMQ hands one consumer at a time. See Scenario 61 |
 
 #### Greenthread layout per process
 
@@ -7376,3 +7381,234 @@ sudo ls -lh /var/log/flowfirst/process4.log*
 ```
 
 Rotation renames `process4.log` to `process4.log.1`, shifts the older ones up, and deletes the oldest beyond `LOG_BACKUP_COUNT`. Old data is therefore **lost** once the limit is reached; copy a file off the node before it rotates away if you need it for an incident review. `INFO` volume is mostly one or two lines per message plus the Process 1 access lines, including HAProxy's health probes (about 28,800 per day, Scenario 59 B). If space matters more than detail, `LOG_LEVEL=WARNING` keeps only problems.
+
+---
+
+## Scale & Capacity Testing
+
+### Scenario 61: Scalability Test — Thousands of Concurrent API Invocations (Four-Node Cluster)
+
+> **Runs on:** the load generator on a **separate client host** that can reach the VIP (not a cluster node: it would use the CPU you are trying to measure; if you have no spare host, use node4, which runs only Process 5). It needs Python 3.9+ and a copy of this repository, but **no `pip install`** (`scripts/load_test_api.py` uses only the standard library). Observation commands run on **node1–node3** (HAProxy on the VIP holder; RabbitMQ, MariaDB and ZooKeeper on any of them) and on **node4** for Process 5. Tuning changes are made on **all four nodes**.
+
+This scenario answers one question: *how many API calls can the four-node deployment accept at the same time, how many messages per second can the pipeline actually finish, and which setting limits each?* It uses the other scenarios as building blocks: Scenario 1 (REST API), 9 (HAProxy dashboard), 40 (batch publishing), 43 (metrics), 45–51 and 60 (logs).
+
+#### What "concurrent" means here, and why there are two limits
+
+The load generator keeps a fixed number of **virtual users (VUs)**. Each VU sends one request, waits for the answer, then sends the next (a closed loop), so *N* VUs means *N* requests in flight. Throughput follows from that: `requests/s ≈ VUs ÷ (latency + think time)`. To model a real population rather than a hammer, set `LOAD_THINK_MS`: 5000 users who each call once every 10 s is `LOAD_STEPS=5000` with `LOAD_THINK_MS=10000` (about 500 req/s).
+
+A `200` from `POST /api/flow1` only means *Process 1 published the message to RabbitMQ*. The message is finished when Process 4 has stored it in MariaDB and Swift. The pipeline therefore has two capacities, and the test measures both:
+
+| Capacity | What it is | How the test shows it |
+|---|---|---|
+| **Intake** | How many API calls HAProxy and Process 1 accept per second at acceptable latency | Per-step `req/s`, `p95`, `err` |
+| **Completion** | How many messages per second Processes 2–5, MariaDB and Swift finish | Queue backlog during the run, and the **drain time** afterwards |
+
+If intake is higher than completion, every request still succeeds, but the RabbitMQ backlog grows without limit. A test that only looks at HTTP status would report success for a system that is falling behind.
+
+#### Scale parameters
+
+All have defaults that reproduce the previous fixed behaviour, so doing nothing changes nothing. They live in `.env` (documented in `src/config/.env.example`), are identical on every node, and are read at process start (`HAPROXY_*` when `haproxy/setup_haproxy.sh` is run).
+
+| Variable | Default | Limits | Raise it when |
+|---|---|---|---|
+| `API_REQUEST_POOL_SIZE` | `0` (= 40) | Requests **one** Process 1 serves at the same time. When all slots are busy the accept loop pauses and new connections wait in the kernel queue. | Latency rises with VUs while `req/s` stays flat (Little's law: the slots are full) |
+| `API_LISTEN_BACKLOG` | `50` | Connections queued for Process 1 while all slots are busy. The kernel caps it at `net.core.somaxconn` (4096 on RHEL 9). | HAProxy shows connect errors / `503` / `504` under bursts |
+| `GT_CONSUMERS_PER_QUEUE` | `1` | Parallel consumers per queue in P2–P5. Each is a greenthread with its **own** RabbitMQ connection. | Queues grow during a step and drain slowly afterwards |
+| `GT_PREFETCH_COUNT` | `1` | Messages in flight per consumer. `1` means a network round trip per message. | Same as above, once consumers are no longer the limit |
+| `HAPROXY_MAXCONN` | `4000` | `global maxconn` of HAProxy: concurrent client connections for the whole process. Once reached, HAProxy stops accepting and new clients wait in the kernel queue. | Peak VUs (or client connections, with `LOAD_KEEPALIVE=true` one per VU) approach this |
+| `HAPROXY_FRONTEND_MAXCONN` | `3000` | `maxconn` per frontend (`defaults` section). It is the lower of the two for the API frontend, so it is the first one you hit. | Peak VUs approach this |
+| `GT_POOL_SIZE` | `1000` | Greenthreads per process; must exceed consumers + helper threads | Only if you raise `GT_CONSUMERS_PER_QUEUE` very far |
+| `ZK_DEDUP_TTL_MS`, `GT_DEDUP_REAP_INTERVAL_S` | `300000`, `600` | How long Process 4 dedup znodes live and how often they are cleaned | `zk_znode_count` keeps climbing (see D) |
+| `SWIFT_ENABLED` | `true` | `false` skips the Swift write so you can measure the MariaDB-only ceiling | To separate Swift from MariaDB (see B) |
+| `LOG_LEVEL` | `INFO` | `INFO` writes at least one line per request and per message to the journal and to `/var/log/flowfirst/` | `WARNING` removes that overhead for the final capacity run |
+
+The load generator has its own `LOAD_*` variables (target, `LOAD_STEPS`, `LOAD_STEP_DURATION_S`, `LOAD_RAMP_S`, `LOAD_FLOW_MIX`, `LOAD_THINK_MS`, `LOAD_TIMEOUT_S`, `LOAD_KEEPALIVE`, `LOAD_SLO_P95_MS`, `LOAD_MAX_ERROR_PCT`, `LOAD_ITEM_ID_BASE`, `LOAD_DRAIN_TIMEOUT_S`, `RABBITMQ_MGMT_PORT`). Each is explained next to its default in `src/config/.env.example`, and each can be overridden on the command line (`python3 scripts/load_test_api.py --help`).
+
+> **What the code implies for scale-out (check it, do not assume it).** Each process wraps its work in a ZooKeeper leader election (`LeaderElection(...).run(callback)`), and kazoo's `Election.run` holds a lock for the whole callback. Read literally, that means **only the elected leader of each of Processes 1–4 does the work**, and the other nodes wait as standbys; Process 5 on node4 has no election. If that is what your cluster does, adding nodes adds failover, not capacity, and the levers are the per-process parameters above. Section A measures which case you have.
+
+#### A. Pre-flight: limits that cap the test before the application does
+
+```bash
+# 1. Client host: the generator needs about one file descriptor per VU
+ulimit -n                      # needs to exceed your largest LOAD_STEPS value + ~200; the script raises the soft limit up to the hard limit
+ulimit -n 65536                # or raise it in /etc/security/limits.d/ for a permanent change
+
+# 2. On node1, node2, node3: kernel accept queue (caps API_LISTEN_BACKLOG) and open-file limit of Process 1
+sysctl net.core.somaxconn
+sudo cat /proc/$(pgrep -f 'src.application.process1' | head -1)/limits | grep "open files"     # 65536 from the unit file
+
+# 3. Which nodes actually answer API calls right now?
+curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq -c '.pipeline_health | map_values(keys)'
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do echo -n "${n}: "; ssh "${n}" "sudo ss -tln | grep -c ':8082 '"; done      # 1 = Process 1 is listening, 0 = not
+echo "show stat" | ssh ${NODE1_IP} "sudo socat stdio /var/lib/haproxy/stats" | cut -d, -f1,2,18 | grep flowfirst_api_back   # UP / DOWN per backend (run on the VIP holder)
+
+# 4. MariaDB connection ceiling (Process 4 opens a connection per insert)
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -e "SHOW VARIABLES LIKE 'max_connections'; SHOW GLOBAL STATUS LIKE 'Max_used_connections';"
+
+# 5. Record the starting point: queues must be empty and the stack healthy
+ssh ${NODE1_IP} "sudo rabbitmqctl list_queues name messages messages_unacknowledged consumers"
+curl -s http://${FLOWFIRST_VIP}:8080/health | jq -r '.status, .node'
+```
+
+*Expected:* `somaxconn` 4096; Process 1 listening on port 8082 on every node you intend to serve the API (the count in step 3); every `flowfirst_api_back` server `UP`; all queues at 0 messages. If step 3 shows only one node listening and the other two backends `DOWN` in HAProxy, you have the single-leader case described above, and the `served by` line in C will show a single node. Record which case you have; it decides how to read every later result.
+
+The test writes real data. Choose an unused `LOAD_ITEM_ID_BASE` (the default `9000000` is well above the item ids used by the other scenarios), and expect a few hundred thousand rows, objects and ZooKeeper znodes for a full run.
+
+#### B. Baseline at defaults, then find where it breaks
+
+Run the climb with the defaults first, so every later change has something to be compared with. On the client host, from the repository root (it reads `.env` from the repository root or `/opt/flowfirst/.env` for the VIP, node IPs and RabbitMQ credentials):
+
+```bash
+# Quick sanity run first: 3 small steps, short, and a dry run that prints the plan without sending anything
+python3 scripts/load_test_api.py --dry-run
+python3 scripts/load_test_api.py --steps 10,40,100 --duration 15 --ramp 3 --yes
+
+# The full climb (defaults: 50,100,250,500,1000,2000,4000 concurrent; ~35 s per step; stops at the first failing step)
+python3 scripts/load_test_api.py --csv baseline.csv
+```
+
+Each step prints one line; the format is shown below with **illustrative numbers** (your values will differ):
+
+```
+Step 250 concurrent ...
+  FAIL    250 VUs     312.4 req/s  p50    712  p95   1840  p99   2210  max   3105 ms  err  0.00%  queue 0 -> 2150 (max 2150)
+        served by: node1=10931
+        reason : p95 1840 ms > 1000 ms
+```
+
+A step **passes** when the error rate is at most `LOAD_MAX_ERROR_PCT` (default 1 %), p95 latency of successful requests is at most `LOAD_SLO_P95_MS` (default 1000 ms), and the generator itself kept up. The last criterion is checked through event-loop lag: if the line says `LOAD GENERATOR SATURATED`, the client host, not the cluster, is the limit. Add client hosts and run the script on each with a different `LOAD_ITEM_ID_BASE` (for example `9000000`, `19000000`, `29000000`), then add the throughput figures.
+
+The script exits `0` when the last step passed, `1` when a step failed, and `2` when it could not start (target unreachable, file-descriptor limit too low). `--csv` saves one row per step for comparing runs.
+
+**Reading the result.** Find the first failing step and match its symptom:
+
+| Symptom in the step line | Probable bottleneck | Confirm with | Lever |
+|---|---|---|---|
+| `req/s` stops growing while `p50`/`p95` grow in proportion to VUs, no errors | Process 1 request slots full (accept loop paused) | HAProxy `qcur` > 0 on backends, Process 1 near 100 % of one core | `API_REQUEST_POOL_SIZE` |
+| `errors : timeout`, HAProxy `scur`/`qcur` high, `econ` or `hrsp_5xx` rising | Backlog full or backends saturated | Step D; `ss -ltn` `Recv-Q` on port 8082 | `API_LISTEN_BACKLOG`, `API_REQUEST_POOL_SIZE` |
+| `req/s` flat, latency rising, Process 1 **below** 100 % of a core, RabbitMQ healthy | Process 1 publishes through **one shared channel**, one message at a time (a semaphore around `basic_publish`), and builds each message with `json.dumps(indent=2)` | Compare `req/s` of `POST` mixes with `health:1` (`--mix health:1`, which skips publishing) | No setting changes this; it is a code limit. Report it as the per-node intake ceiling |
+| `errors : reset` or `refused` at a round VU count (about 2000, 3000) | HAProxy `maxconn` reached | HAProxy `scur` equal to `slim`, `Connection refused` from the VIP | `HAPROXY_MAXCONN`, `HAPROXY_FRONTEND_MAXCONN` |
+| `http_503` | No backend available, or HAProxy queue timeout | HAProxy log `<NOSRV>` or `sQ` flags (Scenario 48) | Fix the down backend; see the two rows above |
+| `http_500` | Publish failed inside Process 1 | `grep " ERROR " /var/log/flowfirst/process1.log` | Usually RabbitMQ; see Scenario 46 |
+| `served by:` lists one node although three are `UP` | Not a bug in the test: only one Process 1 receives traffic | Step A.3 | See the note on leader election above |
+| All HTTP 200, **queue max keeps growing**, drain takes minutes | Completion capacity lower than intake | Step D (queues), then E (drain time) | `GT_CONSUMERS_PER_QUEUE`, `GT_PREFETCH_COUNT` |
+| Queue grows only in `flow1_p3_to_p4` / `flow2_p3_reflected` / `flow3_p2_to_p4` | Process 4: MariaDB or Swift | Step D; repeat with `SWIFT_ENABLED=false` | Consumers for Process 4; see below |
+| `LOAD GENERATOR SATURATED` | Client host | `top` on the client | More client hosts |
+
+To tell MariaDB from Swift as the Process 4 limit, run the same step twice: once normally and once after setting `SWIFT_ENABLED=false` on node1–node3 and restarting Process 4 (restart as in C). Process 4 does a ZooKeeper write, a MariaDB insert on a new connection, and, with Swift enabled, a container check plus an object upload through a fresh Swift connection for every message, so Swift is a likely cost. Set it back to `true` afterwards; with it off nothing is written to Swift.
+
+#### C. Apply a tuning change and re-run
+
+Change parameters on **every** node (node4 too, for Process 5), restart, and repeat B. The helper below replaces an existing `KEY=` line or appends the key when it is missing, so running it twice does not create duplicates. Run it from any of node1–node4 with passwordless `ssh` and `sudo`:
+
+```bash
+setenv() {   # usage: setenv KEY VALUE   — applies to all four nodes
+  for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
+    ssh "${n}" "grep -q '^$1=' /opt/flowfirst/.env && sudo sed -i.bak 's|^$1=.*|$1=$2|' /opt/flowfirst/.env || echo '$1=$2' | sudo tee -a /opt/flowfirst/.env >/dev/null"
+  done
+}
+
+# Example: a first attempt for roughly 2000-4000 concurrent callers. These are STARTING POINTS to be tuned by measurement.
+setenv API_REQUEST_POOL_SIZE 2000
+setenv API_LISTEN_BACKLOG 2048
+setenv GT_CONSUMERS_PER_QUEUE 8
+setenv GT_PREFETCH_COUNT 10
+setenv HAPROXY_MAXCONN 20000
+setenv HAPROXY_FRONTEND_MAXCONN 10000
+
+# Restart the pipeline processes (Pacemaker manages P1-P4; P5 on node4 is a plain systemd unit)
+for p in 1 2 3 4; do sudo pcs resource restart flowfirst-p${p}-res-clone; done
+ssh ${NODE4_IP} "sudo systemctl restart flowfirst-process5"
+
+# HAProxy limits are baked into /etc/haproxy/haproxy.cfg: regenerate on each of node1-node3, validate, then restart on the VIP holder
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do ssh "${n}" "cd /opt/flowfirst && sudo ./haproxy/setup_haproxy.sh >/dev/null && sudo haproxy -c -f /etc/haproxy/haproxy.cfg"; done
+sudo pcs resource restart haproxy-res          # brief interruption for new connections; see Scenarios 15 and 17
+```
+
+Confirm the new values took effect before the next run: `journalctl -u flowfirst-process1 -o cat | grep "HTTP server listening"` should show the new `GreenPool size` and `listen backlog`, and `grep maxconn /etc/haproxy/haproxy.cfg` the new limits. Re-run B with a different `--csv` name and compare the two files.
+
+Know what each lever costs:
+
+- **`GT_CONSUMERS_PER_QUEUE` > 1** lets several consumers read the same queue, so messages of one queue may finish **out of order**. Nothing in this pipeline depends on order across items; check that this holds for your use before raising it.
+- **`GT_PREFETCH_COUNT` > 1** means that after a consumer crash up to that many unacknowledged messages are redelivered. Process 4 is protected by the ZooKeeper dedup barrier; Processes 2, 3 and 5 are not, so a crash can produce a duplicate downstream message (Process 4 still stores each `message_id` once).
+- **One process is one CPU core.** Eventlet runs all greenthreads of a process on a single OS thread. If `top` shows a pipeline process at 100 % of one core, more consumers or request slots will not help.
+- **Failures lose messages.** Consumers reject failed messages with `requeue=False`, and the queues are declared without a dead-letter exchange, so a failed message is discarded. Under overload the difference between the `200` count and the MariaDB row count (step E) is the number of messages lost.
+
+#### D. Observe the cluster during a run
+
+Open these in separate terminals while a step is running.
+
+```bash
+# HAProxy (on the VIP holder): current and peak connections, queue, errors and 5xx per server
+echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | awk -F, 'NR==1{sub(/^# /,""); for(i=1;i<=NF;i++) c[$i]=i; next}
+  $1 ~ /^flowfirst_api_(front|back)$/ {printf "%-20s %-9s %-5s scur=%s smax=%s slim=%s qcur=%s qmax=%s ereq=%s econ=%s 5xx=%s\n",$1,$2,$c["status"],$c["scur"],$c["smax"],$c["slim"],$c["qcur"],$c["qmax"],$c["ereq"],$c["econ"],$c["hrsp_5xx"]}'
+
+# RabbitMQ (any of node1-node3): backlog per queue; 'unacked' is messages currently being worked on
+watch -n 5 "sudo rabbitmqctl list_queues name messages messages_ready messages_unacknowledged consumers"
+
+# CPU of the pipeline processes (every node): a process pinned at ~100% is out of single-core headroom
+watch -n 5 "ps -eo pid,pcpu,rss,args --sort=-pcpu | grep -E 'src.application|beam.smp|mariadbd|haproxy' | grep -v grep | head -8"
+
+# MariaDB / Galera: connections and replication back-pressure
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -e "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Max_used_connections','wsrep_flow_control_paused','wsrep_local_recv_queue_avg');"
+
+# ZooKeeper: Process 4 creates one dedup znode per message, kept for ZK_DEDUP_TTL_MS
+echo mntr | nc ${NODE1_IP} 2181 | grep -E "zk_znode_count|zk_outstanding_requests|zk_avg_latency"
+
+# Process 1 request log rate (journal) and errors (file; see Scenarios 59 and 60)
+sudo grep -c " ERROR " /var/log/flowfirst/process*.log
+```
+
+How to read them:
+
+- **HAProxy `scur` approaching `slim`**: you are at the `maxconn` limit. **`qcur` > 0 on a backend**: Process 1 cannot take requests as fast as HAProxy sends them.
+- **A RabbitMQ queue that keeps rising** while the other queues are near zero names the slow stage; the queue *before* a stage is that stage's input.
+- **`wsrep_flow_control_paused` well above 0** (fraction of time replication was throttled) means Galera, not Process 4, is the limit: one slow node holds back all writers.
+- **`Max_used_connections` close to `max_connections`** will start refusing Process 4 inserts, which then appear as `[Flow N] Error` lines and lost messages.
+- **`zk_znode_count`** grows by one per stored message and falls only when the reaper runs (`GT_DEDUP_REAP_INTERVAL_S`, default every 10 minutes, removing znodes older than `ZK_DEDUP_TTL_MS`, default 5 minutes). At several hundred messages per second this reaches hundreds of thousands of znodes; the reaper deletes them one by one and a very large child list is expensive in ZooKeeper. If the count keeps climbing, lower `GT_DEDUP_REAP_INTERVAL_S` (for example to `60`) and keep `ZK_DEDUP_TTL_MS` longer than the longest redelivery window you need.
+
+#### E. After the run: drain time and an end-to-end check
+
+The generator waits up to `LOAD_DRAIN_TIMEOUT_S` (default 300 s) for the queues to empty and prints either `Drained in N s` or `NOT drained`. The drain time is the honest measure of completion capacity: `backlog ÷ drain time` is the sustained messages-per-second the pipeline can finish. If it reports that the RabbitMQ management API is not reachable, read the backlog with `rabbitmqctl list_queues` instead.
+
+When the queues are empty, compare what was **accepted** with what was **stored**. The script prints the exact query and the expected counts at the end of the run:
+
+```bash
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "
+  SELECT flow_id, COUNT(*) AS stored FROM processed_messages
+  WHERE item_id BETWEEN 9000001 AND <last item_id printed by the script> GROUP BY flow_id;"
+```
+
+*Expected:* `stored` for each flow equals the `2xx` count printed for that flow. If `stored` is **lower**, messages were lost between the API and MariaDB: look for `ERROR` lines in the process logs, and for the reason in `/var/log/flowfirst/process4.log`. If it is slightly **higher**, some requests timed out on the client but were still accepted by Process 1. Duplicates do not occur, because `message_id` is unique.
+
+Cross-check Swift the same way as in Scenario 50 D (object count against row count). Under overload Swift writes can fail without failing the message: Process 4 logs `Swift store note` as a warning and still stores the row in MariaDB, so a Swift shortfall does not show up in the MariaDB count. Back-fill it with Scenario 58.
+
+#### F. Choosing a result to report
+
+Do not report the last step that happened to run. Report, for the configuration you tested:
+
+1. The **highest passing concurrency** and the **peak passing throughput** printed in the summary (intake).
+2. The **drain time** and implied completion rate (end-to-end).
+3. The **limiting resource** from the table in B (for example "Process 4 at 100 % of one core" or "HAProxy `maxconn`").
+4. The **parameter values** used (copy the `LOAD_*` and scale lines from `.env`) and the `--csv` file.
+5. Whether the **`stored` count matched the `2xx` count**. A run that loses messages has not passed, whatever the HTTP numbers say.
+
+For a final capacity run, set `LOG_LEVEL=WARNING` (removes per-request and per-message log lines), use the same `LOAD_STEPS` as the baseline, and repeat once to see run-to-run variation. A single run on a shared environment can be off by tens of percent.
+
+#### G. Clean up
+
+```bash
+# Delete the test rows in small batches: one huge DELETE is a single Galera write-set and can fail or stall the cluster
+for i in $(seq 1 1000); do
+  n=$(mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -N -B -e \
+      "DELETE FROM processed_messages WHERE item_id BETWEEN 9000001 AND <last item_id> LIMIT 5000; SELECT ROW_COUNT();" | tail -1)
+  [ "${n}" = "0" ] && break
+  sleep 1
+done
+
+# Put the settings back to the defaults (or to the values you decided to keep) and restart as in C
+setenv API_REQUEST_POOL_SIZE 0 ; setenv API_LISTEN_BACKLOG 50 ; setenv GT_CONSUMERS_PER_QUEUE 1 ; setenv GT_PREFETCH_COUNT 1
+setenv HAPROXY_MAXCONN 4000 ; setenv HAPROXY_FRONTEND_MAXCONN 3000 ; setenv LOG_LEVEL INFO
+```
+
+ZooKeeper dedup znodes expire on their own. The Swift objects from the run stay in the container (named `flow<N>/<message_id>.json`); on a dedicated test cluster you can leave them, and they will show up as extra objects in the Scenario 50 D comparison.

@@ -283,6 +283,16 @@ def spawn(
     return handle
 
 
+def spawn_consumers(name: str, fn: Callable, count: int = 1):
+    """
+    Spawn `count` copies of a consumer greenthread (auto-restarted on error).
+    The first keeps `name`; the others are named `name_2`, `name_3`, ...
+    Each copy must open its own RabbitMQ connection (fn already does).
+    """
+    for i in range(1, max(1, int(count)) + 1):
+        spawn(name if i == 1 else f"{name}_{i}", fn, restart_on_error=True)
+
+
 def spawn_n(name: str, fn: Callable, *args, restart_on_error: bool = False, **kwargs):
     """Fire-and-forget variant of spawn() — returns immediately."""
     spawn(name, fn, *args, restart_on_error=restart_on_error, **kwargs)

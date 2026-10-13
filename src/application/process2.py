@@ -16,6 +16,8 @@ from src.config.config import (
     QUEUE_FLOW2_P2_TO_P3,
     QUEUE_FLOW3_P5_TO_P2,
     QUEUE_FLOW3_P2_TO_P4,
+    GT_PREFETCH_COUNT,
+    GT_CONSUMERS_PER_QUEUE,
 )
 from src.zookeeper import zk as zklib
 
@@ -161,7 +163,7 @@ def _gt_consume_flow1():
     conn = gt.get_rmq_connection_with_retry("p2-flow1")
     ch   = conn.channel()
     setup_queues(ch)
-    ch.basic_qos(prefetch_count=1)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
     ch.basic_consume(queue=QUEUE_FLOW1_P1_TO_P2, on_message_callback=handle_flow1_message, auto_ack=False)
     log.info(f"flow1-consumer greenthread started — consuming '{QUEUE_FLOW1_P1_TO_P2}'")
     try:
@@ -181,7 +183,7 @@ def _gt_consume_flow2():
     conn = gt.get_rmq_connection_with_retry("p2-flow2")
     ch   = conn.channel()
     setup_queues(ch)
-    ch.basic_qos(prefetch_count=1)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
     ch.basic_consume(queue=QUEUE_FLOW2_P1_TO_P2, on_message_callback=handle_flow2_message, auto_ack=False)
     log.info(f"flow2-consumer greenthread started — consuming '{QUEUE_FLOW2_P1_TO_P2}'")
     try:
@@ -201,7 +203,7 @@ def _gt_consume_flow3():
     conn = gt.get_rmq_connection_with_retry("p2-flow3")
     ch   = conn.channel()
     setup_queues(ch)
-    ch.basic_qos(prefetch_count=1)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
     ch.basic_consume(queue=QUEUE_FLOW3_P5_TO_P2, on_message_callback=handle_flow3_message, auto_ack=False)
     log.info(f"flow3-consumer greenthread started — consuming '{QUEUE_FLOW3_P5_TO_P2}'")
     try:
@@ -227,13 +229,13 @@ def _consume():
     gt.register_signal_handlers()
 
     # Greenthread 1: Flow 1 consumer (own connection)
-    gt.spawn("p2_flow1_consumer", _gt_consume_flow1, restart_on_error=True)
+    gt.spawn_consumers("p2_flow1_consumer", _gt_consume_flow1, GT_CONSUMERS_PER_QUEUE)
 
     # Greenthread 2: Flow 2 consumer (own connection)
-    gt.spawn("p2_flow2_consumer", _gt_consume_flow2, restart_on_error=True)
+    gt.spawn_consumers("p2_flow2_consumer", _gt_consume_flow2, GT_CONSUMERS_PER_QUEUE)
 
     # Greenthread 3: Flow 3 consumer (from remote Process 5)
-    gt.spawn("p2_flow3_consumer", _gt_consume_flow3, restart_on_error=True)
+    gt.spawn_consumers("p2_flow3_consumer", _gt_consume_flow3, GT_CONSUMERS_PER_QUEUE)
 
     # Greenthread 4: ZooKeeper health reporter
     gt.periodic("p2_zk_health", _gt_zk_health_reporter, 30)

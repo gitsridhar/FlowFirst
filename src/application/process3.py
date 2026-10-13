@@ -14,6 +14,8 @@ from src.config.config import (
     QUEUE_FLOW1_P3_TO_P4,
     QUEUE_FLOW2_P2_TO_P3,
     QUEUE_FLOW2_P3_REFLECTED,
+    GT_PREFETCH_COUNT,
+    GT_CONSUMERS_PER_QUEUE,
 )
 from src.zookeeper import zk as zklib
 
@@ -97,7 +99,7 @@ def _gt_consume_flow1():
     conn = gt.get_rmq_connection_with_retry("p3-flow1")
     ch   = conn.channel()
     setup_queues(ch)
-    ch.basic_qos(prefetch_count=1)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
     ch.basic_consume(queue=QUEUE_FLOW1_P2_TO_P3, on_message_callback=handle_flow1_message, auto_ack=False)
     log.info(f"flow1-consumer greenthread started — consuming '{QUEUE_FLOW1_P2_TO_P3}'")
     try:
@@ -114,7 +116,7 @@ def _gt_consume_flow2():
     conn = gt.get_rmq_connection_with_retry("p3-flow2")
     ch   = conn.channel()
     setup_queues(ch)
-    ch.basic_qos(prefetch_count=1)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
     ch.basic_consume(queue=QUEUE_FLOW2_P2_TO_P3, on_message_callback=handle_flow2_message, auto_ack=False)
     log.info(f"flow2-consumer greenthread started — consuming '{QUEUE_FLOW2_P2_TO_P3}'")
     try:
@@ -139,8 +141,8 @@ def _consume():
     """Leader callback: launch all greenthreads for Process 3."""
     gt.register_signal_handlers()
 
-    gt.spawn("p3_flow1_consumer", _gt_consume_flow1, restart_on_error=True)
-    gt.spawn("p3_flow2_consumer", _gt_consume_flow2, restart_on_error=True)
+    gt.spawn_consumers("p3_flow1_consumer", _gt_consume_flow1, GT_CONSUMERS_PER_QUEUE)
+    gt.spawn_consumers("p3_flow2_consumer", _gt_consume_flow2, GT_CONSUMERS_PER_QUEUE)
     gt.periodic("p3_zk_health",  _gt_zk_health_reporter, 30)
     gt.start_metrics_reporter("process3")
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FlowFirst REST API load generator (Scenario 61).
+FlowFirst REST API load generator (Scenarios 61 and 62).
 
 Drives many concurrent API invocations at the VIP and reports, per step:
 throughput, latency percentiles, error classes, which node answered, and the
@@ -105,6 +105,9 @@ def parse_args():
                     help="first item_id; each request gets the next number (LOAD_ITEM_ID_BASE)")
     ap.add_argument("--drain-timeout", type=float, default=float(_env("LOAD_DRAIN_TIMEOUT_S", 300)),
                     help="seconds to wait for RabbitMQ queues to empty after the last step; 0 = skip (LOAD_DRAIN_TIMEOUT_S)")
+    ap.add_argument("--interval", type=float, default=float(_env("LOAD_REPORT_INTERVAL_S", 0)),
+                    help="also print/save a result line every N seconds inside each step (soak trend); 0 = off "
+                         "(LOAD_REPORT_INTERVAL_S)")
     ap.add_argument("--csv", default=None, help="write the per-step summary here (default ./load_test_<time>.csv)")
     ap.add_argument("--no-stop", action="store_true", help="keep climbing after a step fails")
     ap.add_argument("--yes", action="store_true", help="do not ask for confirmation")
@@ -376,7 +379,30 @@ async def lag_probe(stats, stop):
             stats.lag_ms.append(max(0.0, (time.monotonic() - t0 - 0.05) * 1000.0))
 
 
-async def run_step(args, vus, monitor, ids):
+async def window_reporter(args, stats, monitor, stop, vus, windows, t0):
+    """Every args.interval seconds of the measured period, report the numbers for just that window."""
+    i_lat, i_total, i_ok, t_prev = 0, 0, 0, t0
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), args.interval)
+            return                                  # step finished; the partial last window is not reported
+        except asyncio.TimeoutError:
+            pass
+        now = time.monotonic()
+        lat = sorted(stats.lat_ms[i_lat:])
+        n_total, n_ok = stats.total - i_total, stats.ok - i_ok
+        w = {"vus": vus, "t_s": round(now - t0), "rps": round(n_ok / (now - t_prev), 1),
+             "p50_ms": round(pct(lat, 0.50), 1), "p95_ms": round(pct(lat, 0.95), 1),
+             "p99_ms": round(pct(lat, 0.99), 1),
+             "err_pct": round(100.0 * (n_total - n_ok) / n_total, 2) if n_total else 100.0,
+             "queue": monitor.total}
+        windows.append(w)
+        say("    t=%5ds  %8.1f req/s  p50 %6.0f  p95 %6.0f  p99 %6.0f ms  err %5.2f%%  queue %s" % (
+            w["t_s"], w["rps"], w["p50_ms"], w["p95_ms"], w["p99_ms"], w["err_pct"], w["queue"]))
+        i_lat, i_total, i_ok, t_prev = len(stats.lat_ms), stats.total, stats.ok, now
+
+
+async def run_step(args, vus, monitor, ids, windows):
     stats = StepStats()
     stop = asyncio.Event()
     q_start = monitor.total
@@ -386,6 +412,10 @@ async def run_step(args, vus, monitor, ids):
     await asyncio.sleep(args.ramp)
     stats.active = True
     t0 = time.monotonic()
+    win_task = None
+    if args.interval > 0:
+        say("    measuring from %s (t=0 below)" % time.strftime("%H:%M:%S"))
+        win_task = asyncio.ensure_future(window_reporter(args, stats, monitor, stop, vus, windows, t0))
     await asyncio.sleep(args.duration)
     elapsed = time.monotonic() - t0
     stats.active = False
@@ -393,7 +423,7 @@ async def run_step(args, vus, monitor, ids):
     _, pending = await asyncio.wait(tasks, timeout=args.timeout + 2)
     for t in pending:
         t.cancel()
-    await asyncio.gather(*pending, lag_task, return_exceptions=True)
+    await asyncio.gather(*pending, lag_task, *([win_task] if win_task else []), return_exceptions=True)
 
     lat = sorted(stats.lat_ms)
     lag = sorted(stats.lag_ms)
@@ -478,6 +508,15 @@ def check_fd_limit(args):
             pass
 
 
+def write_windows_csv(path, windows):
+    cols = ["vus", "t_s", "rps", "p50_ms", "p95_ms", "p99_ms", "err_pct", "queue"]
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        wr = csv.writer(fh)
+        wr.writerow(cols)
+        for w in windows:
+            wr.writerow([w[c] for c in cols])
+
+
 def write_csv(path, rows):
     cols = ["vus", "requests", "ok", "rps", "p50_ms", "p95_ms", "p99_ms", "max_ms", "err_pct", "lag_p95_ms",
             "q_start", "q_end", "q_max", "verdict", "reasons", "errors", "nodes"]
@@ -533,6 +572,7 @@ async def main_async(args):
                                     else "%.0f ms average per VU" % args.think_ms))
     say("  request mix   : " + ", ".join("%s:%g" % (n, w) for n, w in zip(args.mix_names, args.mix_weights)))
     say("  pass criteria : errors <= %.2f%%, p95 <= %.0f ms" % (args.max_error_pct, args.slo_p95_ms))
+    say("  trend lines   : %s" % ("every %.0f s inside each step" % args.interval if args.interval > 0 else "off"))
     say("  item_id range : starts at %d (every request gets the next number)" % (args.item_id_base + 1))
     say("  this test WRITES real rows to MariaDB, objects to Swift and messages through RabbitMQ.")
     if args.dry_run:
@@ -559,10 +599,10 @@ async def main_async(args):
     say("  queue monitor : %s" % ("RabbitMQ management API OK (backlog now %s)" % monitor.total if monitor.ok
                                   else "unavailable (queue columns will show None)"))
     say("")
-    rows, ids = [], Counter_()
+    rows, ids, windows = [], Counter_(), []
     for vus in args.step_list:
         say("Step %d concurrent ..." % vus)
-        row = await run_step(args, vus, monitor, ids)
+        row = await run_step(args, vus, monitor, ids, windows)
         rows.append(row)
         print_step(row)
         if row["verdict"] == "FAIL" and not args.no_stop:
@@ -593,6 +633,10 @@ async def main_async(args):
         args.item_id_base + 1, args.item_id_base + ids.n))
     write_csv(args.csv, rows)
     say("Per-step results written to %s" % args.csv)
+    if windows:
+        wpath = re.sub(r"(\.csv)?$", ".windows.csv", args.csv, count=1)
+        write_windows_csv(wpath, windows)
+        say("Per-window trend lines written to %s" % wpath)
     return 0 if passed and rows[-1]["verdict"] == "PASS" else 1
 
 

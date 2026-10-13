@@ -285,6 +285,8 @@ erDiagram
 | [59](#scenario-59-reading-the-rest-api-http-request-log-across-scenarios) | Reading the REST API (HTTP) Request Log | REST API | Journal access lines, probe vs real requests, 400/404/500/502 phrasebook, per-node compare, HAProxy correlation |
 | [60](#scenario-60-pipeline-process-log-files-varlogflowfirst) | Pipeline Process Log Files | Logging | `/var/log/flowfirst/processN.log`, levels, rotation, tracing one message across processes |
 | [61](#scenario-61-scalability-test--thousands-of-concurrent-api-invocations-four-node-cluster) | Scalability Test — Thousands of Concurrent API Invocations | Scale | `scripts/load_test_api.py` step test, scale parameters, bottleneck table, queue drain, DB cross-check |
+| [62](#scenario-62-performance-test--measured-latency-throughput-and-freshness-for-client-expectations) | Performance Test — Latency, Throughput & Freshness for Client Expectations | Performance | Fixed workload profiles, warm-up + 3 repeats, end-to-end latency from MariaDB, resource sampling, soak run, load during failover, result template |
+
 
 ---
 
@@ -7422,7 +7424,7 @@ All have defaults that reproduce the previous fixed behaviour, so doing nothing 
 | `SWIFT_ENABLED` | `true` | `false` skips the Swift write so you can measure the MariaDB-only ceiling | To separate Swift from MariaDB (see B) |
 | `LOG_LEVEL` | `INFO` | `INFO` writes at least one line per request and per message to the journal and to `/var/log/flowfirst/` | `WARNING` removes that overhead for the final capacity run |
 
-The load generator has its own `LOAD_*` variables (target, `LOAD_STEPS`, `LOAD_STEP_DURATION_S`, `LOAD_RAMP_S`, `LOAD_FLOW_MIX`, `LOAD_THINK_MS`, `LOAD_TIMEOUT_S`, `LOAD_KEEPALIVE`, `LOAD_SLO_P95_MS`, `LOAD_MAX_ERROR_PCT`, `LOAD_ITEM_ID_BASE`, `LOAD_DRAIN_TIMEOUT_S`, `RABBITMQ_MGMT_PORT`). Each is explained next to its default in `src/config/.env.example`, and each can be overridden on the command line (`python3 scripts/load_test_api.py --help`).
+The load generator has its own `LOAD_*` variables (target, `LOAD_STEPS`, `LOAD_STEP_DURATION_S`, `LOAD_RAMP_S`, `LOAD_FLOW_MIX`, `LOAD_THINK_MS`, `LOAD_TIMEOUT_S`, `LOAD_KEEPALIVE`, `LOAD_SLO_P95_MS`, `LOAD_MAX_ERROR_PCT`, `LOAD_ITEM_ID_BASE`, `LOAD_DRAIN_TIMEOUT_S`, `LOAD_REPORT_INTERVAL_S`, `RABBITMQ_MGMT_PORT`). Each is explained next to its default in `src/config/.env.example`, and each can be overridden on the command line (`python3 scripts/load_test_api.py --help`).
 
 > **What the code implies for scale-out (check it, do not assume it).** Each process wraps its work in a ZooKeeper leader election (`LeaderElection(...).run(callback)`), and kazoo's `Election.run` holds a lock for the whole callback. Read literally, that means **only the elected leader of each of Processes 1–4 does the work**, and the other nodes wait as standbys; Process 5 on node4 has no election. If that is what your cluster does, adding nodes adds failover, not capacity, and the levers are the per-process parameters above. Section A measures which case you have.
 
@@ -7546,8 +7548,10 @@ echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | awk -F, 'NR==1{sub(
 # RabbitMQ (any of node1-node3): backlog per queue; 'unacked' is messages currently being worked on
 watch -n 5 "sudo rabbitmqctl list_queues name messages messages_ready messages_unacknowledged consumers"
 
-# CPU of the pipeline processes (every node): a process pinned at ~100% is out of single-core headroom
-watch -n 5 "ps -eo pid,pcpu,rss,args --sort=-pcpu | grep -E 'src.application|beam.smp|mariadbd|haproxy' | grep -v grep | head -8"
+# CPU of the pipeline processes (every node): a process pinned at ~100% is out of single-core headroom.
+# Use pidstat (sudo dnf install -y sysstat): it reports the CPU used during the last 5 s. 'ps -o pcpu' is NOT suitable,
+# because it averages over the whole lifetime of the process and hides a process that is busy right now.
+watch -n 6 "pidstat -u -l 5 1 | grep -E 'Average:.*(src.application|beam.smp|mariadbd|haproxy)'"
 
 # MariaDB / Galera: connections and replication back-pressure
 mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -e "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Max_used_connections','wsrep_flow_control_paused','wsrep_local_recv_queue_avg');"
@@ -7612,3 +7616,274 @@ setenv HAPROXY_MAXCONN 4000 ; setenv HAPROXY_FRONTEND_MAXCONN 3000 ; setenv LOG_
 ```
 
 ZooKeeper dedup znodes expire on their own. The Swift objects from the run stay in the container (named `flow<N>/<message_id>.json`); on a dedicated test cluster you can leave them, and they will show up as extra objects in the Scenario 50 D comparison.
+
+---
+
+## Performance Testing
+
+### Scenario 62: Performance Test — Measured Latency, Throughput and Freshness for Client Expectations
+
+> **Runs on:** the same **separate client host** as Scenario 61 (Python 3.9+, a copy of this repository, `.env` with the VIP and node IPs, passwordless `ssh` and `sudo` to node1–node4, and a `mariadb` client). Resource sampling runs on **node1–node4**; `pidstat` and `sar` come from the `sysstat` package (`sudo dnf install -y sysstat` on each node). Run it only after Scenario 61, because the profiles below must sit **below** the capacity found there.
+
+> **Status of the numbers in this document.** Nothing in this scenario is a measurement. The procedure was assembled from the code and its helper commands were checked against a mock HTTP server and sample text only. Nothing was run on a real four-node cluster, and `pidstat`, `sar`, `ssh` and `mariadb` were not available where it was prepared. The result table in H is a template: every number that goes to a client must come from your own runs on your hardware, stated together with the conditions it was measured under.
+
+Scenario 61 finds *where the system breaks*. This scenario answers a different question: *at the load a client actually expects, what response times, throughput and data freshness will they experience, and how much does it vary?* It therefore uses fixed, repeatable workloads, repeats them, and reports conditions together with results.
+
+#### A. What to measure, and what to promise
+
+| Measure | Meaning for the client | Where it comes from | Statistic to report |
+|---|---|---|---|
+| **API response time** | How long `POST /api/flowN` takes to return `200` ("accepted into the pipeline") | `scripts/load_test_api.py` | p50, p95, p99 (never only the average) |
+| **Throughput** | Accepted requests per second, compared with the rate the profile should produce | same | req/s, expected vs achieved |
+| **Error rate** | Share of calls that fail or time out | same | % per run |
+| **Freshness (end-to-end latency)** | Seconds from the API call until the record is stored in MariaDB. This is what a user waiting for data to appear experiences, and it is **not** the API response time | MariaDB (section D) | p50, p95, p99, max, per flow |
+| **Backlog and drain time** | Whether the pipeline keeps up, or accepts work faster than it finishes it | script (`queue`, `Drained in`) | max queue, seconds to empty |
+| **Resource use** | CPU, memory, network and disk per node, which shows headroom | `pidstat` / `sar` (section E) | average and maximum per process |
+| **Repeatability** | Whether the figure can be quoted at all | 3 repeated runs | spread between runs |
+| **Stored equals accepted** | No message was lost | script summary and MariaDB | must match exactly |
+
+Freshness is the figure clients usually care about most, and the one a plain HTTP benchmark cannot show.
+
+#### B. Prepare: production settings, healthy cluster, recorded conditions
+
+Measure the configuration you intend to ship. In particular do **not** switch `LOG_LEVEL` to `WARNING` just to look better unless production will run that way; use the tuning values you settled on in Scenario 61 and write them down. Then confirm the starting state and capture the conditions in one place:
+
+```bash
+cd /opt/flowfirst && set -a && source .env && set +a
+
+# Healthy starting state (all must hold, otherwise the run measures a fault, not performance)
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do ssh "$n" "chronyc tracking | grep -E 'Leap|System time'"; done     # freshness needs synchronised clocks, offset well below 1 s
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -e "SHOW STATUS LIKE 'wsrep_cluster_size'; SHOW STATUS LIKE 'wsrep_local_state_comment';"   # 3, Synced
+ssh ${NODE1_IP} "sudo rabbitmqctl list_queues name messages | awk '\$2>0'"                                          # prints nothing when every queue is empty
+curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq -c '.pipeline_health | map_values(keys)'
+
+# Conditions record: save it next to the results
+{
+  echo "date: $(date -Is)   commit: $(git -C /opt/flowfirst rev-parse --short HEAD)"
+  for ip in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
+    ssh "$ip" "echo \"== \$(hostname -s): \$(nproc) vCPU, \$(free -g | awk '/Mem:/{print \$2}') GiB RAM, \$(uname -r)\""
+  done
+  grep -E '^(API_|GT_|HAPROXY_|LOG_LEVEL|SWIFT_ENABLED|ZK_DEDUP|LOAD_)[A-Z_]*=' /opt/flowfirst/.env
+  echo "client host: $(hostname -s) -> VIP ${FLOWFIRST_VIP}"
+} | tee perf_conditions.txt
+```
+
+Also record whether the nodes are virtual machines, the disk type behind `/var/lib/mysql`, `/srv/node` and RabbitMQ, the network between the client host and the VIP, and how many rows `processed_messages` already holds (a larger table makes inserts and the freshness query slower). Run the client host **where the real clients are**, or state that the response times exclude their network.
+
+#### C. The workload profiles and the run protocol
+
+A profile is a number of virtual users and a think time. The request rate follows from `req/s ≈ users ÷ (response time + think time)`. Take the profiles from the client's forecast (users × calls per user per minute). The three below are **examples to replace**, with the rate each should produce when the system keeps up:
+
+| Profile | Users | Think time | Expected rate | Represents |
+|---|---|---|---|---|
+| `light` | 50 | 5000 ms | about 10 req/s | quiet period |
+| `typical` | 250 | 2500 ms | about 100 req/s | normal business load |
+| `peak` | 1000 | 2000 ms | about 500 req/s | busiest hour |
+
+The flow mix is `LOAD_FLOW_MIX` (default flow1 45 %, flow2 45 %, flow3 10 %); set it to the client's real mix and record it. Each profile is run once as a **warm-up that is discarded** (connection pools, first Swift container creation, caches) followed by **three measured runs**. The helper below runs one of them, gives it its own non-overlapping `item_id` block so runs never collide, and returns non-zero when a step fails or the queues do not drain. Define it on the client host, in the repository root:
+
+```bash
+perf_run() {   # usage: perf_run <profile> <profile-index 0-4> <users> <think_ms> <run 0=warm-up|1..3> [measured-seconds]
+  local base=$((9000000 + ($2 * 4 + $5) * 10000000)) dur=${6:-300}
+  python3 scripts/load_test_api.py --steps "$3" --think-ms "$4" --ramp ${PERF_RAMP:-10} --duration "${dur}" \
+      --interval ${PERF_INTERVAL:-30} --item-id-base "${base}" --drain-timeout 600 \
+      --csv "perf_$1_run$5.csv" --yes | tee "perf_$1_run$5.log"
+  ! grep -qE "NOT drained|^  FAIL " "perf_$1_run$5.log"
+}
+
+export PERF_RAMP=10 PERF_INTERVAL=30
+for spec in "light 0 50 5000" "typical 1 250 2500" "peak 2 1000 2000"; do
+  read -r name idx users think <<< "${spec}"
+  perf_run "${name}" "${idx}" "${users}" "${think}" 0 120                    # warm-up, discarded
+  for r in 1 2 3; do perf_run "${name}" "${idx}" "${users}" "${think}" "$r" 300; done
+done
+```
+
+Each measured run is ten seconds of ramp plus five minutes of measurement, plus the drain wait. It writes `perf_<profile>_run<N>.csv` (end-of-run summary), `perf_<profile>_run<N>.windows.csv` (one row every `PERF_INTERVAL` seconds) and a `.log`. Run the sampling in E **at the same time**, and the freshness query in D **after** each run. Between runs the script waits for the queues to empty, so each run starts from an idle pipeline.
+
+*Expected output of one run (illustrative values, not measurements):*
+
+```
+Step 250 concurrent ...
+    measuring from 14:02:11 (t=0 below)
+    t=   30s       98.7 req/s  p50     14  p95     41  p99     90 ms  err  0.00%  queue 3
+    ...
+  PASS     250 VUs      99.2 req/s  p50     14  p95     43  p99     95  max     310 ms  err  0.00%  queue 0 -> 6 (max 9)
+```
+
+Compare the achieved rate with the expected rate from the table. If `typical` shows 60 req/s where about 100 was expected, the system is already saturated at that profile (Scenario 61 symptoms), and the response-time figures describe an overloaded system, not the intended load.
+
+#### D. Freshness: seconds from API call to a stored record
+
+The first entry of `history_trail` is stamped by Process 1 when the request arrives (`process1_created`); `created_at` is set by MariaDB when Process 4 inserts the row. Their difference is the end-to-end latency, using only data that is already stored. Run it after the queues are empty, for each run:
+
+```bash
+perf_fresh() {   # usage: perf_fresh <perf_*.log>  — freshness in seconds per flow, for the item_id range of that run
+  local lo hi; read -r lo hi < <(awk '/item_id range used/ {print $5, $7}' "$1")
+  mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -N -B -e "
+    SELECT flow_id, TIMESTAMPDIFF(SECOND,
+             STR_TO_DATE(JSON_VALUE(history_trail,'\$[0].timestamp'),'%Y-%m-%d %H:%i:%s'), created_at)
+    FROM processed_messages WHERE item_id BETWEEN ${lo} AND ${hi};" |
+  sort -k1,1n -k2,2n | awk -F'\t' '{ v[$1, ++n[$1]]=$2; s[$1]+=$2; if ($2<0) neg[$1]++ }
+    function p(k,q,  i){ i=int(q*(n[k]-1))+1; return v[k,i] }
+    END{ for(k in n) printf "flow%s rows=%d avg=%.1f p50=%d p95=%d p99=%d max=%d negative=%d (seconds)\n", k, n[k], s[k]/n[k], p(k,.50), p(k,.95), p(k,.99), v[k,n[k]], neg[k] }' | sort
+}
+
+perf_fresh perf_typical_run1.log
+```
+
+*Expected shape of the output (illustrative):* `flow1 rows=14980 avg=1.2 p50=1 p95=3 p99=5 max=9 negative=0 (seconds)`, one line per flow.
+
+Read it with these limits in mind:
+
+- **Resolution is one second, with up to ±1 s error.** Both timestamps are truncated to whole seconds (`time.strftime`, and `created_at` is a plain `TIMESTAMP`). Quote freshness in whole seconds and never claim sub-second accuracy.
+- **`negative` must be 0.** A negative value means clock skew between the node that stamped the message and the node that inserted it (check `chronyc`), or a MariaDB `time_zone` that differs from the nodes' operating-system time zone (`SELECT @@global.time_zone, @@system_time_zone;`). Do not report freshness until this is resolved.
+- It covers the whole path: RabbitMQ hops, Processes 2–4, the ZooKeeper dedup write and the MariaDB insert. It does **not** include the Swift upload, because the row is inserted before Process 4 writes to Swift. Use Scenario 50 D to confirm Swift keeps up.
+- Per-stage timings are in `history_trail` too (`process2_*`, `process3_*`, `process4_saved_to_mariadb`), with the same one-second resolution. They are useful for finding which stage grew when freshness is poor, not for measuring it.
+
+#### E. Resource use on every node
+
+Sample CPU and memory of the pipeline processes, plus system CPU, memory, network and disk, during the whole run. Start it just before `perf_run`, with a length that covers the ramp, the measurement and the drain (below: 12 minutes for a 5-minute run):
+
+```bash
+perf_sample_start() {   # usage: perf_sample_start <label> <seconds>  — samples every 10 s on node1-node4
+  local n=$(( $2 / 10 )) ip
+  for ip in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
+    ssh "${ip}" "nohup sudo pidstat -u -r -h -l 10 ${n} > /tmp/perf_$1_pid.txt 2>&1 < /dev/null &
+                 nohup sudo sar -u -r -d -n DEV 10 ${n} > /tmp/perf_$1_sar.txt 2>&1 < /dev/null &"
+  done
+}
+
+perf_sample_collect() {   # usage: perf_sample_collect <label>  — summary per process on each node; raw files kept as perf_<label>_<node>_{pid,sar}.txt
+  local ip
+  for ip in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
+    scp -q "${ip}:/tmp/perf_$1_pid.txt" "perf_$1_${ip}_pid.txt"; scp -q "${ip}:/tmp/perf_$1_sar.txt" "perf_$1_${ip}_sar.txt"
+    echo "== ${ip}"
+    awk '/^#/ && /%CPU/ { for(i=1;i<=NF;i++){ if($i=="%CPU")c=i-1; if($i=="RSS")r=i-1; if($i=="Command")m=i-1 } next }
+         c && $1 ~ /^[0-9]/ { k=$m; for(i=m+1;i<=NF;i++) k=k" "$i
+           if (k !~ /src\.application|beam\.smp|mariadbd|haproxy|java|memcached|swift/) next
+           n[k]++; s[k]+=$c; if($c>x[k]) x[k]=$c; if(!(k in f)) f[k]=$r; l[k]=$r }
+         END{ printf "%8s %8s %10s %10s  %s\n","avg%CPU","max%CPU","RSS_kB_1st","RSS_kB_end","command"
+              for(k in n) printf "%8.1f %8.1f %10d %10d  %s\n", s[k]/n[k], x[k], f[k], l[k], substr(k, length(k)-60) }' "perf_$1_${ip}_pid.txt" | { read -r hdr; echo "$hdr"; sort -k1,1nr; }
+  done
+}
+
+perf_sample_start typical1 720          # then, immediately:  perf_run typical 1 250 2500 1 300
+perf_sample_collect typical1            # after the run and the drain
+```
+
+How to read it:
+
+- A process at an average near **100 % of one core** has no headroom: eventlet runs all greenthreads of a process on one core, so more users will only add latency. Compare the profile you are quoting with that figure. A reasonable (but arbitrary) convention is to want the `typical` profile well under 70 % average on the busiest pipeline process; your own policy decides.
+- Remember the leader-election note in Scenario 61: if only one node's Process 1 and Process 4 work, the other nodes will show idle pipeline processes, and the headroom of that one node is the headroom of the system. If that node fails, the new leader inherits the whole load, so judge headroom with that in mind (see G).
+- `RSS_kB_1st` against `RSS_kB_end` shows memory growth during the run; a short run cannot prove there is no leak, see F.
+- `sar` files: read system CPU (`%idle`, `%iowait`), memory (`%memused`), network (`rxkB/s`, `txkB/s`) and disk (`%util`) per node with `less`. A disk at `%util` near 100 or an `%iowait` that stays high points at MariaDB, RabbitMQ or Swift storage. These `pidstat` and `sar` commands and the `ssh` wrappers were not exercised on a real node; the summary `awk` was run on sample `pidstat` text only. Check the first run's raw files before trusting the summary.
+
+#### F. Repeatability and stability
+
+**Run-to-run variation.** After three measured runs per profile, summarise them:
+
+```bash
+for f in perf_typical_run[1-3].csv; do
+  awk -F, -v f="$f" 'NR>1{printf "%-22s %8.1f req/s  p50 %5.0f  p95 %5.0f  p99 %5.0f ms  err %s%%  %s\n", f,$4,$5,$6,$7,$9,$14}' "$f"
+done
+cat perf_typical_run[1-3].csv | awk -F, '$1 ~ /^[0-9]+$/ {n++; if(n==1||$4<rmin)rmin=$4; if($4>rmax)rmax=$4; if(n==1||$6<pmin)pmin=$6; if($6>pmax)pmax=$6}
+  END{printf "runs=%d  req/s %.1f..%.1f (spread %.1f%%)  p95 %.0f..%.0f ms\n", n,rmin,rmax,100*(rmax-rmin)/rmax,pmin,pmax}'
+```
+
+Report the **worst** of the three for latency, and the range. As a working convention, a spread of more than about 10 % between runs means the environment is noisy (shared hosts, other workloads, a background Galera or Swift job) and the figure should not be quoted until it is explained. This 10 % is a suggestion, not a standard.
+
+**Trend inside a run.** The `.windows.csv` file shows whether latency or backlog creeps up during the run:
+
+```bash
+awk -F, 'NR>1{n++; p[n]=$5; r[n]=$3; q[n]=$8} END{k=int(n/3); for(i=1;i<=k;i++){a+=p[i];ra+=r[i]} for(i=n-k+1;i<=n;i++){b+=p[i];rb+=r[i]}
+  printf "windows=%d  p95 first third %.0f ms -> last third %.0f ms (%+.1f%%)   req/s %.1f -> %.1f   queue at end=%s\n", n,a/k,b/k,100*(b-a)/a,ra/k,rb/k,q[n]}' perf_typical_run1.windows.csv
+```
+
+A p95 that is clearly higher in the last third, falling `req/s`, or a queue that never returns to near zero between windows is a stability problem even when the run-level figures pass.
+
+**Soak test (stability over time).** A 5-minute run cannot show slow problems. Run the `typical` profile for at least 30 minutes, ideally 1–2 hours, with one trend line per minute, and sample resources for the same period:
+
+```bash
+export PERF_INTERVAL=60
+perf_sample_start soak 4200                       # 70 minutes of sampling
+perf_run soak 3 250 2500 1 3600                   # 1 hour at the typical profile
+perf_sample_collect soak
+```
+
+During and after the soak, look at things that only grow slowly. Each is a command used elsewhere in this README:
+
+| Watch | Command | Healthy |
+|---|---|---|
+| Process memory | `RSS_kB_1st` / `RSS_kB_end` from `perf_sample_collect`; or `ps -o rss= -p <pid>` hourly | Flat after warm-up; steady growth is a leak |
+| Queue depth | `.windows.csv` `queue` column | Stays near its earlier level |
+| Latency trend | drift command above on `perf_soak_run1.windows.csv` | No upward drift |
+| ZooKeeper znodes | `echo mntr \| nc ${NODE1_IP} 2181 \| grep zk_znode_count` | Rises and falls with the dedup reaper (every `GT_DEDUP_REAP_INTERVAL_S`, 600 s by default, removes znodes older than `ZK_DEDUP_TTL_MS`, 5 min by default); a steady climb means it is not keeping up |
+| Log growth and rotation | `sudo du -sh /var/log/flowfirst; ls -l /var/log/flowfirst` | Rotates at `LOG_MAX_BYTES` (50 MiB) and stays within `LOG_BACKUP_COUNT` files; an hour at 100 req/s writes several per-message lines per request (Scenario 60) |
+| Database size | `SELECT table_rows, ROUND(data_length/1048576) AS data_mb FROM information_schema.tables WHERE table_name='processed_messages';` | Grows in proportion to rows stored |
+| Errors | `sudo grep -c " ERROR " /var/log/flowfirst/process*.log` on each node | 0 |
+
+#### G. Performance while something fails
+
+Clients also need to know what performance looks like during a fault, because high availability is the point of this architecture. Run the `typical` profile and trigger **one** fault part-way through, using the procedure of an existing scenario. Use a 10-second trend interval so that the dip is visible:
+
+| Fault | Procedure | What you learn |
+|---|---|---|
+| VIP and HAProxy fail over | Scenario 8 (`pcs node standby node1`) | How long the API is unreachable or slow |
+| One pipeline process stopped on one node | Scenario 11 (`pcs resource ban …`) | Effect on throughput and freshness while the leader changes |
+| A node reboots | Scenario 16 | The full-node case, including Galera and RabbitMQ rejoining |
+| ZooKeeper leader killed | Scenario 36 | Effect of re-election on all four processes |
+
+```bash
+export PERF_INTERVAL=10
+perf_sample_start fault1 720
+perf_run fault 4 250 2500 1 480 &                # 8 minutes of measurement, in the background
+sleep 150; date +%T                              # note this time, then trigger the fault (for example: sudo pcs node standby node1)
+wait                                             # for the run and drain to finish
+grep "measuring from" perf_fault_run1.log      # t=0 of the windows; fault time minus this = fault offset in seconds
+
+# Which windows were outside the pass criteria (SLO from .env: LOAD_SLO_P95_MS, LOAD_MAX_ERROR_PCT) - first and last one
+awk -F, -v slo=${LOAD_SLO_P95_MS:-1000} -v maxerr=${LOAD_MAX_ERROR_PCT:-1} \
+  'NR>1 && ($5>slo || $7>maxerr){bad++; if(!first)first=$2; last=$2} END{ if(bad) printf "%d window(s) outside SLO, first at t=%ss, last at t=%ss\n", bad, first, last; else print "no window outside SLO" }' perf_fault_run1.windows.csv
+```
+
+Subtract the fault offset from the first and last bad windows to get *time to degrade* and *time to recover*; the resolution is the window length (10 s). Then run the stored-versus-accepted check from the end of the run summary. **Do not assume no message is lost during a failure**: consumers reject failed messages with `requeue=False` and the queues have no dead-letter exchange (Scenario 61 C), so the comparison decides. Restore the fault (`pcs node unstandby …`) and wait for a healthy cluster (section B) before the next run.
+
+#### H. Reporting to the client
+
+For each profile, fill in the template with your own figures, using the worst of the three runs for latency and the lowest throughput. Leave a cell as `—` until measured; do not copy illustrative values.
+
+| Measure | light | typical | peak | Agreed target |
+|---|---|---|---|---|
+| Users / think time / expected req/s | 50 / 5 s / ~10 | 250 / 2.5 s / ~100 | 1000 / 2 s / ~500 | — |
+| Achieved req/s (lowest of 3) | — | — | — | — |
+| API response p50 / p95 / p99 (ms) | — | — | — | — |
+| Error rate (%) | — | — | — | — |
+| Freshness p50 / p95 / max (s, ±1 s) | — | — | — | — |
+| Max backlog / drain time (s) | — | — | — | — |
+| Busiest process, average CPU (%) | — | — | — | — |
+| Run-to-run spread (%) | — | — | — | — |
+| Stored = accepted | — | — | — | — |
+
+Add a second table for the soak result (memory, queue and latency trend, log size) and a third for the failure runs (time to degrade, time to recover, messages lost). Always attach the conditions record `perf_conditions.txt` and say, in the same sentence as the number, what it applies to, for example:
+
+> *"On four nodes of the specification in `perf_conditions.txt`, with the flow mix and settings recorded there, at 250 concurrent users each calling roughly every 2.5 seconds (about 100 requests per second), 95 % of API calls were answered within ___ ms and 95 % of records were stored within ___ seconds (±1 s). Figures are the worst of three five-minute runs; results varied by ___ % between runs."*
+
+#### I. What these results do not tell you
+
+- **Closed-loop users.** Each simulated user waits for an answer before sending the next call. When the system slows down, the offered load drops with it, which makes overload look milder than it would be for independent clients arriving at a fixed rate. If the client's traffic arrives regardless of response time, treat the `peak` figures as optimistic and keep a safety margin. An open-loop (fixed-arrival-rate) mode is not implemented.
+- **Synthetic requests.** Payloads are tiny and generated from a pattern. Larger payloads change Process 1, RabbitMQ, MariaDB and Swift costs.
+- **Timestamp resolution** is one second (section D), so freshness cannot resolve sub-second behaviour.
+- **One environment.** Hardware, virtualisation, neighbours and network all change the figures. Use the numbers only for the environment in `perf_conditions.txt`.
+- **API acceptance is not completion.** The `200` response times in the first rows of the table are real, but a client who needs the stored record has to wait for the freshness figure.
+- **The leader-election question from Scenario 61 still applies**, and it decides whether the quoted capacity belongs to one node or to three.
+
+#### J. Clean up
+
+The test writes real rows, objects and ZooKeeper znodes. Every `perf_run` uses its own block of ten million item ids between `9000001` and `209999999`. That range **includes Scenario 61's default `LOAD_ITEM_ID_BASE`**, so run Scenario 61 G first (or change its base) to avoid counting its rows. Delete the rows in small batches exactly as in Scenario 61 G, with `BETWEEN 9000001 AND 209999999`, and clear the temporary files on the nodes:
+
+```bash
+for ip in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do ssh "${ip}" "sudo rm -f /tmp/perf_*_pid.txt /tmp/perf_*_sar.txt"; done
+```
+
+Keep the `perf_*.csv`, `perf_*.log`, `perf_conditions.txt` and the `perf_*_pid.txt` / `perf_*_sar.txt` files with the report so any number can be traced back to its run. The swift objects remain, as in Scenario 61.

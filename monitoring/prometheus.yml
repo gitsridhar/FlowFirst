@@ -8,6 +8,13 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alertmanager: install with monitoring/setup_alertmanager.sh (on one node or a dedicated monitoring host).
+# Replace <alertmanager-ip> with the node's IP. Port 9093 must be reachable from this Prometheus.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["<alertmanager-ip>:9093"]
+
 rule_files:
   - flowfirst.rules.yml
   - infrastructure.rules.yml

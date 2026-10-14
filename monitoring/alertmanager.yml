@@ -1,0 +1,54 @@
+# ==============================================================================
+# FlowFirst - Alertmanager configuration
+#
+# Receiver: file-based. Every alert is appended as JSON to ALERT_LOG_FILE
+# (default /var/log/flowfirst/alerts.log) by the companion script
+# monitoring/alertmanager-file-receiver.py, which must be running.
+#
+# Install:  sudo ./monitoring/setup_alertmanager.sh
+# Check:    amtool check-config /etc/alertmanager/alertmanager.yml
+#
+# To send to a real notification channel instead of (or in addition to) the
+# file receiver, add a receiver block and a route here — see
+# https://prometheus.io/docs/alerting/latest/configuration/
+# ==============================================================================
+global:
+  # How long Alertmanager waits before re-sending the same alert. The file
+  # receiver never silences anything on its own, so this only affects external
+  # channels if you add them.
+  resolve_timeout: 5m
+
+# Inhibition: silence a warning when a critical alert on the same instance is
+# already firing — avoids noisy lower-severity duplicates.
+inhibit_rules:
+  - source_matchers: [severity = critical]
+    target_matchers: [severity = warning]
+    equal: [instance]
+
+route:
+  # Default: all alerts that do not match a child route go here.
+  receiver: file-log
+  group_by: [alertname, instance]
+  group_wait: 30s        # how long to wait before sending the first alert for a new group
+  group_interval: 5m     # minimum time between re-notifications for a group that is still firing
+  repeat_interval: 4h    # re-notify about still-firing alerts after this time
+
+  routes:
+    # Critical alerts are re-notified every hour.
+    - matchers: [severity = critical]
+      receiver: file-log
+      repeat_interval: 1h
+
+    # Warning alerts are only repeated once a day (the file accumulates them anyway).
+    - matchers: [severity = warning]
+      receiver: file-log
+      repeat_interval: 24h
+
+receivers:
+  - name: file-log
+    webhook_configs:
+      - url: "http://127.0.0.1:9099/"
+        send_resolved: true
+        # The file receiver appends a JSON line per call; it never replies 5xx, so
+        # Alertmanager will not mark it as failed even if the file cannot be written
+        # (the receiver itself logs that to stderr / the journal).

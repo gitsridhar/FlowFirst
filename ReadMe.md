@@ -8429,7 +8429,7 @@ Process 1 has three questions it can answer, and they use different endpoints so
 
 ## Monitoring and Alerting
 
-> **Status:** the `/metrics` listener was tested on one workstation: unit tests, a child process serving it over plain HTTP and over mutual TLS, and a real Prometheus (container) scraping it with a client certificate (target `up`) and without one (target `down`). The alert rules pass `promtool check rules` and 7 `promtool test rules` scenarios on synthetic series. The RabbitMQ metric names were checked against a real RabbitMQ 3 container. **Not tested:** a scrape of a running 4-node cluster, the Galera/MariaDB exporter names (written from the exporter's documentation, syntax-checked only), `node_exporter` names, Alertmanager routing, and any dashboard (none is shipped).
+> **Status:** the `/metrics` listener was tested on one workstation: unit tests, a child process serving it over plain HTTP and over mutual TLS, and a real Prometheus (container) scraping it with a client certificate (target `up`) and without one (target `down`). The alert rules pass `promtool check rules` and 7 `promtool test rules` scenarios on synthetic series. The RabbitMQ metric names were checked against a real RabbitMQ 3 container. `monitoring/alertmanager.yml` passes `amtool check-config`. **Not tested:** a scrape of a running 4-node cluster, the Galera/MariaDB exporter names (written from the exporter's documentation, syntax-checked only), `node_exporter` names, live Alertmanager routing delivering a notification, and no dashboard is shipped.
 
 **What you get.** With `METRICS_ENABLED=true` each process serves `GET /metrics` in Prometheus text format on `METRICS_PORT_BASE` + its number: Process 1 on 9101, Process 2 on 9102, … Process 5 on 9105. It is a separate listener, not part of the REST API and **not behind HAProxy**, so Prometheus scrapes every node directly, including Node 4. The processes already counted what they handled; the listener only exposes it. It is off by default and a listener that cannot start (port in use, bad certificate) is logged and skipped: the pipeline keeps running, and it never falls back to plaintext when TLS is on.
 
@@ -8462,6 +8462,22 @@ With `TLS_API_ENABLED=true` the listener reuses the API server certificate and `
 
 **Alerts.** `monitoring/flowfirst.rules.yml` (FlowFirst's own series and the RabbitMQ queue series) and `monitoring/infrastructure.rules.yml` (Galera, RabbitMQ alarms, disk, clock). Thresholds are starting points; tune them to your traffic.
 
+**Alertmanager.** `monitoring/alertmanager.yml` routes all alerts to the file receiver: a small Python webhook (`monitoring/alertmanager-file-receiver.py`) that appends each call as a JSON line to `/var/log/flowfirst/alerts.log`. Run it as a systemd service alongside Alertmanager. Install both with `sudo ./monitoring/setup_alertmanager.sh` (downloads the latest release from GitHub, creates the `alertmanager` user, installs two systemd units). Wire it into Prometheus by uncommenting the `alerting:` block in `monitoring/prometheus.yml` and replacing `<alertmanager-ip>`.
+
+```bash
+# Install on one cluster node (or a dedicated monitoring host):
+sudo ./monitoring/setup_alertmanager.sh
+
+# Open port 9093 if Prometheus is on a different host:
+sudo firewall-cmd --permanent --add-port=9093/tcp && sudo firewall-cmd --reload
+
+# Watch alerts as they arrive:
+sudo journalctl -u flowfirst-alert-receiver -f
+sudo tail -f /var/log/flowfirst/alerts.log | python3 -c 'import sys,json; [print(json.dumps(json.loads(l),indent=2)) for l in sys.stdin]'
+```
+
+To replace the file receiver with a real notification channel (email, Slack, PagerDuty) at any point: add a receiver block and a route to `alertmanager.yml`, reload Alertmanager with `systemctl reload alertmanager`, and remove or keep the `file-log` route. The rules and the Prometheus scrape do not change.
+
 | Alert | Fires when | First action |
 |---|---|---|
 | `FlowFirstDeadLetters` (critical) | any message in `flowfirst_dead_letters` | Read the logs, fix the cause, `scripts/replay_dead_letters.py` (Run-Book R3) |
@@ -8482,7 +8498,7 @@ Check the rules without a cluster: `promtool check rules monitoring/*.rules.yml`
 3. Failures are counted when the handler raises. A message lost *before* a handler runs (for example, an unroutable publish) shows as a 5xx, not as `failed`.
 4. `FlowFirstProcessDown` also fires for a process that is up but whose metrics port is blocked or whose client certificate was rejected: the cause is in the Prometheus target page (`lastError`).
 5. Dedup-skipped messages are counted, but there is no alert on them: failover re-deliveries make a non-zero value normal.
-6. There is no ZooKeeper, HAProxy or Swift alert, and no dashboard. Alertmanager (routing, paging, silences) is yours to run; the rules only define when something fires.
+6. There is no ZooKeeper, HAProxy or Swift alert, and no dashboard. The file receiver is a starting point: it records every alert but sends no page. Replace or supplement it with a real notification channel in `alertmanager.yml`.
 7. The listener has no request limits beyond a small connection pool and a 10 s socket timeout; do not expose it beyond the monitoring network.
 
 ---
@@ -8616,4 +8632,4 @@ The only benchmark in this repository (one RabbitMQ container, 2 vCPU, ReadMe K0
 
 ### R10. What this run-book does not cover
 
-Still open: no backup of Swift object data on its own and no point-in-time recovery; no dashboard, no Alertmanager setup and no ZooKeeper, HAProxy or Swift alerts; RabbitMQ queues are classic durable queues with no replication, so a node failure can lose messages that sit only on it; Swift cannot require client certificates at its proxy; RabbitMQ and ZooKeeper do not honour the CRL; Galera SST with `rsync` is not encrypted; no scan for vulnerable packages; no rate limiting per client; the GitHub Actions workflow has never been run; and **nothing here has been run on a real four-node cluster, on RHEL 9, with SELinux enforcing, or under Pacemaker**. The chapters above state what was tested and how.
+Still open: no point-in-time database recovery; no dashboard; no ZooKeeper, HAProxy or Swift alerts; the file-receiver Alertmanager setup records alerts to a log file but sends no page (add a real receiver in `alertmanager.yml`); live Alertmanager routing has not been tested; Swift objects are now backed up but the swift backup part has not been tested against a real Swift cluster; Swift cannot require client certificates at its proxy; RabbitMQ and ZooKeeper do not honour the CRL; Galera SST with `rsync` is not encrypted; no scan for vulnerable packages; no rate limiting per client; the GitHub Actions workflow has never been run; and **nothing here has been run on a real four-node cluster, on RHEL 9, with SELinux enforcing, or under Pacemaker**. The chapters above state what was tested and how.

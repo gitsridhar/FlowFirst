@@ -24,6 +24,11 @@ from src.config.config import (
     AUTH_API_KEYS,
     AUTH_TOKEN_SECRET,
     AUTH_TOKEN_TTL_S,
+    AUTHZ_MODE,
+    AUTHZ_ROLES,
+    AUTHZ_IDENTITY_ROLES,
+    AUTHZ_ACL,
+    AUTHZ_POLICY,
     API_MAX_BODY_BYTES,
     API_MAX_BATCH_COUNT,
     API_MAX_LIST_LIMIT,
@@ -54,6 +59,9 @@ _config_watcher = None
 _ADMIN_ALLOWED_CNS = authz.parse_list(ADMIN_ALLOWED_CNS)
 _ADMIN_PROXY_CNS = authz.parse_list(ADMIN_TRUSTED_PROXY_CNS)
 _AUTH_API_KEYS = authz.parse_api_keys(AUTH_API_KEYS)
+_AUTHZ_ROLES, _AUTHZ_IDENTITY_ROLES = authz.parse_roles(AUTHZ_ROLES, AUTHZ_IDENTITY_ROLES)
+_AUTHZ_ACL    = authz.parse_acl(AUTHZ_ACL)
+_AUTHZ_POLICY = authz.parse_policy(AUTHZ_POLICY)
 
 import eventlet
 
@@ -427,9 +435,47 @@ class RestApiHandler(BaseHTTPRequestHandler):
         )
         if ok:
             log.debug(f"[auth] {self.command} {self.path} accepted ({reason}) label={label!r}")
+            self._authed_label = label        # stash for _require_authz
             return True
         log.warning(f"[auth] {self.command} {self.path} from {self.address_string()} DENIED — {reason}")
         self._send_json(401, {"error": "Unauthorized", "detail": reason})
+        return False
+
+    def _authed_identity(self) -> str:
+        """Return the authenticated identity established by _require_auth(), or cert CN / 'anonymous'."""
+        label = getattr(self, "_authed_label", None)
+        if label:
+            return label
+        # In AUTH_MODE=none there is no label; fall back to cert CN or 'anonymous'
+        cn = authz.cert_common_name(self._peer_cert())
+        return cn or "anonymous"
+
+    def _require_authz(self, action: str, resource: str) -> bool:
+        """Enforce AUTHZ_MODE on an endpoint. Returns True if allowed; sends 403 and returns False otherwise.
+
+        Must be called AFTER _require_auth() so the identity is established.
+        When AUTHZ_MODE=none this is a no-op (returns True immediately).
+        """
+        if not AUTHZ_MODE or AUTHZ_MODE == "none":
+            return True
+        identity = self._authed_identity()
+        allowed, reason = authz.check_authz(
+            authz_mode=AUTHZ_MODE,
+            identity=identity,
+            action=action,
+            resource=resource,
+            method=self.command,
+            roles=_AUTHZ_ROLES,
+            identity_roles=_AUTHZ_IDENTITY_ROLES,
+            acl=_AUTHZ_ACL,
+            policy=_AUTHZ_POLICY,
+        )
+        if allowed:
+            log.debug(f"[authz] {self.command} {self.path} identity={identity!r} ALLOWED — {reason}")
+            return True
+        log.warning(f"[authz] {self.command} {self.path} from {self.address_string()} "
+                    f"identity={identity!r} DENIED — {reason}")
+        self._send_json(403, {"error": "Forbidden", "detail": reason})
         return False
 
     def do_POST(self):
@@ -462,6 +508,8 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     return
 
             if path == "/api/flow1":
+                if not self._require_authz("publish", "flow:1"):
+                    return
                 item_id = int(post_data["item_id"]) if "item_id" in post_data else None
                 counter = int(post_data["counter"]) if "counter" in post_data else None
                 p = publish_flow1_message(item_id=item_id, custom_data=post_data.get("initial_data"), counter=counter)
@@ -469,6 +517,8 @@ class RestApiHandler(BaseHTTPRequestHandler):
                                       "target_queue": QUEUE_FLOW1_P1_TO_P2, "payload": p})
 
             elif path == "/api/flow2":
+                if not self._require_authz("publish", "flow:2"):
+                    return
                 item_id = int(post_data["item_id"]) if "item_id" in post_data else None
                 val     = float(post_data["value"])  if "value"   in post_data else None
                 p = publish_flow2_message(item_id=item_id, custom_data=post_data.get("initial_data"), value=val)
@@ -476,6 +526,8 @@ class RestApiHandler(BaseHTTPRequestHandler):
                                       "target_queue": QUEUE_FLOW2_P1_TO_P2, "payload": p})
 
             elif path == "/api/flow3":
+                if not self._require_authz("publish", "flow:3"):
+                    return
                 item_id = int(post_data["item_id"]) if "item_id" in post_data else None
                 metric  = float(post_data["remote_metric"]) if "remote_metric" in post_data else None
                 p = publish_flow3_message(item_id=item_id, custom_data=post_data.get("initial_data"), remote_metric=metric)
@@ -483,6 +535,8 @@ class RestApiHandler(BaseHTTPRequestHandler):
                                       "target_queue": QUEUE_FLOW3_P1_TO_P5, "target_node": "remote_node4", "payload": p})
 
             elif path == "/api/batch":
+                if not self._require_authz("publish", "flow:*"):
+                    return
                 count = int(post_data.get("count", 3))
                 if not 1 <= count <= API_MAX_BATCH_COUNT:
                     self._fail(400, f"'count' must be between 1 and {API_MAX_BATCH_COUNT}", max_count=API_MAX_BATCH_COUNT)

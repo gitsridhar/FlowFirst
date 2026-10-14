@@ -111,6 +111,44 @@ if AUTH_MODE not in _AUTH_MODE_VALID:
 AUTH_API_KEYS     = os.getenv("AUTH_API_KEYS", "")        # not run through _str_env: may be blank
 AUTH_TOKEN_SECRET = os.getenv("AUTH_TOKEN_SECRET", "")    # blank means tokens cannot be issued/verified
 AUTH_TOKEN_TTL_S  = max(60, _int_env("AUTH_TOKEN_TTL_S", 3600))
+
+# ---------------------------------------------------------------------------
+# Per-endpoint authorization engine (RBAC / ACL / ABAC).
+# Runs AFTER authentication — authentication answers "who are you?",
+# authorization answers "what are you allowed to do?".
+# See src/application/authz.py for the full design and evaluation order.
+#
+# AUTHZ_MODE:  none (default, existing behaviour) | rbac | acl | abac |
+#              rbac+acl | rbac+abac | rbac+acl+abac
+#
+# AUTHZ_ROLES: custom role definitions.
+#   Format: rolename=resource:action,resource:action;  rolename2=...
+#   Built-in roles (always present): publisher, reader, admin, operator
+#
+# AUTHZ_IDENTITY_ROLES: map identities (API key labels, cert CNs, token subjects) to roles.
+#   Format: identity1=role1,role2;  identity2=role3
+#
+# AUTHZ_ACL: per-resource explicit grants (fine-grained additions/exceptions).
+#   Format: resource:action=identity1,identity2;  resource2:action=identity3
+#   Example: flow:1:publish=ci_bot,data_ingest;  zk:config:write=admin-cert
+#
+# AUTHZ_POLICY: JSON list of ABAC rules.
+#   Format: [{"when": {"identity":"bad_bot"}, "effect":"deny"}, ...]
+#   Supported 'when' keys: identity, role, action, resource, method,
+#     hour_utc_lt, hour_utc_gte
+# ---------------------------------------------------------------------------
+_AUTHZ_MODE_VALID = frozenset({
+    "none", "rbac", "acl", "abac",
+    "rbac+acl", "rbac+abac", "rbac+acl+abac",
+})
+AUTHZ_MODE           = _str_env("AUTHZ_MODE", "none").lower()
+if AUTHZ_MODE not in _AUTHZ_MODE_VALID:
+    raise ValueError(f"AUTHZ_MODE must be one of {sorted(_AUTHZ_MODE_VALID)}, not '{AUTHZ_MODE}'")
+AUTHZ_ROLES          = os.getenv("AUTHZ_ROLES", "")
+AUTHZ_IDENTITY_ROLES = os.getenv("AUTHZ_IDENTITY_ROLES", "")
+AUTHZ_ACL            = os.getenv("AUTHZ_ACL", "")
+AUTHZ_POLICY         = os.getenv("AUTHZ_POLICY", "")
+
 RABBITMQ_TLS_PORT     = _int_env("RABBITMQ_TLS_PORT", 5671)
 ZK_TLS_CLIENT_PORT    = _int_env("ZK_TLS_CLIENT_PORT", 2281)
 

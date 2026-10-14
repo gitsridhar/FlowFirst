@@ -7986,6 +7986,88 @@ Keep the `perf_*.csv`, `perf_*.log`, `perf_conditions.txt` and the `perf_*_pid.t
 
 TLS is **off by default** (every `TLS_*_ENABLED` is `false`), so an existing deployment behaves as before until you switch components on. When a switch is on the code **fails closed**: a missing certificate, an unreadable key or an `http://` Swift URL stops the process at start with a clear message instead of quietly falling back to plain text.
 
+#### Certificate lifecycle and runtime usage
+
+The two diagrams below show how certificates are created on the admin host and how they are used at runtime across the cluster.
+
+**PKI lifecycle — creation, distribution and renewal**
+
+```mermaid
+flowchart TD
+    subgraph ADMIN ["Admin / CA host  (pki/ kept here, never on nodes)"]
+        direction TB
+        INIT["<b>security/init_ca.sh</b>\nGenerate RSA-4096 root CA\n(ca.key encrypted AES-256, ca.crt public)\nca.crl created at the same time"]
+        ISSUE["<b>security/issue_all.sh</b>\nIssues 21 leaf certs under pki/issued/\n• flowfirst-vip  (server)\n• node1-3: -api -rabbitmq -mariadb\n  -zookeeper -swift (server/peer)\n  -pipeline (client)\n• node4-pipeline (client)\n• admin-client (client)"]
+        INSTALL["<b>security/install_certs.sh</b>\nSSH+sudo: copies only the files\neach node needs into /etc/flowfirst/tls/"]
+        REFRESH["<b>security/refresh_crl.sh</b>\n(weekly cron) re-sign the CRL\nbefore nextUpdate expires"]
+        REVOKE["<b>security/revoke_cert.sh NAME</b>\nMark cert revoked → regen CRL\nThen re-run install_certs.sh --crl-only"]
+        INIT --> ISSUE
+        ISSUE --> INSTALL
+        REFRESH -->|"install_certs.sh --crl-only"| INSTALL
+        REVOKE -->|"install_certs.sh --crl-only"| INSTALL
+    end
+
+    subgraph NODES ["Cluster nodes (node1 – node3)  /etc/flowfirst/tls/"]
+        direction TB
+        SHARED["ca.crt  ca.crl  (all nodes, root:root 644)"]
+        API_F["api/api.{crt,key}  → Process 1 HTTPS listener  (flowuser)"]
+        PIPE_F["pipeline/pipeline.{crt,key}  → client identity for all processes  (flowuser)"]
+        HA_F["haproxy/vip.pem (VIP server cert)\nhaproxy/backend.pem (= pipeline cert)\n→ HAProxy identity  (haproxy)"]
+        RMQ_F["rabbitmq/rabbitmq.{crt,key}  (rabbitmq)"]
+        MDB_F["mariadb/mariadb.{crt,key}  (mysql)"]
+        ZK_F["zookeeper/zookeeper.{crt,key}  (zookeeper)"]
+        SW_F["swift/swift.{crt,key}  (swift)"]
+    end
+
+    subgraph NODE4 ["Node 4  /etc/flowfirst/tls/"]
+        N4_SHARED["ca.crt  ca.crl"]
+        N4_PIPE["pipeline/pipeline.{crt,key}  → Process 5 client identity"]
+    end
+
+    INSTALL -->|"node1-3"| NODES
+    INSTALL -->|"node4"| NODE4
+```
+
+**Runtime TLS connections — who presents which certificate**
+
+```mermaid
+flowchart LR
+    CLIENT(["External client\nadmin-client.crt"])
+    HA(["HAProxy  :8080\nvip.pem server\nbackend.pem client"])
+    P1(["Process 1  :8082\napi.crt server"])
+    P25(["Processes 2–4\npipeline.crt client"])
+    P5(["Process 5 (node4)\npipeline.crt client"])
+    RMQ(["RabbitMQ  :5671\nrabbitmq.crt server"])
+    MDB(["MariaDB  :3306/3307\nmariadb.crt server"])
+    ZK(["ZooKeeper  :2281\nzookeeper.crt server"])
+    SW(["Swift proxy  :8888/8090\nswift.crt server"])
+    CA(["FlowFirst Root CA\n(ca.crt on every node)"])
+
+    CA -.->|"trust anchor"| CLIENT
+    CA -.->|"trust anchor"| HA
+    CA -.->|"trust anchor"| P1
+    CA -.->|"trust anchor"| P25
+    CA -.->|"trust anchor"| P5
+
+    CLIENT -- "mTLS  8080\nX-SSL-Client-CN→header" --> HA
+    HA -- "mTLS  8082\nbackend.pem client" --> P1
+    P1 -- "mTLS pipeline.crt" --> RMQ
+    P1 -- "mTLS pipeline.crt" --> MDB
+    P1 -- "mTLS pipeline.crt" --> ZK
+    P25 -- "mTLS pipeline.crt" --> RMQ
+    P25 -- "mTLS pipeline.crt" --> MDB
+    P25 -- "mTLS pipeline.crt" --> ZK
+    P25 -- "mTLS pipeline.crt" --> SW
+    P5 -- "mTLS pipeline.crt" --> RMQ
+    P5 -- "mTLS pipeline.crt" --> ZK
+
+    RMQ -. "peer certs (optional\n--inter-node)" .- RMQ
+    MDB -. "peer certs (optional\n--galera)" .- MDB
+    ZK -. "peer certs (optional\n--quorum)" .- ZK
+```
+
+> **CRL enforcement:** when `TLS_CRL_FILE` is set, HAProxy (`crl-file`), Process 1, and the Python client contexts ([`src/tls/tls.py`](src/tls/tls.py)) each load `ca.crl` at start and reject any certificate whose serial appears in it. RabbitMQ and ZooKeeper do not enforce the CRL. MariaDB enforces it only with `ssl_crl` set in `my.cnf`. A CRL past its `nextUpdate` causes every component to refuse **all** certificates — run `refresh_crl.sh` weekly before that date.
+
 #### A. What gets encrypted, and who must present a certificate
 
 | Link | Port | Server certificate | Client must present | Enforced by |

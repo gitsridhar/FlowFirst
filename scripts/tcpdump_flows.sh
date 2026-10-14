@@ -12,6 +12,11 @@
 # Pass them as positional arguments to override.
 #
 # Requires: tcpdump, tshark (wireshark-cli), curl, jq, awk, sed
+#
+# TLS: when TLS_API_ENABLED / TLS_RABBITMQ_ENABLED / TLS_MARIADB_ENABLED are true, run-flows calls the API over
+# https with this node's client certificate, and the capture also covers AMQPS (5671). Payloads on those ports are
+# then ENCRYPTED, so the analyse sections that decode AMQP (5672), MySQL (3306) and HTTP (8080) show handshakes and
+# byte counts only, not message contents. That is the expected result of enabling TLS, not a fault.
 
 set -euo pipefail
 
@@ -40,8 +45,21 @@ if [[ -z "${DEFAULT_VIP}" ]]; then
     exit 1
 fi
 
-# Capture filter covering all FlowFirst cluster protocols
-CAPTURE_FILTER='port 5672 or port 25672 or port 5405 or port 4567 or port 4568 or port 4444 or port 3306 or port 8080 or port 9000'
+# Capture filter covering all FlowFirst cluster protocols (5671 = AMQPS when TLS is on)
+CAPTURE_FILTER='port 5672 or port 5671 or port 25672 or port 5405 or port 4567 or port 4568 or port 4444 or port 3306 or port 8080 or port 9000'
+
+# curl options for https + mutual TLS on the REST API (empty when TLS_API_ENABLED is not true)
+TLS_DIR="${TLS_DIR:-/etc/flowfirst/tls}"
+API_SCHEME=http
+CURL_TLS=()
+case "$(echo "${TLS_API_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+        API_SCHEME=https
+        CURL_TLS=(--cacert "${TLS_CA_FILE:-${TLS_DIR}/ca.crt}"
+                  --cert "${TLS_CLIENT_CERT:-${TLS_DIR}/pipeline/pipeline.crt}"
+                  --key "${TLS_CLIENT_KEY:-${TLS_DIR}/pipeline/pipeline.key}")
+        ;;
+esac
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 require_root() {
@@ -83,19 +101,19 @@ cmd_start() {
 # ── run-flows ─────────────────────────────────────────────────────────────────
 cmd_run_flows() {
     local vip="${1:-${DEFAULT_VIP}}"
-    info "Triggering Flow1 via http://${vip}:8080/api/flow1"
-    curl -s -X POST "http://${vip}:8080/api/flow1" | \
+    info "Triggering Flow1 via ${API_SCHEME}://${vip}:8080/api/flow1"
+    curl -s ${CURL_TLS[@]+"${CURL_TLS[@]}"} -X POST "${API_SCHEME}://${vip}:8080/api/flow1" | \
         python3 -c "import sys,json; d=json.load(sys.stdin); print('  flow1 → handled_by_node:', d.get('handled_by_node','?'))" \
         2>/dev/null || warn "flow1 request failed — is the API running?"
 
-    info "Triggering Flow2 via http://${vip}:8080/api/flow2"
-    curl -s -X POST "http://${vip}:8080/api/flow2" | \
+    info "Triggering Flow2 via ${API_SCHEME}://${vip}:8080/api/flow2"
+    curl -s ${CURL_TLS[@]+"${CURL_TLS[@]}"} -X POST "${API_SCHEME}://${vip}:8080/api/flow2" | \
         python3 -c "import sys,json; d=json.load(sys.stdin); print('  flow2 → handled_by_node:', d.get('handled_by_node','?'))" \
         2>/dev/null || warn "flow2 request failed"
 
     info "Triggering /health (round-robin probe)"
     for i in 1 2 3; do
-        node=$(curl -s "http://${vip}:8080/health" | \
+        node=$(curl -s ${CURL_TLS[@]+"${CURL_TLS[@]}"} "${API_SCHEME}://${vip}:8080/health" | \
                python3 -c "import sys,json; print(json.load(sys.stdin).get('handled_by_node','?'))" 2>/dev/null || echo "?")
         echo "  probe ${i} → ${node}"
         sleep 0.5

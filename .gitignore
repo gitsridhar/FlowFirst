@@ -2,3 +2,20 @@
 __pycache__/
 *.pyc
 load_test_*.csv
+
+# TLS material: the CA private key and every leaf key live here. NEVER commit.
+/pki/
+*.key
+*.pem
+!/security/**
+.pytest_cache/
+.ruff_cache/
+
+# Real settings and passwords. Only src/config/.env.example is tracked.
+.env
+*.p12
+*.pass
+
+# Local virtual environments
+.venv/
+venv/

@@ -10,6 +10,13 @@ global
     group       haproxy
     daemon
     stats socket /var/lib/haproxy/stats mode 660 level admin expose-fd listeners
+    # TLS policy for every 'ssl' bind/server below. Harmless when no bind/server uses ssl.
+    ssl-default-bind-options     ssl-min-ver __TLS_MIN_VERSION__ no-tls-tickets
+    ssl-default-bind-ciphers     __TLS_CIPHERS__
+    ssl-default-bind-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256
+    ssl-default-server-options   ssl-min-ver __TLS_MIN_VERSION__ no-tls-tickets
+    ssl-default-server-ciphers   __TLS_CIPHERS__
+    ssl-default-server-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256
 
 #---------------------------------------------------------------------
 # Common defaults
@@ -35,7 +42,7 @@ defaults
 # HAProxy Statistics Dashboard
 #---------------------------------------------------------------------
 listen stats
-    bind 0.0.0.0:__HAPROXY_STATS_PORT__
+    bind 0.0.0.0:__HAPROXY_STATS_PORT__ __STATS_BIND_TLS__
     mode http
     stats enable
     stats uri /
@@ -47,10 +54,14 @@ listen stats
 # Frontend: Process 1 REST API (Binds to Virtual IP / All Interfaces)
 #---------------------------------------------------------------------
 frontend flowfirst_api_front
-    bind *:__API_PORT__
+    bind *:__API_PORT__ __API_BIND_TLS__
     mode http
     option httplog
     option forwardfor except 127.0.0.0/8
+    # Never trust an identity header sent by a client; set it only from the verified client certificate.
+    http-request del-header X-SSL-Client-CN
+    http-request set-header X-SSL-Client-CN %[ssl_c_s_dn(cn)] if { ssl_c_used }
+    __API_ACL__
     default_backend flowfirst_api_back
 
 #---------------------------------------------------------------------
@@ -65,9 +76,9 @@ backend flowfirst_api_back
     default-server inter 3s fall 2 rise 2
 
     # Cluster Node Physical IPs pointing to Process 1 instances (port 8082)
-    server __NODE1_NAME__ __NODE1_IP__:__API_BACKEND_PORT__ check
-    server __NODE2_NAME__ __NODE2_IP__:__API_BACKEND_PORT__ check
-    server __NODE3_NAME__ __NODE3_IP__:__API_BACKEND_PORT__ check
+    server __NODE1_NAME__ __NODE1_IP__:__API_BACKEND_PORT__ check __API_TLS_N1__
+    server __NODE2_NAME__ __NODE2_IP__:__API_BACKEND_PORT__ check __API_TLS_N2__
+    server __NODE3_NAME__ __NODE3_IP__:__API_BACKEND_PORT__ check __API_TLS_N3__
 
 #---------------------------------------------------------------------
 # Load balancing & Failover for MariaDB Galera Cluster (Port 3306)
@@ -95,6 +106,9 @@ backend mariadb_galera_back
 #---------------------------------------------------------------------
 # Load balancing for RabbitMQ AMQP (Port 5672 -> LB Port 5673)
 #---------------------------------------------------------------------
+# MariaDB and RabbitMQ are balanced in TCP mode: HAProxy does NOT terminate their TLS. The client
+# negotiates TLS end to end with the chosen node, so those server certificates must be valid for the VIP
+# name/address too (security/issue_all.sh does this).
 frontend rabbitmq_amqp_front
     bind *:__RABBITMQ_LB_PORT__
     mode tcp
@@ -106,9 +120,9 @@ backend rabbitmq_amqp_back
     balance roundrobin
     timeout client-fin 50s
     timeout server-fin 50s
-    server __NODE1_NAME__ __NODE1_IP__:__RABBITMQ_PORT__ check inter 5s fall 2 rise 2
-    server __NODE2_NAME__ __NODE2_IP__:__RABBITMQ_PORT__ check inter 5s fall 2 rise 2
-    server __NODE3_NAME__ __NODE3_IP__:__RABBITMQ_PORT__ check inter 5s fall 2 rise 2
+    server __NODE1_NAME__ __NODE1_IP__:__RABBITMQ_BACKEND_PORT__ check inter 5s fall 2 rise 2
+    server __NODE2_NAME__ __NODE2_IP__:__RABBITMQ_BACKEND_PORT__ check inter 5s fall 2 rise 2
+    server __NODE3_NAME__ __NODE3_IP__:__RABBITMQ_BACKEND_PORT__ check inter 5s fall 2 rise 2
 
 #---------------------------------------------------------------------
 # Load balancing for the Swift cluster (proxy port -> LB Port on the VIP)
@@ -117,7 +131,7 @@ backend rabbitmq_amqp_back
 # /healthcheck is answered by the proxy only when it is up.  Large object PUTs
 # can be slow, so the server timeout is raised for this backend.
 frontend swift_front
-    bind *:__SWIFT_LB_PORT__
+    bind *:__SWIFT_LB_PORT__ __SWIFT_BIND_TLS__
     mode http
     option httplog
     default_backend swift_back
@@ -129,6 +143,6 @@ backend swift_back
     http-check expect status 200
     timeout server 5m
     default-server inter 3s fall 2 rise 2
-    server __NODE1_NAME__ __NODE1_IP__:__SWIFT_PROXY_PORT__ check
-    server __NODE2_NAME__ __NODE2_IP__:__SWIFT_PROXY_PORT__ check
-    server __NODE3_NAME__ __NODE3_IP__:__SWIFT_PROXY_PORT__ check
+    server __NODE1_NAME__ __NODE1_IP__:__SWIFT_PROXY_PORT__ check __SWIFT_TLS_N1__
+    server __NODE2_NAME__ __NODE2_IP__:__SWIFT_PROXY_PORT__ check __SWIFT_TLS_N2__
+    server __NODE3_NAME__ __NODE3_IP__:__SWIFT_PROXY_PORT__ check __SWIFT_TLS_N3__

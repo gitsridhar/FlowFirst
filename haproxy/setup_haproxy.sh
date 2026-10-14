@@ -45,13 +45,140 @@ SWIFT_PROXY_PORT="${SWIFT_PROXY_PORT:-8888}"
 SWIFT_LB_PORT="${SWIFT_LB_PORT:-8090}"
 HAPROXY_STATS_PORT="${HAPROXY_STATS_PORT:-9000}"
 HAPROXY_STATS_USER="${HAPROXY_STATS_USER:-admin}"
-HAPROXY_STATS_PASS="${HAPROXY_STATS_PASS:-admin123}"
+HAPROXY_STATS_PASS="${HAPROXY_STATS_PASS:-}"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/secrets_lib.sh"
+require_strong_secret HAPROXY_STATS_PASS "${HAPROXY_STATS_PASS}"
 # Scale limits (defaults = the values that were previously hard-coded in the template)
 HAPROXY_MAXCONN="${HAPROXY_MAXCONN:-4000}"                      # global: max concurrent connections for the whole process
 HAPROXY_FRONTEND_MAXCONN="${HAPROXY_FRONTEND_MAXCONN:-3000}"    # defaults: max concurrent connections per frontend
 for _var in HAPROXY_MAXCONN HAPROXY_FRONTEND_MAXCONN; do
     if ! [[ "${!_var}" =~ ^[1-9][0-9]*$ ]]; then
         echo "ERROR: ${_var} must be a positive integer (got '${!_var}')."
+        exit 1
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# TLS (see security/ and ReadMe Scenario 63).  Every switch is OFF by default, in which case the
+# generated config is the same plain-text config as before.
+#   TLS_API_ENABLED     HTTPS on the VIP API frontend (+ stats page) and HTTPS to the Process 1 backends.
+#                       TLS_API_CLIENT_AUTH: required = mutual TLS (default) | optional | none
+#   TLS_SWIFT_ENABLED   HTTPS + required client certificate on the Swift frontend, HTTPS to the swift-proxy nodes
+#   TLS_RABBITMQ_ENABLED  RabbitMQ is balanced in TCP mode (TLS end to end); only the backend port changes
+#   MariaDB             TCP pass-through too; nothing to change here
+# ---------------------------------------------------------------------------
+TLS_DIR="${TLS_DIR:-/etc/flowfirst/tls}"
+TLS_CA_FILE="${TLS_CA_FILE:-${TLS_DIR}/ca.crt}"
+TLS_CRL_FILE="${TLS_CRL_FILE:-}"
+TLS_MIN_VERSION="${TLS_MIN_VERSION:-1.2}"
+TLS_CIPHERS="${TLS_CIPHERS:-ECDHE+AESGCM:ECDHE+CHACHA20}"
+TLS_API_ENABLED="${TLS_API_ENABLED:-false}"
+TLS_API_CLIENT_AUTH="${TLS_API_CLIENT_AUTH:-required}"
+TLS_SWIFT_ENABLED="${TLS_SWIFT_ENABLED:-false}"
+TLS_RABBITMQ_ENABLED="${TLS_RABBITMQ_ENABLED:-false}"
+RABBITMQ_TLS_PORT="${RABBITMQ_TLS_PORT:-5671}"
+HAPROXY_VIP_PEM="${HAPROXY_VIP_PEM:-${TLS_DIR}/haproxy/vip.pem}"          # VIP server cert + key (one file)
+HAPROXY_BACKEND_PEM="${HAPROXY_BACKEND_PEM:-${TLS_DIR}/haproxy/backend.pem}"  # client cert + key HAProxy presents to backends
+
+_is_true() { case "$(printf %s "$1" | tr A-Z a-z)" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }
+for _var in TLS_DIR TLS_CA_FILE TLS_CRL_FILE HAPROXY_VIP_PEM HAPROXY_BACKEND_PEM; do
+    _val="${!_var}"
+    if [[ -n "${_val}" ]] && ! [[ "${_val}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+        echo "ERROR: ${_var} must be an absolute path of letters, digits and . _ / - (got '${_val}')."
+        exit 1
+    fi
+done
+[[ "${TLS_MIN_VERSION}" =~ ^1\.[23]$ ]] || { echo "ERROR: TLS_MIN_VERSION must be 1.2 or 1.3 (got '${TLS_MIN_VERSION}')."; exit 1; }
+[[ "${TLS_CIPHERS}" =~ ^[A-Za-z0-9:+!@_=-]+$ ]] || { echo "ERROR: TLS_CIPHERS contains characters outside A-Za-z0-9:+!@_=- ."; exit 1; }
+[[ "${TLS_API_CLIENT_AUTH}" =~ ^(required|optional|none)$ ]] || { echo "ERROR: TLS_API_CLIENT_AUTH must be required, optional or none."; exit 1; }
+[[ "${RABBITMQ_TLS_PORT}" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: RABBITMQ_TLS_PORT must be a positive integer."; exit 1; }
+
+# Values substituted into the template placeholders (empty = plain text, as before TLS existed)
+HAP_TLS_MIN="TLSv${TLS_MIN_VERSION}"
+HAP_STATS_TLS="" HAP_API_BIND_TLS="" HAP_API_ACL="" HAP_SWIFT_BIND_TLS=""
+HAP_API_TLS_N1="" HAP_API_TLS_N2="" HAP_API_TLS_N3="" HAP_SWIFT_TLS_N1="" HAP_SWIFT_TLS_N2="" HAP_SWIFT_TLS_N3=""
+HAP_RABBITMQ_BACKEND_PORT="${RABBITMQ_PORT}"
+_crl=""; [[ -n "${TLS_CRL_FILE}" ]] && _crl=" crl-file ${TLS_CRL_FILE}"
+# Backends are addressed by IP, so the node name must be given explicitly as SNI and verifyhost (live-tested:
+# without 'sni' HAProxy 3.x failed the backend handshake with "certificate verify failed").
+_server_tls() {   # _server_tls NODE_NAME : TLS to a backend node, verified against the CA and the node name
+    echo "ssl ca-file ${TLS_CA_FILE}${_crl} crt ${HAPROXY_BACKEND_PEM} verify required sni str($1) verifyhost $1"
+}
+if _is_true "${TLS_API_ENABLED}"; then
+    HAP_STATS_TLS="ssl crt ${HAPROXY_VIP_PEM}"
+    case "${TLS_API_CLIENT_AUTH}" in
+        required) HAP_API_BIND_TLS="ssl crt ${HAPROXY_VIP_PEM} ca-file ${TLS_CA_FILE}${_crl} verify required"
+                  HAP_API_ACL="http-request deny deny_status 403 unless { ssl_c_used }" ;;
+        optional) HAP_API_BIND_TLS="ssl crt ${HAPROXY_VIP_PEM} ca-file ${TLS_CA_FILE}${_crl} verify optional" ;;
+        none)     HAP_API_BIND_TLS="ssl crt ${HAPROXY_VIP_PEM}" ;;
+    esac
+    HAP_API_TLS_N1="$(_server_tls "${NODE1_NAME}")"
+    HAP_API_TLS_N2="$(_server_tls "${NODE2_NAME}")"
+    HAP_API_TLS_N3="$(_server_tls "${NODE3_NAME}")"
+fi
+if _is_true "${TLS_SWIFT_ENABLED}"; then
+    HAP_SWIFT_BIND_TLS="ssl crt ${HAPROXY_VIP_PEM} ca-file ${TLS_CA_FILE}${_crl} verify required"
+    HAP_SWIFT_TLS_N1="$(_server_tls "${NODE1_NAME}")"
+    HAP_SWIFT_TLS_N2="$(_server_tls "${NODE2_NAME}")"
+    HAP_SWIFT_TLS_N3="$(_server_tls "${NODE3_NAME}")"
+fi
+_is_true "${TLS_RABBITMQ_ENABLED}" && HAP_RABBITMQ_BACKEND_PORT="${RABBITMQ_TLS_PORT}"
+
+render_config() {
+    # '|' is the sed delimiter for the TLS values because they contain '/'. Their characters were validated above.
+    sed \
+        -e "s/__NODE1_NAME__/${NODE1_NAME}/g" \
+        -e "s/__NODE1_IP__/${NODE1_IP}/g" \
+        -e "s/__NODE2_NAME__/${NODE2_NAME}/g" \
+        -e "s/__NODE2_IP__/${NODE2_IP}/g" \
+        -e "s/__NODE3_NAME__/${NODE3_NAME}/g" \
+        -e "s/__NODE3_IP__/${NODE3_IP}/g" \
+        -e "s/__VIP__/${VIP}/g" \
+        -e "s/__API_PORT__/${API_PORT}/g" \
+        -e "s/__API_BACKEND_PORT__/${API_BACKEND_PORT}/g" \
+        -e "s/__MARIADB_PORT__/${MARIADB_PORT}/g" \
+        -e "s/__MARIADB_LB_PORT__/${MARIADB_LB_PORT}/g" \
+        -e "s/__RABBITMQ_BACKEND_PORT__/${HAP_RABBITMQ_BACKEND_PORT}/g" \
+        -e "s/__RABBITMQ_LB_PORT__/${RABBITMQ_LB_PORT}/g" \
+        -e "s/__SWIFT_PROXY_PORT__/${SWIFT_PROXY_PORT}/g" \
+        -e "s/__SWIFT_LB_PORT__/${SWIFT_LB_PORT}/g" \
+        -e "s/__HAPROXY_STATS_PORT__/${HAPROXY_STATS_PORT}/g" \
+        -e "s/__HAPROXY_STATS_USER__/${HAPROXY_STATS_USER}/g" \
+        -e "s/__HAPROXY_STATS_PASS__/${HAPROXY_STATS_PASS}/g" \
+        -e "s/__HAPROXY_MAXCONN__/${HAPROXY_MAXCONN}/g" \
+        -e "s/__HAPROXY_FRONTEND_MAXCONN__/${HAPROXY_FRONTEND_MAXCONN}/g" \
+        -e "s|__TLS_MIN_VERSION__|${HAP_TLS_MIN}|g" \
+        -e "s|__TLS_CIPHERS__|${TLS_CIPHERS}|g" \
+        -e "s|__STATS_BIND_TLS__|${HAP_STATS_TLS}|g" \
+        -e "s|__API_BIND_TLS__|${HAP_API_BIND_TLS}|g" \
+        -e "s|__API_ACL__|${HAP_API_ACL}|g" \
+        -e "s|__API_TLS_N1__|${HAP_API_TLS_N1}|g" \
+        -e "s|__API_TLS_N2__|${HAP_API_TLS_N2}|g" \
+        -e "s|__API_TLS_N3__|${HAP_API_TLS_N3}|g" \
+        -e "s|__SWIFT_BIND_TLS__|${HAP_SWIFT_BIND_TLS}|g" \
+        -e "s|__SWIFT_TLS_N1__|${HAP_SWIFT_TLS_N1}|g" \
+        -e "s|__SWIFT_TLS_N2__|${HAP_SWIFT_TLS_N2}|g" \
+        -e "s|__SWIFT_TLS_N3__|${HAP_SWIFT_TLS_N3}|g" \
+        "${SCRIPT_DIR}/haproxy.cfg.template"
+}
+
+# Test/review helper: print the generated config and stop (no sudo, no NIC check, nothing installed).
+if [[ "${HAPROXY_RENDER_ONLY:-0}" == "1" ]]; then
+    render_config
+    exit 0
+fi
+
+# Fail closed: with TLS on, the files HAProxy needs must exist (it would otherwise refuse to start under Pacemaker).
+_need_tls_files=()
+if _is_true "${TLS_API_ENABLED}" || _is_true "${TLS_SWIFT_ENABLED}"; then
+    _need_tls_files+=("${HAPROXY_VIP_PEM}" "${HAPROXY_BACKEND_PEM}" "${TLS_CA_FILE}")
+    [[ -n "${TLS_CRL_FILE}" ]] && _need_tls_files+=("${TLS_CRL_FILE}")
+fi
+for _f in ${_need_tls_files[@]+"${_need_tls_files[@]}"}; do
+    if ! sudo test -f "${_f}"; then
+        echo "ERROR: TLS is enabled but ${_f} does not exist on this node."
+        echo "  Create and distribute the certificates first: ./security/issue_all.sh && ./security/install_certs.sh"
         exit 1
     fi
 done
@@ -156,28 +283,7 @@ fi
 
 # 4. Generate HAProxy configuration from template
 echo "[4/6] Generating /etc/haproxy/haproxy.cfg..."
-sed \
-    -e "s/__NODE1_NAME__/${NODE1_NAME}/g" \
-    -e "s/__NODE1_IP__/${NODE1_IP}/g" \
-    -e "s/__NODE2_NAME__/${NODE2_NAME}/g" \
-    -e "s/__NODE2_IP__/${NODE2_IP}/g" \
-    -e "s/__NODE3_NAME__/${NODE3_NAME}/g" \
-    -e "s/__NODE3_IP__/${NODE3_IP}/g" \
-    -e "s/__VIP__/${VIP}/g" \
-    -e "s/__API_PORT__/${API_PORT}/g" \
-    -e "s/__API_BACKEND_PORT__/${API_BACKEND_PORT}/g" \
-    -e "s/__MARIADB_PORT__/${MARIADB_PORT}/g" \
-    -e "s/__MARIADB_LB_PORT__/${MARIADB_LB_PORT}/g" \
-    -e "s/__RABBITMQ_PORT__/${RABBITMQ_PORT}/g" \
-    -e "s/__RABBITMQ_LB_PORT__/${RABBITMQ_LB_PORT}/g" \
-    -e "s/__SWIFT_PROXY_PORT__/${SWIFT_PROXY_PORT}/g" \
-    -e "s/__SWIFT_LB_PORT__/${SWIFT_LB_PORT}/g" \
-    -e "s/__HAPROXY_STATS_PORT__/${HAPROXY_STATS_PORT}/g" \
-    -e "s/__HAPROXY_STATS_USER__/${HAPROXY_STATS_USER}/g" \
-    -e "s/__HAPROXY_STATS_PASS__/${HAPROXY_STATS_PASS}/g" \
-    -e "s/__HAPROXY_MAXCONN__/${HAPROXY_MAXCONN}/g" \
-    -e "s/__HAPROXY_FRONTEND_MAXCONN__/${HAPROXY_FRONTEND_MAXCONN}/g" \
-    "${SCRIPT_DIR}/haproxy.cfg.template" | sudo tee /etc/haproxy/haproxy.cfg > /dev/null
+render_config | sudo tee /etc/haproxy/haproxy.cfg > /dev/null
 
 # 5. Open firewall ports
 echo "[5/6] Opening firewall ports..."
@@ -187,6 +293,7 @@ if command -v firewall-cmd >/dev/null 2>&1 && sudo systemctl is-active --quiet f
     sudo firewall-cmd --permanent --add-port="${MARIADB_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${MARIADB_LB_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${RABBITMQ_PORT}/tcp"
+    _is_true "${TLS_RABBITMQ_ENABLED}" && sudo firewall-cmd --permanent --add-port="${RABBITMQ_TLS_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${RABBITMQ_LB_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${SWIFT_LB_PORT}/tcp"
     sudo firewall-cmd --permanent --add-port="${HAPROXY_STATS_PORT}/tcp"

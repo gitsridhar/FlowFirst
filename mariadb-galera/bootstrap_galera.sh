@@ -19,7 +19,10 @@ fi
 
 DB_NAME="${MARIADB_DB:-flowfirst_db}"
 DB_USER="${MARIADB_USER:-flowuser}"
-DB_PASS="${MARIADB_PASSWORD:-flowpassword}"
+DB_PASS="${MARIADB_PASSWORD:-}"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/secrets_lib.sh"
+require_strong_secret MARIADB_PASSWORD "${DB_PASS}"
 
 echo "=================================================================="
 echo " Bootstrapping MariaDB Galera Primary Node"

@@ -13,11 +13,11 @@ This project implements an enterprise-grade, high-availability, distributed inte
 - **OpenStack Swift Object Storage (`python-swiftclient`)**: Dual-persistence layer providing immutable object archiving and direct REST API retrieval. Swift runs as a native 3-node cluster (RPM packages + systemd, installed by `swift/setup_swift.sh`): proxy, account, container and object servers on every node, three replicas (one per node), load-balanced by HAProxy on the VIP
 - **Systemd Service Architecture**: Managed systemd service units for `flowfirst-process1` through `flowfirst-process5` with automatic crash recovery
 - **Distributed Multi-Process Pipeline (`process1` – `process5`)**:
-  - **Process 1**: REST API producer & health gateway
-  - **Process 2**: Message transformer, metric examiner & reflection forwarder
-  - **Process 3**: Acknowledgment sealer & reflection forwarder
-  - **Process 4**: Dual MariaDB & Swift persistence engine with ZooKeeper dedup protection
-  - **Process 5**: Dedicated remote worker running on Remote Node 4 (`node4`) for cross-network asynchronous task execution and reflection
+  - **Process 1**: REST API producer & health gateway — exposes Flows 1–7 including the IoT device CRUD endpoints (`POST /api/devices`, `POST /api/devices/query`, `PUT /api/devices/{id}`, `DELETE /api/devices/{id}`)
+  - **Process 2**: Message transformer, metric examiner & reflection forwarder — enriches device payloads (fingerprint, update sequence) and normalises query filters
+  - **Process 3**: Acknowledgment sealer & reflection forwarder — validates device type and UUID format; dual-publishes Flow 6 to both the DB path and the remote edge-sync path
+  - **Process 4**: Dual MariaDB & Swift persistence engine with ZooKeeper dedup protection — persists `processed_messages` (Flows 1–3) and `devices` (Flows 4–7, including soft-delete)
+  - **Process 5**: Dedicated remote worker running on Remote Node 4 (`node4`) for cross-network asynchronous task execution — handles Flow 3 pipeline reflection and the Flow 6 remote edge-sync (computes `edge_sync_token`, returns via `flow6_p5_to_p2`)
 
 ---
 
@@ -175,6 +175,101 @@ sequenceDiagram
 
 ---
 
+### IoT Device CRUD Flows (4–7)
+
+Flows 4 through 7 implement a REST-based CRUD interface for IoT device management. All four flows share the same three-stage pipeline (P2 enrich → P3 validate → P4 persist) and write to the `devices` table in the MariaDB Galera cluster; they also archive each processed payload to Swift object storage. The device type must be one of: `temperature_sensor`, `pressure_gauge`, `flow_meter`, `humidity_sensor`, `vibration_sensor`, `power_monitor`.
+
+---
+
+### Flow 4: IoT Device Create
+
+**Endpoint:** `POST /api/devices`
+**Required fields:** `device_name`, `device_type` (from allowed set above)
+**Optional fields:** `location`, `firmware_version`, `tags` (JSON object), `owner_team`
+
+1. **Client (`curl`)**: Sends `POST /api/devices` with JSON body to `http://${FLOWFIRST_VIP}:8080`.
+2. **HAProxy**: Delivers to `Process 1` on one of the active nodes (Round-Robin).
+3. **Process 1 ([`process1.py`](src/application/process1.py:213))**: Generates a fresh UUID `device_id`, builds the create payload with `operation: create` and an initial history entry, and publishes to `flow4_p1_to_p2`.
+4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Computes `device_fingerprint` = `SHA-256(device_name:device_type:location)` (hex), appends `enriched_at` timestamp to history, and forwards to `flow4_p2_to_p3`.
+5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Validates that `device_name` is non-empty and `device_type` is in the allowed set; sets `validation_passed: true` and forwards to `flow4_p3_to_p4`.  Rejects (nack, dead-letter) if either check fails.
+6. **Process 4 ([`process4.py`](src/application/process4.py:167))**: Calls [`db.upsert_device()`](src/db/db.py:174) (`INSERT … ON DUPLICATE KEY UPDATE`) after a ZooKeeper dedup check, then archives the payload to Swift object storage.
+
+```bash
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/devices \
+  -H "Content-Type: application/json" \
+  -d '{"device_name":"Temp Sensor 1","device_type":"temperature_sensor","location":"factory/zone-A","firmware_version":"2.0.1","tags":{"env":"production"},"owner_team":"ops"}' | jq .
+```
+
+---
+
+### Flow 5: IoT Device Query
+
+**Endpoint:** `POST /api/devices/query`
+**Optional fields:** `filters` object with any of `device_type`, `status`, `owner_team`, `location_contains`
+
+1. **Client (`curl`)**: Sends `POST /api/devices/query` with an optional `filters` JSON object.
+2. **HAProxy**: Delivers to `Process 1` on one of the active nodes (Round-Robin).
+3. **Process 1 ([`process1.py`](src/application/process1.py:255))**: Builds a query payload with `operation: query` and the supplied filters, publishes to `flow5_p1_to_p2`.
+4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Normalises `device_type` and `status` filter values to lowercase; forwards to `flow5_p2_to_p3`.
+5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Marks `query_validated: true` (empty filter set is valid — returns all devices) and forwards to `flow5_p3_to_p4`.
+6. **Process 4 ([`process4.py`](src/application/process4.py:207))**: Calls [`db.query_devices(filters)`](src/db/db.py:251) (builds a dynamic `WHERE` clause with optional `LIKE` for `location_contains`); archives the result payload to Swift.
+
+```bash
+# Query all temperature sensors with status active
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/devices/query \
+  -H "Content-Type: application/json" \
+  -d '{"filters":{"device_type":"temperature_sensor","status":"active"}}' | jq .
+
+# Query with no filters — returns all devices (up to 1000 rows)
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/devices/query \
+  -H "Content-Type: application/json" \
+  -d '{}' | jq .
+```
+
+---
+
+### Flow 6: IoT Device Update (with Remote Edge-Sync)
+
+**Endpoint:** `PUT /api/devices/{device_id}`
+**Body:** JSON object of fields to update (e.g. `{"firmware_version":"3.0.0","tags":{"env":"staging"}}`)
+
+Flow 6 is the only flow that fans out to **two** downstream queues at Process 3 — one for direct persistence and one for the remote edge-sync on node4.
+
+1. **Client (`curl`)**: Sends `PUT /api/devices/{device_id}` with the update fields.
+2. **HAProxy**: Delivers to `Process 1` on one of the active nodes.
+3. **Process 1 ([`process1.py`](src/application/process1.py:279))**: Validates `device_id` is present, builds an update payload with `operation: update`, publishes to `flow6_p1_to_p2`.
+4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Generates a monotonic `update_sequence` (ms timestamp from ZooKeeper config or system clock), sets `previous_state_tracked: true`, and forwards to `flow6_p2_to_p3`.
+5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Validates `device_id` is a 36-character UUID; on success **dual-publishes** — to `flow6_p3_to_p4` (direct DB path) **and** to `flow6_p3_to_p5` (remote edge-sync path). Rejects with nack if `device_id` is missing or malformed.
+6. **Process 4 — direct path** ([`process4.py`](src/application/process4.py:253)): Consumes from `flow6_p3_to_p4`; calls [`db.upsert_device()`](src/db/db.py:174) after ZK dedup check; archives to Swift.
+7. **Process 5 on node4 — edge-sync path** ([`process5.py`](src/application/process5.py:76)): Consumes from `flow6_p3_to_p5`; computes `edge_sync_token = SHA-256(device_id:update_sequence)[:16]`; sets `remote_sync_applied: true`; publishes result to `flow6_p5_to_p2`.
+8. **Process 2 — remote return** ([`process2.py`](src/application/process2.py:1)): Consumes from `flow6_p5_to_p2`; sets `process2_remote_return_verified: true`; forwards to `flow6_p2_to_p4`.
+9. **Process 4 — remote path** ([`process4.py`](src/application/process4.py:298)): Consumes from `flow6_p2_to_p4`; idempotent upsert after ZK dedup check; archives to Swift.
+
+```bash
+curl -s -X PUT http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee \
+  -H "Content-Type: application/json" \
+  -d '{"firmware_version":"3.0.0","tags":{"env":"staging"}}' | jq .
+```
+
+---
+
+### Flow 7: IoT Device Soft-Delete
+
+**Endpoint:** `DELETE /api/devices/{device_id}`
+
+1. **Client (`curl`)**: Sends `DELETE /api/devices/{device_id}`.
+2. **HAProxy**: Delivers to `Process 1` on one of the active nodes.
+3. **Process 1 ([`process1.py`](src/application/process1.py:306))**: Validates `device_id` is present, builds a delete payload with `operation: delete`, publishes to `flow7_p1_to_p2`.
+4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Adds `deletion_requested_by` (node name) and `grace_period_s` metadata; forwards to `flow7_p2_to_p3`.
+5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Validates that `device_id` is non-empty; sets `deletion_validated: true`; forwards to `flow7_p3_to_p4`. Rejects with nack on missing `device_id`.
+6. **Process 4 ([`process4.py`](src/application/process4.py:346))**: Calls [`db.soft_delete_device(device_id)`](src/db/db.py:225) after ZK dedup check — issues `UPDATE devices SET status = 'decommissioned' WHERE device_id = %s` (the row is **not** physically deleted); archives the payload to Swift.
+
+```bash
+curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee | jq .
+```
+
+---
+
 ## Database Schema & ER Diagram
 
 ```mermaid
@@ -182,7 +277,7 @@ erDiagram
     PROCESSED_MESSAGES {
         bigint id PK "Auto Increment"
         varchar(64) message_id UK "Unique UUID"
-        int flow_id "Flow identifier (1, 2, or 3)"
+        int flow_id "Flow identifier (1-3)"
         int item_id "Sequence number"
         varchar(255) initial_data "Origin payload"
         int counter_value "Flow 1 reflected counter"
@@ -193,7 +288,23 @@ erDiagram
         json raw_payload "Complete final payload object"
         timestamp created_at "Record creation time"
     }
+
+    DEVICES {
+        bigint id PK "Auto Increment"
+        varchar(36) device_id UK "UUID assigned at create"
+        varchar(100) device_name "Human-readable label"
+        varchar(50) device_type "temperature_sensor | pressure_gauge | flow_meter | humidity_sensor | vibration_sensor | power_monitor"
+        varchar(200) location "e.g. factory/zone-A"
+        varchar(20) firmware_version "Default 1.0.0"
+        json tags "Arbitrary key-value metadata"
+        varchar(20) status "active | decommissioned"
+        varchar(100) owner_team "Owning team"
+        timestamp created_at "Row creation time"
+        timestamp updated_at "Last upsert time (auto ON UPDATE)"
+    }
 ```
+
+`PROCESSED_MESSAGES` stores the audit trail for Flows 1–3. `DEVICES` is the device registry written by Flows 4 (create), 5 (query/archive), 6 (update/upsert), and 7 (soft-delete → `status = decommissioned`). Both tables are replicated synchronously across all three Galera nodes.
 
 ---
 
@@ -287,6 +398,10 @@ erDiagram
 | [61](#scenario-61-scalability-test--thousands-of-concurrent-api-invocations-four-node-cluster) | Scalability Test — Thousands of Concurrent API Invocations | Scale | `scripts/load_test_api.py` step test, scale parameters, bottleneck table, queue drain, DB cross-check |
 | [62](#scenario-62-performance-test--measured-latency-throughput-and-freshness-for-client-expectations) | Performance Test — Latency, Throughput & Freshness for Client Expectations | Performance | Fixed workload profiles, warm-up + 3 repeats, end-to-end latency from MariaDB, resource sampling, soak run, load during failover, result template |
 | [63](#scenario-63-tls-everywhere--private-ca-mutual-tls-rest-api-and-encrypted-internal-traffic) | TLS Everywhere — Private CA, Mutual-TLS REST API, Encrypted Internal Traffic | Security | `security/` PKI scripts, certificate per use, HTTPS + client certificates on the API, RabbitMQ/MariaDB/ZooKeeper/Swift TLS, node4 identity, rotation, revocation, `verify_tls.sh` |
+| [64](#scenario-64-iot-device-crud--flow-4-create-device) | IoT Device CRUD — Flow 4: Create Device | CRUD Pipeline | `POST /api/devices`, device fingerprint, device type validation, `devices` table upsert |
+| [65](#scenario-65-iot-device-crud--flow-5-query-devices) | IoT Device CRUD — Flow 5: Query Devices | CRUD Pipeline | `POST /api/devices/query`, filter normalisation, `query_devices()` dynamic WHERE |
+| [66](#scenario-66-iot-device-crud--flow-6-update-device-with-remote-edge-sync) | IoT Device CRUD — Flow 6: Update Device with Remote Edge-Sync | CRUD Pipeline | `PUT /api/devices/{id}`, dual-publish P3→P4+P5, edge_sync_token, remote return path |
+| [67](#scenario-67-iot-device-crud--flow-7-soft-delete-device) | IoT Device CRUD — Flow 7: Soft-Delete Device | CRUD Pipeline | `DELETE /api/devices/{id}`, `soft_delete_device()`, `status = decommissioned` |
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
 

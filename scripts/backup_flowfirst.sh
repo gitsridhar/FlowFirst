@@ -11,11 +11,11 @@
 #            rabbitmq.conf, the TLS directory INCLUDING PRIVATE KEYS  (this is why every backup is encrypted)
 #   zk       ZooKeeper /flowfirst/config values (runtime tuning). Election, registry, health and dedup are rebuilt.
 #   rabbit   RabbitMQ definitions: users (password HASHES), vhosts, permissions, policies (incl. flowfirst-dlx), queues
+#   swift    All objects in SWIFT_CONTAINER downloaded to a local directory, tarballed and encrypted. Requires the
+#            'swift' CLI (python-swiftclient, already in requirements.txt) and SWIFT_ENABLED=true in .env.
+#            Restore: --swift in restore_flowfirst.sh.
 # WHAT IS NOT BACKED UP, ON PURPOSE
 #   * messages waiting in RabbitMQ queues (transient pipeline state; see ReadMe, Backup chapter, for the consequence)
-#   * Swift object data: every object is a copy of processed_messages.raw_payload, which the db part holds
-#   * Swift rings/swift.conf ARE in the config part: without the hash prefix/suffix and the rings no stored object
-#     could be found again, even if the data survived
 #
 # OUTPUT: <out>/flowfirst-<host>-<UTC>/{db.sql.gz.enc, config.tar.gz.enc, zk-config.json.enc, rabbit-definitions.json.enc,
 #         MANIFEST.sha256, BACKUP.info}. AES-256-CBC + PBKDF2 (600k) with the passphrase file; nothing sensitive is
@@ -30,7 +30,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/backup_lib.sh"
 
-OUT=""; PASSFILE=""; ONLY="db,config,zk,rabbit"; KEEP=0; NO_ENCRYPT=0
+OUT=""; PASSFILE=""; ONLY="db,config,zk,rabbit,swift"; KEEP=0; NO_ENCRYPT=0
 usage() { sed -n 2,6p "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; echo "options: --out DIR --passphrase-file FILE [--only db,config,zk,rabbit] [--keep N]"; exit 2; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -45,7 +45,7 @@ done
 [[ -n "$OUT" ]]      || { echo "--out is required" >&2; usage; }
 [[ -n "$PASSFILE" ]] || { echo "--passphrase-file is required (backups contain secrets and are always encrypted)" >&2; usage; }
 [[ "$KEEP" =~ ^[0-9]+$ ]] || bk_die "--keep must be a number"
-for p in ${ONLY//,/ }; do [[ "$p" =~ ^(db|config|zk|rabbit)$ ]] || bk_die "unknown part '$p' in --only"; done
+for p in ${ONLY//,/ }; do [[ "$p" =~ ^(db|config|zk|rabbit|swift)$ ]] || bk_die "unknown part '$p' in --only"; done
 want() { [[ ",$ONLY," == *",$1,"* ]]; }
 
 trap bk_cleanup EXIT
@@ -111,6 +111,57 @@ if want zk; then
         DONE+=(zk-config.json.enc)
     else bk_warn "zk: failed: $(tail -1 "$DEST/.zk.err" 2>/dev/null | cut -c1-150)"; rm -f "$DEST/zk-config.json.enc"; FAILED+=(zk); fi
     rm -f "$DEST/.zk.err"
+fi
+
+# ---- swift ------------------------------------------------------------------------------------------------------
+if want swift; then
+    # Check whether Swift is enabled in .env
+    if [[ "${SWIFT_ENABLED:-true}" != "true" && "${SWIFT_ENABLED:-true}" != "1" ]]; then
+        bk_log "swift: SWIFT_ENABLED is not true, skipping"
+    else
+        SWIFT_CMD=""
+        for _c in "$BK_ROOT_DIR/.venv/bin/swift" "$(command -v swift 2>/dev/null)"; do
+            [[ -x "$_c" ]] && { SWIFT_CMD="$_c"; break; }
+        done
+        if [[ -z "$SWIFT_CMD" ]]; then
+            bk_warn "swift: 'swift' CLI not found (install python-swiftclient or activate the virtualenv); swift skipped"
+            FAILED+=(swift)
+        else
+            # Build the auth env so we do not pass the key on the command line
+            _ST_AUTH="${SWIFT_AUTH_URL:-}"
+            _ST_USER="${SWIFT_USER:-}"
+            _ST_KEY="${SWIFT_KEY:-}"
+            _ST_CONTAINER="${SWIFT_CONTAINER:-flowfirst_messages}"
+            [[ -n "$_ST_AUTH" && -n "$_ST_USER" && -n "$_ST_KEY" ]] || { bk_warn "swift: SWIFT_AUTH_URL / SWIFT_USER / SWIFT_KEY not set; skipped"; FAILED+=(swift); }
+            if want swift && [[ ${FAILED[-1]:-} != swift ]]; then
+                # TLS options if enabled
+                _SWIFT_OPTS=()
+                if [[ "${TLS_SWIFT_ENABLED:-false}" == "true" ]]; then
+                    _TLS_D="${TLS_DIR:-/etc/flowfirst/tls}"
+                    _SWIFT_OPTS+=(--os-cacert "${TLS_CA_FILE:-$_TLS_D/ca.crt}"
+                                  --os-cert   "${TLS_CLIENT_CERT:-$_TLS_D/pipeline/pipeline.crt}"
+                                  --os-key    "${TLS_CLIENT_KEY:-$_TLS_D/pipeline/pipeline.key}")
+                fi
+                bk_log "swift: downloading all objects from container '$_ST_CONTAINER' ..."
+                SWIFT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/flowfirst-swift.XXXXXX")"; BK_TMP_FILES+=("$SWIFT_DIR")
+                # swift download exits 0 even when the container is empty; non-zero on auth / network failure
+                if ST_AUTH="$_ST_AUTH" ST_USER="$_ST_USER" ST_KEY="$_ST_KEY" \
+                   "$SWIFT_CMD" "${_SWIFT_OPTS[@]}" download "$_ST_CONTAINER" --output-dir "$SWIFT_DIR" 2>"$DEST/.swift.err"; then
+                    OBJ_COUNT="$(find "$SWIFT_DIR" -type f | wc -l | tr -d ' ')"
+                    bk_log "swift: $OBJ_COUNT object(s) downloaded; archiving ..."
+                    if tar -czf - -C "$SWIFT_DIR" . 2>>"$DEST/.swift.err" | bk_encrypt "$PASSFILE" /dev/stdin "$DEST/swift-objects.tar.gz.enc"; then
+                        DONE+=(swift-objects.tar.gz.enc)
+                    else
+                        bk_warn "swift: archive/encrypt failed"; rm -f "$DEST/swift-objects.tar.gz.enc"; FAILED+=(swift)
+                        [[ -s "$DEST/.swift.err" ]] && head -5 "$DEST/.swift.err" >&2
+                    fi
+                else
+                    bk_warn "swift: download failed:"; head -5 "$DEST/.swift.err" >&2; FAILED+=(swift)
+                fi
+                rm -f "$DEST/.swift.err"
+            fi
+        fi
+    fi
 fi
 
 # ---- rabbit -----------------------------------------------------------------------------------------------------

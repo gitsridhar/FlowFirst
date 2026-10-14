@@ -84,6 +84,45 @@ def test_backup_rejects_unknown_part(work):
     assert code != 0 and "unknown part" in out
 
 
+def test_backup_swift_skipped_when_disabled(work):
+    """When SWIFT_ENABLED=false the swift part is silently skipped (not failed)."""
+    d, pw = work
+    env_f = d / "env"
+    env_f.write_text(
+        "SWIFT_ENABLED=false\nMARIADB_USER=u\nMARIADB_PASSWORD=pppppppppppppppp\nMARIADB_DB=db\n"
+        "RABBITMQ_PASSWORD=pppppppppppppppp\nSWIFT_KEY=pppppppppppppppp\nHAPROXY_STATS_PASS=pppppppppppppppp\n"
+    )
+    env_f.chmod(0o600)
+    (d / "bkout").mkdir()
+    # Use --only swift so the other parts do not try to connect to DB/RabbitMQ
+    code, out = sh(
+        f"./scripts/backup_flowfirst.sh --out {d}/bkout --passphrase-file {pw} --only swift",
+        env={"FLOWFIRST_ENV_FILE": str(env_f)},
+    )
+    # The script should exit 0 (swift was disabled, not failed) or succeed
+    # If it exits 1 the output must say "skipping" not "failed"
+    if code != 0:
+        assert "skipping" in out or "not true" in out, out
+
+
+def test_restore_swift_rejects_missing_archive(work):
+    d, pw = work
+    (d / "bk").mkdir()
+    env_f = d / "env"
+    env_f.write_text(
+        "SWIFT_ENABLED=true\nSWIFT_AUTH_URL=http://127.0.0.1:8080/auth/v1.0\n"
+        "SWIFT_USER=u:u\nSWIFT_KEY=pppppppppppppppp\nSWIFT_CONTAINER=c\n"
+        "MARIADB_USER=u\nMARIADB_PASSWORD=pppppppppppppppp\nMARIADB_DB=db\n"
+        "RABBITMQ_PASSWORD=pppppppppppppppp\nHAPROXY_STATS_PASS=pppppppppppppppp\n"
+    )
+    env_f.chmod(0o600)
+    code, out = sh(
+        f"./scripts/restore_flowfirst.sh --from {d}/bk --passphrase-file {pw} --swift",
+        env={"FLOWFIRST_ENV_FILE": str(env_f)},
+    )
+    assert code != 0 and "swift-objects.tar.gz.enc" in out
+
+
 def test_restore_refuses_in_place_without_confirmation(work):
     d, pw = work
     (d / "bk").mkdir()

@@ -12,13 +12,17 @@
 #       Replaces the live database with the dump. The dump contains DROP/CREATE statements for MARIADB_DB.
 #   ./scripts/restore_flowfirst.sh --from DIR --passphrase-file F --zk | --rabbit
 #       Writes ZooKeeper runtime config back / prints how to import the RabbitMQ definitions.
+#   ./scripts/restore_flowfirst.sh --from DIR --passphrase-file F --swift [--swift-container NAME]
+#       Re-uploads all objects from swift-objects.tar.gz.enc to SWIFT_CONTAINER (or --swift-container override).
+#       Objects already in the container are overwritten. The container is created if missing.
+#       Requires the 'swift' CLI (python-swiftclient, in requirements.txt) and SWIFT_ENABLED=true in .env.
 #
 # Nothing here is applied unless you name it, and the one destructive action needs --yes-overwrite as well.
 # ==============================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/backup_lib.sh"
 
-FROM=""; PASSFILE=""; VERIFY=0; EXTRACT=""; DB=0; INTO=""; INPLACE=0; YES=0; ZK=0; RABBIT=0
+FROM=""; PASSFILE=""; VERIFY=0; EXTRACT=""; DB=0; INTO=""; INPLACE=0; YES=0; ZK=0; RABBIT=0; SWIFT_RESTORE=0; SWIFT_RESTORE_CONTAINER=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --from) FROM="${2:-}"; shift 2 ;;
@@ -31,7 +35,9 @@ while [[ $# -gt 0 ]]; do
         --yes-overwrite) YES=1; shift ;;
         --zk) ZK=1; shift ;;
         --rabbit) RABBIT=1; shift ;;
-        -h|--help) sed -n 2,19p "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --swift) SWIFT_RESTORE=1; shift ;;
+        --swift-container) SWIFT_RESTORE_CONTAINER="${2:-}"; shift 2 ;;
+        -h|--help) sed -n 2,24p "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -109,5 +115,40 @@ Press Enter when done.
 MSG
     read -r _ || true
 fi
-[[ $VERIFY -eq 0 && -z "$EXTRACT" && $DB -eq 0 && $ZK -eq 0 && $RABBIT -eq 0 ]] && bk_die "nothing to do: give --verify, --extract-config, --db, --zk or --rabbit"
+if [[ $SWIFT_RESTORE -eq 1 ]]; then
+    bk_load_env
+    SWIFT_CMD=""
+    for _c in "$BK_ROOT_DIR/.venv/bin/swift" "$(command -v swift 2>/dev/null)"; do
+        [[ -x "$_c" ]] && { SWIFT_CMD="$_c"; break; }
+    done
+    [[ -n "$SWIFT_CMD" ]] || bk_die "swift CLI not found; install python-swiftclient or activate the virtualenv"
+    [[ -f "$FROM/swift-objects.tar.gz.enc" ]] || bk_die "$FROM/swift-objects.tar.gz.enc not found (was swift backed up?)"
+    _ST_AUTH="${SWIFT_AUTH_URL:-}"
+    _ST_USER="${SWIFT_USER:-}"
+    _ST_KEY="${SWIFT_KEY:-}"
+    _ST_CONTAINER="${SWIFT_RESTORE_CONTAINER:-${SWIFT_CONTAINER:-flowfirst_messages}}"
+    [[ -n "$_ST_AUTH" && -n "$_ST_USER" && -n "$_ST_KEY" ]] || bk_die "SWIFT_AUTH_URL / SWIFT_USER / SWIFT_KEY not set in $BK_ENV_FILE"
+    _SWIFT_OPTS=()
+    if [[ "${TLS_SWIFT_ENABLED:-false}" == "true" ]]; then
+        _TLS_D="${TLS_DIR:-/etc/flowfirst/tls}"
+        _SWIFT_OPTS+=(--os-cacert "${TLS_CA_FILE:-$_TLS_D/ca.crt}"
+                      --os-cert   "${TLS_CLIENT_CERT:-$_TLS_D/pipeline/pipeline.crt}"
+                      --os-key    "${TLS_CLIENT_KEY:-$_TLS_D/pipeline/pipeline.key}")
+    fi
+    SWIFT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/flowfirst-swift-restore.XXXXXX")"; BK_TMP_FILES+=("$SWIFT_DIR")
+    bk_log "swift: decrypting and extracting objects to $SWIFT_DIR ..."
+    bk_decrypt "$PASSFILE" "$FROM/swift-objects.tar.gz.enc" /dev/stdout | tar -xzf - -C "$SWIFT_DIR"
+    OBJ_COUNT="$(find "$SWIFT_DIR" -type f | wc -l | tr -d ' ')"
+    bk_log "swift: uploading $OBJ_COUNT object(s) to container '$_ST_CONTAINER' ..."
+    # swift upload . uploads paths relative to cwd; cd into the extracted dir so object names are preserved
+    # --object-threads controls concurrency; default 10 is fine
+    if (cd "$SWIFT_DIR" && ST_AUTH="$_ST_AUTH" ST_USER="$_ST_USER" ST_KEY="$_ST_KEY" \
+        "$SWIFT_CMD" "${_SWIFT_OPTS[@]}" upload "$_ST_CONTAINER" . --changed --object-threads 4 2>&1); then
+        bk_log "swift: upload done"
+    else
+        bk_die "swift: upload failed (see output above)"
+    fi
+fi
+
+[[ $VERIFY -eq 0 && -z "$EXTRACT" && $DB -eq 0 && $ZK -eq 0 && $RABBIT -eq 0 && $SWIFT_RESTORE -eq 0 ]] && bk_die "nothing to do: give --verify, --extract-config, --db, --zk, --rabbit or --swift"
 exit 0

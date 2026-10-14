@@ -260,6 +260,19 @@ ZK_DEDUP_TTL_MS   = int(os.getenv("ZK_DEDUP_TTL_MS", "300000"))
 DLX_EXCHANGE        = "flowfirst.dlx"
 QUEUE_DEAD_LETTERS  = "flowfirst_dead_letters"
 
+# Queue replication. "classic" = one node holds each queue (the original behaviour: a node that dies can lose the messages
+# queued on it). "quorum" = every queue is replicated by Raft across the RabbitMQ cluster, a publisher confirm is sent only
+# after a majority has the message, and one node can fail without losing messages. The type of an EXISTING queue cannot
+# be changed: declaring it with a different type is refused (PRECONDITION_FAILED). Use scripts/migrate_queue_type.py.
+RABBITMQ_QUEUE_TYPE = _str_env("RABBITMQ_QUEUE_TYPE", "classic").lower()
+if RABBITMQ_QUEUE_TYPE not in ("classic", "quorum"):
+    raise ValueError(f"RABBITMQ_QUEUE_TYPE must be 'classic' or 'quorum', not '{RABBITMQ_QUEUE_TYPE}'")
+
+
+def queue_arguments(queue_type: str = None):
+    """Declaration arguments for a pipeline queue. None for classic, so classic declarations stay exactly as before."""
+    return {"x-queue-type": "quorum"} if (queue_type or RABBITMQ_QUEUE_TYPE) == "quorum" else None
+
 ALL_QUEUES = [
     QUEUE_FLOW1_P1_TO_P2,
     QUEUE_FLOW1_P2_TO_P3,
@@ -337,8 +350,18 @@ def setup_queues(channel):
     # quorum/mirrored queues, replicated) the message, and RAISES pika.exceptions.NackError / UnroutableError otherwise.
     # Callers therefore never acknowledge an input or answer 200 for a message the broker did not take.
     channel.confirm_delivery()
-    for queue_name in ALL_QUEUES:
-        channel.queue_declare(queue=queue_name, durable=True)
-    channel.exchange_declare(exchange=DLX_EXCHANGE, exchange_type="fanout", durable=True)
-    channel.queue_declare(queue=QUEUE_DEAD_LETTERS, durable=True)
+    args = queue_arguments()
+    try:
+        for queue_name in ALL_QUEUES:
+            channel.queue_declare(queue=queue_name, durable=True, arguments=args)
+        channel.exchange_declare(exchange=DLX_EXCHANGE, exchange_type="fanout", durable=True)
+        channel.queue_declare(queue=QUEUE_DEAD_LETTERS, durable=True, arguments=args)
+    except pika.exceptions.ChannelClosedByBroker as exc:
+        if exc.reply_code != 406:
+            raise
+        raise RuntimeError(
+            f"RabbitMQ refused to declare a queue ({exc.reply_text}). A queue that already exists cannot change type: "
+            f"RABBITMQ_QUEUE_TYPE={RABBITMQ_QUEUE_TYPE} does not match it. Drain the pipeline and run "
+            f"scripts/migrate_queue_type.py --to {RABBITMQ_QUEUE_TYPE}, or set RABBITMQ_QUEUE_TYPE back."
+        ) from exc
     channel.queue_bind(queue=QUEUE_DEAD_LETTERS, exchange=DLX_EXCHANGE)

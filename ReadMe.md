@@ -8391,7 +8391,7 @@ python3 scripts/replay_dead_letters.py --discard          # delete them, after y
 6. If the origin queue was deleted, the script re-declares it first (`setup_queues`) and the replay succeeds. Tested.
 
 **Limits (read these).**
-1. **Pipeline queues hold messages on one RabbitMQ node unless you configure replication.** The queues are classic durable queues. A node that dies before the message is consumed can lose the messages stored only on it; confirms do not change that. Quorum queues or an `ha` policy are the usual answer and are **not** configured here.
+1. **Pipeline queues hold messages on one RabbitMQ node by default (`RABBITMQ_QUEUE_TYPE=classic`).** A node that dies before the message is consumed can lose the messages stored only on it; confirms do not change that. Set `RABBITMQ_QUEUE_TYPE=quorum` to replicate every queue across all nodes (a publisher confirm is sent only after a majority has the message). The type cannot be changed while the queues exist: stop the pipeline, run `scripts/migrate_queue_type.py --to quorum` (it moves messages one by one with confirms, is safe to re-run if interrupted, and prints a dry-run option), then set `RABBITMQ_QUEUE_TYPE=quorum` in `.env` on every node before starting the processes.
 2. The dead-letter queue is just another queue: it has no size or age limit, and nothing replays it automatically. Messages wait until a person acts. It is not part of the backup (see [Backup and Restore](#backup-and-restore)).
 3. The policy and the script assume RabbitMQ's default virtual host `/`; the code connects without choosing another one.
 4. Replay does not preserve ordering relative to newer messages.

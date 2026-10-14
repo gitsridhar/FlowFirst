@@ -3,6 +3,7 @@ import logging
 from typing import Optional, Dict, Any, List, Tuple
 from swiftclient.client import Connection, ClientException
 
+from src.tls.tls import swift_kwargs
 from src.config.config import (
     SWIFT_AUTH_URL,
     SWIFT_AUTH_VERSION,
@@ -37,6 +38,7 @@ def get_swift_connection(
         key=key,
         auth_version=auth_version,
         retries=retries,
+        **swift_kwargs(),
     )
 
 

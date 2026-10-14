@@ -1,3 +1,5 @@
+# LOCAL DEVELOPMENT ONLY. The passwords below are the well-known sample values that FlowFirst refuses in production
+# (they only work with ALLOW_DEFAULT_SECRETS=true). Never use this file on a cluster node or expose its ports.
 services:
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
@@ -6,7 +8,7 @@ services:
       - "5672:5672"    # AMQP protocol port
       - "15672:15672"  # Management UI port
     environment:
-      # Credentials match RABBITMQ_USER / RABBITMQ_PASSWORD in .env / config.py
+      # Credentials match RABBITMQ_USER / RABBITMQ_PASSWORD in .env / src/config/config.py
       RABBITMQ_DEFAULT_USER: flowuser
       RABBITMQ_DEFAULT_PASS: flowpassword
       RABBITMQ_DEFAULT_VHOST: /

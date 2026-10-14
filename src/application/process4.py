@@ -18,6 +18,7 @@ from src.config.config import (
 )
 from src.db.db import init_database, insert_processed_message
 from src.swift import swift_storage
+from src.metrics import metrics
 from src.zookeeper import zk as zklib
 
 
@@ -64,6 +65,7 @@ def handle_flow1_message(ch, method, properties, body):
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 1] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow1_failed"] += 1
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -110,6 +112,7 @@ def handle_flow2_message(ch, method, properties, body):
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 2] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow2_failed"] += 1
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -152,6 +155,7 @@ def handle_flow3_message(ch, method, properties, body):
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 3] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow3_failed"] += 1
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -281,6 +285,7 @@ def _consume():
 
 def main():
     log.info(f"Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
+    metrics.start("process4")
 
     # MariaDB schema init
     try:

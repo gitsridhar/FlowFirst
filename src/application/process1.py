@@ -2,6 +2,7 @@
 from src.gt import gt
 gt.monkey_patch()
 
+import itertools
 import json
 import logging
 import time
@@ -9,10 +10,22 @@ import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 import pika
+from src.application import authz
 from src.config.config import (
     NODE_NAME,
     API_HOST,
     API_BACKEND_PORT,
+    TLS_API_ENABLED,
+    TLS_API_CLIENT_AUTH,
+    ADMIN_ALLOWED_CNS,
+    ADMIN_TRUSTED_PROXY_CNS,
+    ALLOW_UNAUTHENTICATED_ADMIN,
+    API_MAX_BODY_BYTES,
+    API_MAX_BATCH_COUNT,
+    API_MAX_LIST_LIMIT,
+    API_REQUEST_TIMEOUT_S,
+    API_EXPOSE_ERROR_DETAILS,
+    API_PUBLISH_CONNECTIONS,
     setup_queues,
     QUEUE_FLOW1_P1_TO_P2,
     QUEUE_FLOW2_P1_TO_P2,
@@ -21,6 +34,7 @@ from src.config.config import (
     API_REQUEST_POOL_SIZE,
     API_LISTEN_BACKLOG,
 )
+from src.metrics import metrics
 from src.zookeeper import zk as zklib
 from src.swift import swift_storage
 from urllib.parse import parse_qs
@@ -29,30 +43,71 @@ log = logging.getLogger("flowfirst.p1")
 
 # ---------------------------------------------------------------------------
 # Per-process state — each greenthread owns its OWN pika connection+channel.
-# The _publish_conn / _publish_ch below are owned exclusively by the HTTP
-# handler greenthreads (all HTTP requests run in the same eventlet thread
-# context behind GreenPool, so one shared connection is fine here).
+# HTTP request greenthreads do not share one connection: they publish through a small pool of
+# _PublishSlot objects (API_PUBLISH_CONNECTIONS), each used by one greenthread at a time.
 # ---------------------------------------------------------------------------
-_publish_conn = None
-_publish_ch   = None
 _config_watcher = None
+_ADMIN_ALLOWED_CNS = authz.parse_list(ADMIN_ALLOWED_CNS)
+_ADMIN_PROXY_CNS = authz.parse_list(ADMIN_TRUSTED_PROXY_CNS)
 
 import eventlet
 
-# A semaphore limits concurrent publishes to 1 (pika channel is not re-entrant)
-_publish_sem = eventlet.semaphore.Semaphore(1)
+
+class _PublishSlot:
+    """One publisher connection + channel, used by ONE greenthread at a time (pika channels are not re-entrant).
+    The semaphore also stops the heartbeat greenthread from touching the connection while a publish is waiting
+    for its confirm (it did not need to before confirms existed, because publish never waited)."""
+
+    def __init__(self, index: int):
+        self.index = index
+        self.sem = eventlet.semaphore.Semaphore(1)
+        self.conn = None
+        self.ch = None
+
+    def channel(self):
+        """Connect/reconnect lazily. Call only while holding self.sem."""
+        if self.conn is None or self.conn.is_closed:
+            self.conn = gt.get_rmq_connection_with_retry(f"p1-publish-{self.index}")
+            self.ch = self.conn.channel()
+            setup_queues(self.ch)                 # declares queues + DLX objects and turns on publisher confirms
+        elif self.ch is None or self.ch.is_closed:
+            self.ch = self.conn.channel()
+            setup_queues(self.ch)                 # a new channel is a new confirm-mode session: it must be re-enabled
+        return self.ch
+
+
+_publish_slots = [_PublishSlot(i) for i in range(API_PUBLISH_CONNECTIONS)]
+_publish_next = itertools.count()
+
+
+def _publish(routing_key: str, body: str) -> None:
+    """Publish one persistent message and WAIT for the broker's confirm (raises if it is refused or unroutable).
+    Requests are spread round-robin over the publisher connections."""
+    slot = _publish_slots[next(_publish_next) % len(_publish_slots)]
+    with slot.sem:
+        slot.channel().basic_publish(
+            exchange="",
+            mandatory=True,
+            routing_key=routing_key,
+            body=body,
+            properties=pika.BasicProperties(
+                delivery_mode=pika.DeliveryMode.Persistent,
+                content_type="application/json",
+            ),
+        )
+
+
+metrics.register_gauge("flowfirst_publish_connections_configured", "Publisher connections Process 1 is set to keep.",
+                       lambda: len(_publish_slots))
+metrics.register_gauge("flowfirst_publish_connections_open", "Publisher connections currently open to RabbitMQ.",
+                       lambda: sum(1 for s in _publish_slots if s.conn is not None and not s.conn.is_closed))
 
 
 def _ensure_publish_channel():
-    """Reconnect the shared publish connection+channel if closed."""
-    global _publish_conn, _publish_ch
-    if _publish_conn is None or _publish_conn.is_closed:
-        _publish_conn = gt.get_rmq_connection_with_retry("p1-publish")
-        _publish_ch   = _publish_conn.channel()
-        setup_queues(_publish_ch)
-    elif _publish_ch is None or _publish_ch.is_closed:
-        _publish_ch = _publish_conn.channel()
-    return _publish_ch
+    """Open the first publisher connection at start-up so a broker problem is seen immediately."""
+    slot = _publish_slots[0]
+    with slot.sem:
+        return slot.channel()
 
 
 def publish_flow1_message(item_id: int = None, custom_data: str = None, counter: int = None) -> dict:
@@ -78,17 +133,7 @@ def publish_flow1_message(item_id: int = None, custom_data: str = None, counter:
         }],
     }
     body = json.dumps(payload, indent=2)
-    with _publish_sem:
-        ch = _ensure_publish_channel()
-        ch.basic_publish(
-            exchange="",
-            routing_key=QUEUE_FLOW1_P1_TO_P2,
-            body=body,
-            properties=pika.BasicProperties(
-                delivery_mode=pika.DeliveryMode.Persistent,
-                content_type="application/json",
-            ),
-        )
+    _publish(QUEUE_FLOW1_P1_TO_P2, body)
     gt.metrics_counter["flow1_published"] += 1
     log.info(f"[Flow 1] Published #{item_id} (counter={counter}, step={counter_step})")
     return payload
@@ -115,17 +160,7 @@ def publish_flow2_message(item_id: int = None, custom_data: str = None, value: f
         }],
     }
     body = json.dumps(payload, indent=2)
-    with _publish_sem:
-        ch = _ensure_publish_channel()
-        ch.basic_publish(
-            exchange="",
-            routing_key=QUEUE_FLOW2_P1_TO_P2,
-            body=body,
-            properties=pika.BasicProperties(
-                delivery_mode=pika.DeliveryMode.Persistent,
-                content_type="application/json",
-            ),
-        )
+    _publish(QUEUE_FLOW2_P1_TO_P2, body)
     gt.metrics_counter["flow2_published"] += 1
     log.info(f"[Flow 2] Published #{item_id} (value={value})")
     return payload
@@ -152,17 +187,7 @@ def publish_flow3_message(item_id: int = None, custom_data: str = None, remote_m
         }],
     }
     body = json.dumps(payload, indent=2)
-    with _publish_sem:
-        ch = _ensure_publish_channel()
-        ch.basic_publish(
-            exchange="",
-            routing_key=QUEUE_FLOW3_P1_TO_P5,
-            body=body,
-            properties=pika.BasicProperties(
-                delivery_mode=pika.DeliveryMode.Persistent,
-                content_type="application/json",
-            ),
-        )
+    _publish(QUEUE_FLOW3_P1_TO_P5, body)
     gt.metrics_counter["flow3_published"] += 1
     log.info(f"[Flow 3] Published #{item_id} to Remote Node 4 (metric={remote_metric})")
     return payload
@@ -172,7 +197,54 @@ def publish_flow3_message(item_id: int = None, custom_data: str = None, remote_m
 # HTTP Handler
 # ---------------------------------------------------------------------------
 class RestApiHandler(BaseHTTPRequestHandler):
+    # Socket timeout for every read/write on a connection: a client that stalls while sending headers or the body
+    # cannot hold one of the limited request slots (API_REQUEST_POOL_SIZE) forever.
+    timeout = API_REQUEST_TIMEOUT_S
+
+    def _fail(self, status: int, public_message: str, exc: Exception = None, **extra):
+        """Answer with a GENERIC error body. The exception goes to the log with a request id; the client gets only the
+        id, so a support request can be matched to the log line without leaking hosts, SQL, paths or library text.
+        API_EXPOSE_ERROR_DETAILS=true adds str(exc) (development only)."""
+        request_id = uuid.uuid4().hex[:12]
+        if exc is not None:
+            log.error(f"[http] {self.command} {self.path} -> {status} request_id={request_id}: "
+                      f"{type(exc).__name__}: {exc}", exc_info=status >= 500)
+        body = {"error": public_message, "request_id": request_id}
+        body.update(extra)
+        if API_EXPOSE_ERROR_DETAILS and exc is not None:
+            body["details"] = str(exc)
+        self._send_json(status, body)
+
+    def _read_json_body(self):
+        """Return (ok, data). On failure the error response has already been sent (ok is False).
+        Rejects a bad/negative/over-limit Content-Length BEFORE reading anything, and a non-object JSON body."""
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw_length)
+            if length < 0:
+                raise ValueError("negative")
+        except ValueError:
+            self._fail(400, "Invalid Content-Length")
+            return False, None
+        if length > API_MAX_BODY_BYTES:
+            # Do not read the body. Closing after the reply means a huge body is never pulled into memory.
+            self.close_connection = True
+            self._fail(413, "Request body too large", max_bytes=API_MAX_BODY_BYTES)
+            return False, None
+        if length == 0:
+            return True, {}
+        try:
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception as e:
+            self._fail(400, "Invalid JSON", e)
+            return False, None
+        if not isinstance(data, dict):
+            self._fail(400, "JSON body must be an object")
+            return False, None
+        return True, data
+
     def _send_json(self, status: int, data: dict):
+        gt.metrics_counter[f"http_{status // 100}xx"] += 1
         body = json.dumps(data, indent=2).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -193,21 +265,20 @@ class RestApiHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path.rstrip("/")
         if path in ("", "/health"):
+            # LIVENESS - what HAProxy probes every 3 s. It must answer from local state only: no ZooKeeper, RabbitMQ,
+            # MariaDB or Swift call, because any of those can block longer than the probe timeout, and a dependency
+            # outage would then take every healthy API node out of the pool. Dependency state: /ready, /zk/health.
             self._send_json(200, {
                 "status": "healthy",
                 "service": "Process 1 REST API Producer",
                 "node": NODE_NAME,
                 "greenthreads": gt.list_greenthreads(),
                 "metrics": gt.metrics_snapshot(),
-                "zk_config": _config_watcher.get_all() if _config_watcher else {},
-                "zk_registered_workers": {
-                    p: zklib.list_registered(p)
-                    for p in ("process1", "process2", "process3", "process4", "process5")
-                },
                 "endpoints": {
-                    "GET /health":       "Health + greenthread status + ZK pipeline state",
+                    "GET /health":       "Liveness: this process answers (local state only; used by HAProxy)",
+                    "GET /ready":        "Readiness: RabbitMQ publisher connection and ZooKeeper state as last seen (no network call)",
                     "GET /gt/status":    "Greenthread pool status",
-                    "GET /zk/health":    "Full ZooKeeper pipeline health tree",
+                    "GET /zk/health":    "ZooKeeper pipeline health tree and registered workers (calls ZooKeeper)",
                     "GET /zk/config":    "Current live runtime config from ZK",
                     "GET /swift/status": "Swift object storage connection and container status",
                     "GET /swift/objects": "List stored objects in Swift (?prefix=...&limit=...)",
@@ -220,6 +291,24 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 },
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
+        elif path == "/ready":
+            # READINESS from state this process already holds - still no network call, so it cannot hang.
+            # RabbitMQ decides it: without a publisher connection no request can succeed. ZooKeeper is reported but
+            # does not fail it: publishing works without ZooKeeper (runtime config falls back to defaults).
+            open_slots = sum(1 for s in _publish_slots if s.conn is not None and not s.conn.is_closed)
+            zk_state = zklib.connection_state()
+            ready = open_slots > 0 and not gt.is_stopping()
+            self._send_json(200 if ready else 503, {
+                "status": "ready" if ready else "not_ready",
+                "node": NODE_NAME,
+                "checks": {
+                    "rabbitmq_publisher_connections": {"open": open_slots, "configured": len(_publish_slots), "required": 1},
+                    "zookeeper": {"state": zk_state, "required": False},
+                    "stopping": gt.is_stopping(),
+                },
+                "note": "Connections are re-opened on the next publish, so an idle node can report not_ready after a "
+                        "broker restart until a request arrives.",
+            })
         elif path == "/gt/status":
             self._send_json(200, {
                 "active_greenthreads": gt.list_greenthreads(),
@@ -230,6 +319,10 @@ class RestApiHandler(BaseHTTPRequestHandler):
         elif path == "/zk/health":
             self._send_json(200, {
                 "pipeline_health": zklib.get_pipeline_health(),
+                "registered_workers": {
+                    p: zklib.list_registered(p)
+                    for p in ("process1", "process2", "process3", "process4", "process5")
+                },
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
         elif path == "/zk/config":
@@ -237,11 +330,25 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 "zk_config": _config_watcher.get_all() if _config_watcher else {},
             })
         elif path == "/swift/status":
-            self._send_json(200, swift_storage.get_swift_status())
+            status = swift_storage.get_swift_status()
+            if status.get("status") == "error":
+                # keep the raw exception text (hosts, library messages) out of the response; it goes to the log
+                log.warning(f"[http] /swift/status: object store error: {status.get('error')}")
+                if not API_EXPOSE_ERROR_DETAILS:
+                    status = {k: v for k, v in status.items() if k not in ("error", "auth_url")}
+                    status["error"] = "Object store unreachable (see server log)"
+            self._send_json(200, status)
         elif path == "/swift/objects":
             query = parse_qs(urlparse(self.path).query)
             prefix = query.get("prefix", [None])[0]
-            limit = int(query.get("limit", [100])[0])
+            try:
+                limit = int(query.get("limit", [100])[0])
+            except ValueError:
+                self._fail(400, "'limit' must be a whole number")
+                return
+            if not 1 <= limit <= API_MAX_LIST_LIMIT:
+                self._fail(400, f"'limit' must be between 1 and {API_MAX_LIST_LIMIT}", max_limit=API_MAX_LIST_LIMIT)
+                return
             ok, objs, err = swift_storage.list_message_objects(prefix=prefix, limit=limit)
             if ok:
                 self._send_json(200, {
@@ -251,7 +358,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     "objects": objs,
                 })
             else:
-                self._send_json(502, {"status": "error", "error": err})
+                self._fail(502, "Object store request failed", RuntimeError(err))
         elif path.startswith("/swift/object/"):
             obj_name = path[len("/swift/object/"):]
             if not obj_name:
@@ -266,24 +373,34 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     "swift_headers": headers,
                 })
             else:
-                self._send_json(404, {
-                    "status": "error",
-                    "object_name": obj_name,
-                    "details": headers,
-                })
+                self._fail(404, "Object not found or object store unavailable", RuntimeError(str(headers)),
+                           object_name=obj_name)
         else:
-            self._send_json(404, {"error": "Not Found", "path": self.path})
+            self._send_json(404, {"error": "Not Found"})
+
+    def _caller_identity(self):
+        """Certificate CN of the caller (see authz.resolve_identity), or None."""
+        getpeercert = getattr(self.connection, "getpeercert", None)
+        peer = getpeercert() if getpeercert else None
+        return authz.resolve_identity(peer, self.headers.get("X-SSL-Client-CN"), _ADMIN_PROXY_CNS)
+
+    def _require_admin(self) -> bool:
+        """True if the caller may change runtime configuration; otherwise answers 403 and returns False."""
+        identity = self._caller_identity()
+        allowed, why = authz.admin_decision(identity, TLS_API_ENABLED, _ADMIN_ALLOWED_CNS, ALLOW_UNAUTHENTICATED_ADMIN)
+        if allowed:
+            log.info(f"[authz] admin action {self.command} {self.path} by '{identity}' — {why}")
+            return True
+        log.warning(f"[authz] DENIED {self.command} {self.path} from {self.address_string()} "
+                    f"(identity={identity!r}) — {why}")
+        self._send_json(403, {"error": "Forbidden"})
+        return False
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
-        content_length = int(self.headers.get("Content-Length", 0))
-        post_data = {}
-        if content_length > 0:
-            try:
-                post_data = json.loads(self.rfile.read(content_length).decode())
-            except Exception as e:
-                self._send_json(400, {"error": "Invalid JSON", "details": str(e)})
-                return
+        ok, post_data = self._read_json_body()
+        if not ok:
+            return
         try:
             if path == "/api/flow1":
                 item_id = int(post_data["item_id"]) if "item_id" in post_data else None
@@ -308,6 +425,9 @@ class RestApiHandler(BaseHTTPRequestHandler):
 
             elif path == "/api/batch":
                 count = int(post_data.get("count", 3))
+                if not 1 <= count <= API_MAX_BATCH_COUNT:
+                    self._fail(400, f"'count' must be between 1 and {API_MAX_BATCH_COUNT}", max_count=API_MAX_BATCH_COUNT)
+                    return
                 # Spawn each publish as its own greenthread — true concurrent publishing
                 gts = []
                 results1, results2 = [], []
@@ -321,6 +441,8 @@ class RestApiHandler(BaseHTTPRequestHandler):
                                       "flow1_messages": results1, "flow2_messages": results2})
 
             elif path == "/zk/config":
+                if not self._require_admin():
+                    return
                 key, value = post_data.get("key"), post_data.get("value")
                 if not key or value is None:
                     self._send_json(400, {"error": "Both 'key' and 'value' are required."})
@@ -330,12 +452,14 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     self._send_json(200, {"status": "ok", "key": key, "value": value,
                                           "note": "Propagates to all watchers within seconds."})
                 else:
-                    self._send_json(400, {"error": f"Unknown config key: {key}"})
+                    self._fail(400, "Unknown config key")
             else:
-                self._send_json(404, {"error": "Not Found", "path": self.path})
+                self._send_json(404, {"error": "Not Found"})
+        except (ValueError, TypeError) as e:
+            # int()/float() on a client-supplied value, e.g. {"item_id": "abc"}: the client's mistake, not a server fault
+            self._fail(400, "Invalid field value: item_id, counter, value, remote_metric and count must be numbers", e)
         except Exception as e:
-            log.error(f"POST {path} error: {e}", exc_info=True)
-            self._send_json(500, {"error": "Internal Server Error", "details": str(e)})
+            self._fail(500, "Internal Server Error", e)
 
     def log_message(self, fmt, *args):
         log.info(f"[http] {self.address_string()} — {fmt % args}")
@@ -344,6 +468,28 @@ class RestApiHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 # Greenthread workers
 # ---------------------------------------------------------------------------
+
+TLS_HANDSHAKE_TIMEOUT_S = 10.0
+
+
+def _process_request_tls(httpd, plain_process_request, sock, addr):
+    """Wrap an accepted socket in TLS (server side) and serve it. Runs in the request's own greenthread.
+
+    A failed handshake - no/untrusted/revoked client certificate, wrong protocol version, a plain-HTTP client,
+    a client that stalls - is logged at WARNING and the connection is closed; nothing reaches the handler."""
+    try:
+        sock.settimeout(TLS_HANDSHAKE_TIMEOUT_S)
+        tsock = httpd.tls_context.wrap_socket(sock, server_side=True)
+        tsock.settimeout(None)
+    except Exception as e:
+        log.warning(f"[tls] {addr[0]}:{addr[1]} handshake refused — {type(e).__name__}: {e}")
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return
+    plain_process_request(tsock, addr)
+
 
 def _gt_rmq_heartbeat():
     """
@@ -354,8 +500,10 @@ def _gt_rmq_heartbeat():
     """
     while not gt.is_stopping():
         try:
-            if _publish_conn and not _publish_conn.is_closed:
-                _publish_conn.process_data_events(time_limit=0)
+            for slot in _publish_slots:
+                with slot.sem:                      # never run on a connection that a publish is using
+                    if slot.conn and not slot.conn.is_closed:
+                        slot.conn.process_data_events(time_limit=0)
         except Exception as e:
             log.error(f"heartbeat error: {e}", exc_info=True)
         gt.sleep(30)
@@ -381,10 +529,21 @@ def _gt_http_server():
     httpd = HTTPServer((API_HOST, API_BACKEND_PORT), RestApiHandler, bind_and_activate=False)
     # Use GreenPool to handle each request in its own greenthread
     httpd.socket = eventlet.listen((API_HOST, API_BACKEND_PORT), backlog=API_LISTEN_BACKLOG)
+    scheme = "http"
+    if TLS_API_ENABLED:
+        # Fail closed: a bad certificate/key raises TLSConfigError and the server does not start in plaintext.
+        # The TLS handshake is done per connection inside the request greenthread (_process_request_tls), so a
+        # slow or hostile client cannot block the accept loop.
+        from src.tls.tls import server_context
+        httpd.tls_context = server_context()
+        _plain = httpd.process_request            # the original bound method: handles one request, then closes
+        httpd.process_request = lambda s, a: _process_request_tls(httpd, _plain, s, a)
+        scheme = "https"
     pool_size = API_REQUEST_POOL_SIZE or gt.GT_WORKER_CONCURRENCY * 10
     pool = eventlet.GreenPool(size=pool_size)
-    log.info(f"HTTP server listening on {API_HOST}:{API_BACKEND_PORT} "
-             f"(GreenPool size={pool_size}, listen backlog={API_LISTEN_BACKLOG})")
+    log.info(f"{scheme.upper()} server listening on {API_HOST}:{API_BACKEND_PORT} "
+             f"(GreenPool size={pool_size}, listen backlog={API_LISTEN_BACKLOG}"
+             + (f", client certificates: {TLS_API_CLIENT_AUTH}" if TLS_API_ENABLED else "") + ")")
     try:
         while not gt.is_stopping():
             try:
@@ -428,8 +587,12 @@ def _run_api_server():
     # Wait for shutdown signal then stop all greenthreads
     gt.stop_event.wait()
     log.info("Shutdown signal — stopping all greenthreads...")
-    if _publish_conn and not _publish_conn.is_closed:
-        _publish_conn.close()
+    for slot in _publish_slots:
+        try:
+            if slot.conn and not slot.conn.is_closed:
+                slot.conn.close()
+        except Exception as e:
+            log.warning(f"closing publisher connection {slot.index}: {e}")
     gt.wait_all()
 
 
@@ -437,6 +600,7 @@ def main():
     global _config_watcher
 
     log.info(f"Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
+    metrics.start("process1")
 
     # ZooKeeper: connect, register, config watch
     try:

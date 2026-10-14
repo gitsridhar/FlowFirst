@@ -2,6 +2,7 @@ import json
 import time
 import pymysql
 from pymysql.cursors import DictCursor
+from src.tls.tls import mysql_ssl
 from src.config.config import (
     MARIADB_HOST,
     MARIADB_PORT,
@@ -42,6 +43,7 @@ def get_db_connection(max_retries: int = 3, retry_delay: float = 1.0):
                     cursorclass=DictCursor,
                     autocommit=True,
                     connect_timeout=3,
+                    ssl=mysql_ssl(),
                 )
                 return conn
             except Exception as e:
@@ -60,6 +62,7 @@ def init_database():
         password=MARIADB_PASSWORD,
         autocommit=True,
         connect_timeout=5,
+        ssl=mysql_ssl(),
     )
     try:
         with conn.cursor() as cursor:

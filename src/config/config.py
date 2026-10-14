@@ -58,6 +58,42 @@ def _str_env(name: str, default: str) -> str:
 # Re-read VIP and hosts with the guarded reader
 FLOWFIRST_VIP = _str_env("FLOWFIRST_VIP", NODE1_IP)
 
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = _str_env(name, "true" if default else "false").lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+# TLS settings (security/ creates the certificates; src/tls/tls.py builds the contexts).
+# Every switch defaults to off so that nothing changes until it is turned on. When a switch is on and a
+# file is missing or unreadable the process refuses to start: it never falls back to plaintext.
+TLS_DIR            = _str_env("TLS_DIR", "/etc/flowfirst/tls")
+TLS_CA_FILE        = _str_env("TLS_CA_FILE", f"{TLS_DIR}/ca.crt")
+TLS_CRL_FILE       = _str_env("TLS_CRL_FILE", "")      # blank = no revocation check
+TLS_CLIENT_CERT    = _str_env("TLS_CLIENT_CERT", f"{TLS_DIR}/pipeline/pipeline.crt")   # identity of Processes 1-5
+TLS_CLIENT_KEY     = _str_env("TLS_CLIENT_KEY", f"{TLS_DIR}/pipeline/pipeline.key")
+TLS_MIN_VERSION    = _str_env("TLS_MIN_VERSION", "1.2")                                # 1.2 or 1.3
+TLS_CIPHERS        = os.getenv("TLS_CIPHERS", "ECDHE+AESGCM:ECDHE+CHACHA20").strip()   # TLS 1.2 suites; blank = library default
+TLS_API_ENABLED       = _bool_env("TLS_API_ENABLED")          # Process 1 serves HTTPS
+TLS_API_CERT          = _str_env("TLS_API_CERT", f"{TLS_DIR}/api/api.crt")
+TLS_API_KEY           = _str_env("TLS_API_KEY", f"{TLS_DIR}/api/api.key")
+TLS_API_CLIENT_AUTH   = _str_env("TLS_API_CLIENT_AUTH", "required").lower()   # required | optional | none
+TLS_RABBITMQ_ENABLED  = _bool_env("TLS_RABBITMQ_ENABLED")
+TLS_MARIADB_ENABLED   = _bool_env("TLS_MARIADB_ENABLED")
+TLS_ZK_ENABLED        = _bool_env("TLS_ZK_ENABLED")
+TLS_SWIFT_ENABLED     = _bool_env("TLS_SWIFT_ENABLED")
+
+# Authorisation for admin actions (POST /zk/config changes runtime behaviour of the whole cluster).
+# ADMIN_ALLOWED_CNS: comma-separated certificate Common Names allowed to do that (e.g. "admin-client"). Blank = nobody.
+# ADMIN_TRUSTED_PROXY_CNS: CNs of the HAProxy backend identity; only these may forward a caller identity in
+#   X-SSL-Client-CN (HAProxy sets it from the verified client certificate and deletes any client-supplied copy).
+# ALLOW_UNAUTHENTICATED_ADMIN: dev-only escape hatch for setups WITHOUT TLS (there is no caller identity to check).
+ADMIN_ALLOWED_CNS             = _str_env("ADMIN_ALLOWED_CNS", "")
+ADMIN_TRUSTED_PROXY_CNS       = _str_env("ADMIN_TRUSTED_PROXY_CNS", "")
+ALLOW_UNAUTHENTICATED_ADMIN   = _bool_env("ALLOW_UNAUTHENTICATED_ADMIN")
+RABBITMQ_TLS_PORT     = _int_env("RABBITMQ_TLS_PORT", 5671)
+ZK_TLS_CLIENT_PORT    = _int_env("ZK_TLS_CLIENT_PORT", 2281)
+
 # Process 1 REST API Settings
 # Process 1 listens on API_BACKEND_PORT (8082). HAProxy frontend listens on API_PORT (8080).
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
@@ -70,6 +106,30 @@ API_BACKEND_PORT = _int_env("API_BACKEND_PORT", 8082)
 API_REQUEST_POOL_SIZE = max(0, _int_env("API_REQUEST_POOL_SIZE", 0))
 API_LISTEN_BACKLOG = max(1, _int_env("API_LISTEN_BACKLOG", 50))
 
+# Request limits (Process 1). Anything above a limit is refused, never silently truncated.
+#   API_MAX_BODY_BYTES: largest accepted POST body (HTTP 413 above it).  API_MAX_BATCH_COUNT: largest "count" for POST /api/batch.
+#   API_MAX_LIST_LIMIT: largest "limit" for GET /swift/objects.  API_REQUEST_TIMEOUT_S: socket timeout per connection, so a
+#   client that stalls while sending headers or the body cannot hold a request slot forever.
+#   API_EXPOSE_ERROR_DETAILS=true puts exception text in error responses - leave it false anywhere real users connect.
+API_MAX_BODY_BYTES      = max(1024, _int_env("API_MAX_BODY_BYTES", 1048576))
+API_MAX_BATCH_COUNT     = max(1, _int_env("API_MAX_BATCH_COUNT", 100))
+API_MAX_LIST_LIMIT      = max(1, _int_env("API_MAX_LIST_LIMIT", 1000))
+API_REQUEST_TIMEOUT_S   = max(1, _int_env("API_REQUEST_TIMEOUT_S", 30))
+API_EXPOSE_ERROR_DETAILS = _bool_env("API_EXPOSE_ERROR_DETAILS")
+
+# Process 1 publisher connections. Publisher confirms (chunk "message safety") make every publish wait for the broker, so
+# ONE shared connection caps Process 1 at roughly 1/RTT messages per second. Several connections publish in parallel.
+# Each connection is used by one greenthread at a time (its own semaphore). 1 reproduces the previous single-connection design.
+# Measured on one RabbitMQ container (illustrative, see ReadMe): 1 -> ~1.3k msg/s, 4 -> ~2.6k, 8 -> ~4.3k at 100 concurrent callers.
+API_PUBLISH_CONNECTIONS = max(1, min(32, _int_env("API_PUBLISH_CONNECTIONS", 4)))
+# Monitoring (src/metrics/metrics.py). Off by default. When on, each process serves GET /metrics (Prometheus text
+# format) on METRICS_PORT_BASE + its number: process1 -> 9101 ... process5 -> 9105. It is NOT behind HAProxy, so
+# Prometheus scrapes every node directly. With TLS_API_ENABLED=true it uses the API certificate and TLS_API_CLIENT_AUTH.
+# METRICS_HOST: bind address. Use the node's own IP (or 127.0.0.1 with a local agent) instead of 0.0.0.0 where you can.
+METRICS_ENABLED   = _bool_env("METRICS_ENABLED")
+METRICS_HOST      = _str_env("METRICS_HOST", "0.0.0.0")
+METRICS_PORT_BASE = max(1024, min(65530, _int_env("METRICS_PORT_BASE", 9100)))
+
 # RabbitMQ Connection Settings
 RABBITMQ_PORT = _int_env("RABBITMQ_PORT", 5672)
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", FLOWFIRST_VIP)
@@ -77,11 +137,13 @@ RABBITMQ_USER = os.getenv("RABBITMQ_USER", "flowuser")
 RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "flowpassword")
 
 # Build RabbitMQ host list from NODE1_IP..NODE3_IP or RABBITMQ_HOSTS env
+# (with TLS on, the brokers are reached on RABBITMQ_TLS_PORT)
 _raw_rmq_hosts = os.getenv("RABBITMQ_HOSTS", "").strip()
+_rmq_port = RABBITMQ_TLS_PORT if TLS_RABBITMQ_ENABLED else RABBITMQ_PORT
 if _raw_rmq_hosts:
     RABBITMQ_HOSTS = _raw_rmq_hosts
 else:
-    RABBITMQ_HOSTS = f"{NODE1_IP}:{RABBITMQ_PORT},{NODE2_IP}:{RABBITMQ_PORT},{NODE3_IP}:{RABBITMQ_PORT}"
+    RABBITMQ_HOSTS = f"{NODE1_IP}:{_rmq_port},{NODE2_IP}:{_rmq_port},{NODE3_IP}:{_rmq_port}"
 
 # MariaDB Connection Settings
 MARIADB_PORT = _int_env("MARIADB_PORT", 3306)
@@ -100,12 +162,59 @@ else:
 # Swift Object Storage Connection Settings
 # Swift is a native 3-node cluster (swift/setup_swift.sh) behind HAProxy on the VIP
 SWIFT_LB_PORT = _int_env("SWIFT_LB_PORT", 8090)
-SWIFT_AUTH_URL = _str_env("SWIFT_AUTH_URL", f"http://{FLOWFIRST_VIP}:{SWIFT_LB_PORT}/auth/v1.0")
+SWIFT_AUTH_URL = _str_env("SWIFT_AUTH_URL", f"{'https' if TLS_SWIFT_ENABLED else 'http'}://{FLOWFIRST_VIP}:{SWIFT_LB_PORT}/auth/v1.0")
 SWIFT_AUTH_VERSION = os.getenv("SWIFT_AUTH_VERSION", "1.0")
 SWIFT_USER = os.getenv("SWIFT_USER", "test:tester")
 SWIFT_KEY = os.getenv("SWIFT_KEY", "testing")
 SWIFT_CONTAINER = os.getenv("SWIFT_CONTAINER", "flowfirst_messages")
 SWIFT_ENABLED = os.getenv("SWIFT_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on")
+
+
+# ---------------------------------------------------------------------------
+# Secret hygiene - fail closed.
+# The sample values that ship in documentation and in .env.example are public. A process that would start with one of
+# them (or with an empty / short secret) refuses to start instead, naming the variable but never printing its value.
+# ALLOW_DEFAULT_SECRETS=true is the single, explicit opt-out for a throw-away local/dev setup (it logs a warning).
+# ---------------------------------------------------------------------------
+SECRET_MIN_LENGTH      = max(8, _int_env("SECRET_MIN_LENGTH", 12))
+ALLOW_DEFAULT_SECRETS  = _bool_env("ALLOW_DEFAULT_SECRETS")
+_KNOWN_WEAK_SECRETS = frozenset({
+    "flowpassword", "testing", "admin123", "admin", "guest", "password", "passw0rd", "secret", "root", "test",
+    "changeme", "change-me", "changeit", "12345678", "123456789012",
+})
+
+
+def weak_secret_reason(value) -> str:
+    """Return why a secret is unacceptable, or '' when it is fine. Never includes the secret itself."""
+    text = (value or "").strip()
+    if not text:
+        return "is empty"
+    if text.lower() in _KNOWN_WEAK_SECRETS or text.lower().startswith("changeme"):
+        return "is a well-known sample/default value"
+    if len(text) < SECRET_MIN_LENGTH:
+        return "is shorter than %d characters" % SECRET_MIN_LENGTH
+    return ""
+
+
+def check_secrets() -> None:
+    """Raise RuntimeError if a required secret is a default, empty or short. Called once when this module loads."""
+    secrets = {"RABBITMQ_PASSWORD": RABBITMQ_PASSWORD, "MARIADB_PASSWORD": MARIADB_PASSWORD}
+    if SWIFT_ENABLED:
+        secrets["SWIFT_KEY"] = SWIFT_KEY
+    problems = ["%s %s" % (name, why) for name, value in secrets.items() if (why := weak_secret_reason(value))]
+    if not problems:
+        return
+    if ALLOW_DEFAULT_SECRETS:
+        import logging
+        logging.getLogger("flowfirst.config").warning(
+            "ALLOW_DEFAULT_SECRETS=true: running with weak secrets (%s). NEVER use this in production.", "; ".join(problems))
+        return
+    raise RuntimeError(
+        "Refusing to start with weak secrets: " + "; ".join(problems) + ". Set strong values in .env "
+        "(generate with: ./scripts/generate_secrets.sh), or set ALLOW_DEFAULT_SECRETS=true for a local dev setup only.")
+
+
+check_secrets()
 
 # Flow 1 Queues
 # Flow 1: P1 -> [flow1_p1_to_p2] -> P2 -> (reflects modified) -> [flow1_p2_to_p3] -> P3 -> [flow1_p3_to_p4] -> P4 (persists to MariaDB)
@@ -137,12 +246,19 @@ GT_PREFETCH_COUNT      = max(1, _int_env("GT_PREFETCH_COUNT", 1))
 # ZooKeeper connection settings
 ZK_CLIENT_PORT    = _int_env("ZK_CLIENT_PORT", 2181)
 _raw_zk_hosts     = _str_env("ZK_HOSTS", "")
+_zk_port          = ZK_TLS_CLIENT_PORT if TLS_ZK_ENABLED else ZK_CLIENT_PORT
 if _raw_zk_hosts:
     ZK_HOSTS = _raw_zk_hosts
 else:
-    ZK_HOSTS = f"{NODE1_IP}:{ZK_CLIENT_PORT},{NODE2_IP}:{ZK_CLIENT_PORT},{NODE3_IP}:{ZK_CLIENT_PORT}"
+    ZK_HOSTS = f"{NODE1_IP}:{_zk_port},{NODE2_IP}:{_zk_port},{NODE3_IP}:{_zk_port}"
 ZK_TIMEOUT        = float(os.getenv("ZK_TIMEOUT", "10"))
 ZK_DEDUP_TTL_MS   = int(os.getenv("ZK_DEDUP_TTL_MS", "300000"))
+
+# Dead-letter handling: a message a consumer rejects (nack, requeue=False) is routed by the policy
+# "flowfirst-dlx" to this fanout exchange and kept in QUEUE_DEAD_LETTERS instead of being discarded.
+# Not part of ALL_QUEUES: no pipeline process consumes it. See scripts/replay_dead_letters.py.
+DLX_EXCHANGE        = "flowfirst.dlx"
+QUEUE_DEAD_LETTERS  = "flowfirst_dead_letters"
 
 ALL_QUEUES = [
     QUEUE_FLOW1_P1_TO_P2,
@@ -169,14 +285,20 @@ def get_connection():
     """
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
 
+    ssl_options = None
+    if TLS_RABBITMQ_ENABLED:
+        from src.tls.tls import client_context        # imported here: tls.py imports this module
+        ssl_options = pika.SSLOptions(client_context("rabbitmq"))   # server_hostname defaults to the host being dialled
+
     # If hosts are supplied, try them in order (pika picks the first reachable one)
     if RABBITMQ_HOSTS:
         hosts = [h.strip() for h in RABBITMQ_HOSTS.split(",") if h.strip()]
         params_list = [
             pika.ConnectionParameters(
                 host=h.split(":")[0],
-                port=int(h.split(":")[1]) if ":" in h else RABBITMQ_PORT,
+                port=int(h.split(":")[1]) if ":" in h else _rmq_port,
                 credentials=credentials,
+                ssl_options=ssl_options,
                 heartbeat=60,
                 blocked_connection_timeout=300,
             )
@@ -193,17 +315,30 @@ def get_connection():
 
     parameters = pika.ConnectionParameters(
         host=RABBITMQ_HOST,
-        port=RABBITMQ_PORT,
+        port=_rmq_port,
         credentials=credentials,
+        ssl_options=ssl_options,
         heartbeat=60,
         blocked_connection_timeout=300,
     )
     conn = pika.BlockingConnection(parameters)
-    conn._connected_to = f"{RABBITMQ_HOST}:{RABBITMQ_PORT}"
+    conn._connected_to = f"{RABBITMQ_HOST}:{_rmq_port}"
     return conn
 
 
 def setup_queues(channel):
-    """Declare all queues as durable."""
+    """Declare all queues as durable, plus the dead-letter exchange and queue.
+
+    The pipeline queues are declared WITHOUT dead-letter arguments on purpose: changing the arguments of an existing
+    queue makes RabbitMQ refuse the declaration (PRECONDITION_FAILED). The dead-letter exchange is attached to them by
+    a policy instead (scripts/setup_rabbitmq_dlx.sh), which is safe on a running cluster. Only NEW objects are declared
+    here, so this stays idempotent whether or not the policy exists yet."""
+    # Publisher confirms: basic_publish() now blocks until the broker has accepted (and, for persistent messages on
+    # quorum/mirrored queues, replicated) the message, and RAISES pika.exceptions.NackError / UnroutableError otherwise.
+    # Callers therefore never acknowledge an input or answer 200 for a message the broker did not take.
+    channel.confirm_delivery()
     for queue_name in ALL_QUEUES:
         channel.queue_declare(queue=queue_name, durable=True)
+    channel.exchange_declare(exchange=DLX_EXCHANGE, exchange_type="fanout", durable=True)
+    channel.queue_declare(queue=QUEUE_DEAD_LETTERS, durable=True)
+    channel.queue_bind(queue=QUEUE_DEAD_LETTERS, exchange=DLX_EXCHANGE)

@@ -19,6 +19,20 @@ echo "=================================================================="
 echo " Installing RabbitMQ Server & Erlang on RHEL 9.6"
 echo "=================================================================="
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${ROOT_DIR}/.env"
+    set +a
+fi
+# The pipeline user gets RABBITMQ_USER / RABBITMQ_PASSWORD from .env. Refuse the sample password before installing anything.
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/secrets_lib.sh"
+RABBITMQ_USER="${RABBITMQ_USER:-flowuser}"
+require_strong_secret RABBITMQ_PASSWORD "${RABBITMQ_PASSWORD:-}"
+
 # ---------------------------------------------------------------------------
 # Pre-flight: clock synchronisation check
 # RabbitMQ cluster nodes MUST have synchronised system clocks.
@@ -211,7 +225,7 @@ fi
 # 4. Partition handling, management plugin and service start
 #    pause_minority: a node that can no longer see a majority of the cluster
 #    pauses itself (closes AMQP listeners) and resumes automatically when the
-#    network heals. Clients fail over to the majority side via config.py's
+#    network heals. Clients fail over to the majority side via src/config/config.py's
 #    multi-host list. Without this, RabbitMQ defaults to 'ignore' (split-brain
 #    until an operator restarts one side).
 # ---------------------------------------------------------------------------
@@ -232,13 +246,13 @@ sudo systemctl enable --now rabbitmq-server
 # 5. Configure FlowFirst pipeline user
 # ---------------------------------------------------------------------------
 echo "[5/5] Configuring FlowFirst pipeline user ..."
-if ! sudo rabbitmqctl list_users 2>/dev/null | grep -q "^flowuser"; then
-    sudo rabbitmqctl add_user flowuser flowpassword || true
-    sudo rabbitmqctl set_user_tags flowuser administrator || true
-    sudo rabbitmqctl set_permissions -p / flowuser ".*" ".*" ".*" || true
-    echo "  Created user: flowuser"
+if ! sudo rabbitmqctl list_users 2>/dev/null | grep -q "^${RABBITMQ_USER}[[:space:]]"; then
+    sudo rabbitmqctl add_user "${RABBITMQ_USER}" "${RABBITMQ_PASSWORD}" || true
+    sudo rabbitmqctl set_user_tags "${RABBITMQ_USER}" administrator || true
+    sudo rabbitmqctl set_permissions -p / "${RABBITMQ_USER}" ".*" ".*" ".*" || true
+    echo "  Created user: ${RABBITMQ_USER}"
 else
-    echo "  User flowuser already exists — skipping."
+    echo "  User ${RABBITMQ_USER} already exists — skipping (its password is NOT changed; use rabbitmqctl change_password)."
 fi
 
 echo ""
@@ -251,7 +265,7 @@ echo " Cluster Bus Port    :  25672"
 echo " Partition handling  :  pause_minority (${RMQ_CONF})"
 echo " Management Web UI   :  http://<node-ip>:15672"
 echo "   Default login     :  guest / guest"
-echo "   Pipeline login    :  flowuser / flowpassword"
+echo "   Pipeline login    :  ${RABBITMQ_USER} / (RABBITMQ_PASSWORD from .env)"
 echo ""
 echo " Service status:"
 sudo systemctl status rabbitmq-server --no-pager -l

@@ -19,6 +19,7 @@ from src.config.config import (
     GT_PREFETCH_COUNT,
     GT_CONSUMERS_PER_QUEUE,
 )
+from src.metrics import metrics
 from src.zookeeper import zk as zklib
 
 # ZooKeeper config watcher — hot-reloads thresholds and scale factors
@@ -53,6 +54,7 @@ def handle_flow1_message(ch, method, properties, body):
 
         ch.basic_publish(
             exchange="",
+            mandatory=True,
             routing_key=QUEUE_FLOW1_P2_TO_P3,
             body=json.dumps(data, indent=2),
             properties=pika.BasicProperties(
@@ -66,6 +68,7 @@ def handle_flow1_message(ch, method, properties, body):
         gt.sleep(0)   # yield — let other greenthreads run
     except Exception as e:
         log.error(f"[Flow 1] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow1_failed"] += 1
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -95,6 +98,7 @@ def handle_flow2_message(ch, method, properties, body):
 
         ch.basic_publish(
             exchange="",
+            mandatory=True,
             routing_key=QUEUE_FLOW2_P2_TO_P3,
             body=json.dumps(data, indent=2),
             properties=pika.BasicProperties(
@@ -108,6 +112,7 @@ def handle_flow2_message(ch, method, properties, body):
         gt.sleep(0)   # yield
     except Exception as e:
         log.error(f"[Flow 2] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow2_failed"] += 1
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -134,6 +139,7 @@ def handle_flow3_message(ch, method, properties, body):
 
         ch.basic_publish(
             exchange="",
+            mandatory=True,
             routing_key=QUEUE_FLOW3_P2_TO_P4,
             body=json.dumps(data, indent=2),
             properties=pika.BasicProperties(
@@ -147,6 +153,7 @@ def handle_flow3_message(ch, method, properties, body):
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 3] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow3_failed"] += 1
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -254,6 +261,7 @@ def main():
     global _config_watcher
 
     log.info(f"Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
+    metrics.start("process2")
 
     # ZooKeeper: connect, register, config watch
     try:

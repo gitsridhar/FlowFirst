@@ -15,6 +15,7 @@ from src.config.config import (
     GT_PREFETCH_COUNT,
     GT_CONSUMERS_PER_QUEUE,
 )
+from src.metrics import metrics
 from src.zookeeper import zk as zklib
 
 _config_watcher = None
@@ -51,6 +52,7 @@ def handle_flow3_message(ch, method, properties, body):
 
         ch.basic_publish(
             exchange="",
+            mandatory=True,
             routing_key=QUEUE_FLOW3_P5_TO_P2,
             body=json.dumps(data, indent=2),
             properties=pika.BasicProperties(
@@ -64,6 +66,7 @@ def handle_flow3_message(ch, method, properties, body):
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Remote Node] Error handling flow3 message: {e}", exc_info=True)
+        gt.metrics_counter["flow3_failed"] += 1
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -115,6 +118,7 @@ def _consume():
 def main():
     global _config_watcher
     log.info(f"[Remote Node] Starting Process 5 on {NODE_NAME} (pool={gt.GT_POOL_SIZE}) ...")
+    metrics.start("process5")
 
     try:
         zklib.register_service("process5", NODE_NAME)

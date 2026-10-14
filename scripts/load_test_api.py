@@ -29,6 +29,7 @@ import json
 import os
 import random
 import re
+import ssl
 import sys
 import time
 import urllib.error
@@ -73,16 +74,41 @@ def _bool(text):
     return str(text).strip().lower() in ("1", "true", "yes", "on")
 
 
+def make_ssl_context(args):
+    """Client TLS context for an https:// target, or None for http://.
+
+    Verifies the server against --cacert (default TLS_CA_FILE / TLS_DIR/ca.crt) and, when a client certificate is
+    given (--cert/--key, default the node's pipeline identity), presents it - needed when the API uses mutual TLS.
+    Never disables verification; there is deliberately no --insecure."""
+    if not args.use_tls:
+        return None
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)          # checks the server certificate AND its host name
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_verify_locations(cafile=args.cacert)
+    if args.cert:
+        ctx.load_cert_chain(certfile=args.cert, keyfile=args.key or None)
+    return ctx
+
+
 def parse_args():
     here = os.path.dirname(os.path.abspath(__file__))
     for candidate in (os.path.join(here, "..", ".env"), "/opt/flowfirst/.env"):
         _load_env_file(candidate)
 
     vip = _env("FLOWFIRST_VIP", "127.0.0.1")
+    scheme = "https" if _bool(_env("TLS_API_ENABLED", "false")) else "http"
+    tls_dir = _env("TLS_DIR", "/etc/flowfirst/tls")
     ap = argparse.ArgumentParser(
         description="FlowFirst REST API load generator. Defaults come from LOAD_* variables in .env.")
-    ap.add_argument("--target", default=_env("LOAD_TARGET_URL", "http://%s:%s" % (vip, _env("API_PORT", 8080))),
-                    help="base URL (LOAD_TARGET_URL; default http://<FLOWFIRST_VIP>:<API_PORT>)")
+    ap.add_argument("--target", default=_env("LOAD_TARGET_URL", "%s://%s:%s" % (scheme, vip, _env("API_PORT", 8080))),
+                    help="base URL (LOAD_TARGET_URL; default <http|https>://<FLOWFIRST_VIP>:<API_PORT>, https when "
+                         "TLS_API_ENABLED=true)")
+    ap.add_argument("--cacert", default=_env("LOAD_CACERT", _env("TLS_CA_FILE", tls_dir + "/ca.crt")),
+                    help="CA certificate that signed the API server certificate (LOAD_CACERT; https targets)")
+    ap.add_argument("--cert", default=_env("LOAD_CERT", _env("TLS_CLIENT_CERT", tls_dir + "/pipeline/pipeline.crt")),
+                    help="client certificate for mutual TLS (LOAD_CERT; default: this node's pipeline certificate)")
+    ap.add_argument("--key", default=_env("LOAD_KEY", _env("TLS_CLIENT_KEY", tls_dir + "/pipeline/pipeline.key")),
+                    help="private key of --cert (LOAD_KEY)")
     ap.add_argument("--steps", default=_env("LOAD_STEPS", "50,100,250,500,1000,2000,4000"),
                     help="comma list of concurrent in-flight requests per step (LOAD_STEPS)")
     ap.add_argument("--duration", type=float, default=float(_env("LOAD_STEP_DURATION_S", 30)),
@@ -138,17 +164,43 @@ def parse_args():
     args.mix_names = [n for n, _ in mix]
     args.mix_weights = [w for _, w in mix]
 
-    u = re.match(r"^https?://([^/:]+)(?::(\d+))?", args.target)
+    u = re.match(r"^(https?)://([^/:]+)(?::(\d+))?", args.target)
     if not u:
-        ap.error("--target must look like http://host:port")
-    args.host = u.group(1)
-    args.port = int(u.group(2) or 80)
+        ap.error("--target must look like http://host:port or https://host:port")
+    args.use_tls = u.group(1) == "https"
+    args.host = u.group(2)
+    args.port = int(u.group(3) or (443 if args.use_tls else 80))
     args.host_header = "%s:%d" % (args.host, args.port)
+    if args.use_tls:
+        if not os.path.isfile(args.cacert):
+            ap.error("https target: CA file not found: %s (set --cacert or LOAD_CACERT)" % args.cacert)
+        # the client certificate is optional (TLS_API_CLIENT_AUTH may be 'none'), so a missing one is only a warning
+        if args.cert and not os.path.isfile(args.cert):
+            print("WARNING: client certificate %s not found - connecting WITHOUT one (fails when the API requires "
+                  "mutual TLS; set --cert/--key or LOAD_CERT/LOAD_KEY)" % args.cert, file=sys.stderr)
+            args.cert = args.key = ""
+        elif args.cert and not os.path.isfile(args.key):
+            ap.error("client key not found: %s (set --key or LOAD_KEY)" % args.key)
+    args.ssl = make_ssl_context(args)
     if args.csv is None:
         args.csv = "load_test_%s.csv" % time.strftime("%Y%m%d_%H%M%S")
     args.rmq_user = _env("RABBITMQ_USER", "flowuser")
-    args.rmq_password = _env("RABBITMQ_PASSWORD", "flowpassword")
-    args.rmq_port = _env("RABBITMQ_MGMT_PORT", 15672)
+    args.rmq_password = _env("RABBITMQ_PASSWORD", "")      # blank: the optional queue-depth monitor reports "unreachable"
+    # RabbitMQ management API: HTTPS on 15671 (verified against the CA, client certificate presented) when
+    # TLS_RABBITMQ_ENABLED=true, else plain HTTP on 15672. Needs the CA and client files regardless of the API scheme.
+    args.rmq_tls = _bool(_env("TLS_RABBITMQ_ENABLED", "false"))
+    args.rmq_port = _env("RABBITMQ_MGMT_PORT", 15671 if args.rmq_tls else 15672)
+    args.rmq_ssl = None
+    if args.rmq_tls:
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.load_verify_locations(cafile=args.cacert)
+            if os.path.isfile(args.cert or "") and os.path.isfile(args.key or ""):
+                ctx.load_cert_chain(certfile=args.cert, keyfile=args.key)
+            args.rmq_ssl = ctx
+        except (OSError, ssl.SSLError) as exc:
+            sys.stderr.write("WARNING: RabbitMQ TLS context unavailable (%s); queue depth will not be shown.\n" % exc)
     args.rmq_hosts = [h for h in (_env("NODE1_IP", ""), _env("NODE2_IP", ""), _env("NODE3_IP", ""),
                                    _env("RABBITMQ_HOST", "")) if h]
     return args
@@ -276,12 +328,15 @@ class StepStats:
 # ---------------------------------------------------------------------------
 def fetch_queue_depth(args):
     """Return {queue: messages} or None when the management API is unreachable."""
+    if args.rmq_tls and args.rmq_ssl is None:
+        return None                              # TLS required but no usable context: never fall back to plain
+    scheme = "https" if args.rmq_tls else "http"
     token = base64.b64encode(("%s:%s" % (args.rmq_user, args.rmq_password)).encode()).decode()
     for host in args.rmq_hosts:
-        url = "http://%s:%s/api/queues/%%2F?columns=name,messages" % (host, args.rmq_port)
+        url = "%s://%s:%s/api/queues/%%2F?columns=name,messages" % (scheme, host, args.rmq_port)
         req = urllib.request.Request(url, headers={"Authorization": "Basic " + token})
         try:
-            with urllib.request.urlopen(req, timeout=4) as resp:
+            with urllib.request.urlopen(req, timeout=4, context=args.rmq_ssl) as resp:
                 return {q["name"]: int(q.get("messages", 0)) for q in json.loads(resp.read())}
         except (urllib.error.URLError, OSError, ValueError, KeyError):
             continue
@@ -336,7 +391,8 @@ async def vu(args, stats, stop, delay, ids):
         status, err, node, keep = 0, None, None, args.keepalive
         try:
             if conn is None:
-                r, w = await asyncio.wait_for(asyncio.open_connection(args.host, args.port), args.timeout)
+                r, w = await asyncio.wait_for(
+                    asyncio.open_connection(args.host, args.port, ssl=args.ssl), args.timeout)
                 conn = Conn(r, w)
             remaining = max(0.1, args.timeout - (time.monotonic() - t0))
             status, data, reusable = await asyncio.wait_for(
@@ -529,7 +585,7 @@ def write_csv(path, rows):
 
 async def preflight(args):
     """One GET /health; return the node that answered or raise."""
-    r, w = await asyncio.wait_for(asyncio.open_connection(args.host, args.port), 10)
+    r, w = await asyncio.wait_for(asyncio.open_connection(args.host, args.port, ssl=args.ssl), 10)
     conn = Conn(r, w)
     try:
         status, data, _ = await asyncio.wait_for(http_request(conn, args, "GET", "/health", None, False), 15)

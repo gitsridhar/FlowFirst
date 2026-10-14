@@ -38,6 +38,7 @@ import time
 from typing import Callable, Optional
 
 from kazoo.client import KazooClient
+from src.tls.tls import zk_kwargs
 from kazoo.exceptions import (
     NodeExistsError,
     NoNodeError,
@@ -91,11 +92,19 @@ def get_client() -> KazooClient:
     """Return the module-level KazooClient, creating it on first call."""
     global _client
     if _client is None or not _client.connected:
-        _client = KazooClient(hosts=_ZK_HOSTS, timeout=_ZK_TIMEOUT)
+        _client = KazooClient(hosts=_ZK_HOSTS, timeout=_ZK_TIMEOUT, **zk_kwargs())
         _client.start(timeout=_ZK_TIMEOUT)
         _ensure_base_paths(_client)
         log.info("[zk] Connected to ZooKeeper ensemble at %s", _ZK_HOSTS)
     return _client
+
+
+def connection_state() -> str:
+    """'connected', 'disconnected' or 'not_started'. Reads local state only: it never opens a connection or waits,
+    so it is safe in a health or readiness probe (get_client() can block for ZK_TIMEOUT while reconnecting)."""
+    if _client is None:
+        return "not_started"
+    return "connected" if _client.connected else "disconnected"
 
 
 def close_client():

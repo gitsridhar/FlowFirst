@@ -1,0 +1,145 @@
+# promtool test rules monitoring/tests/flowfirst.test.yml   (run from the monitoring/ directory)
+# Feeds synthetic series and checks which alerts fire, and which stay quiet.
+rule_files:
+  - ../flowfirst.rules.yml
+  - ../infrastructure.rules.yml
+evaluation_interval: 1m
+
+tests:
+  - name: dead letters fire, an empty dead-letter queue does not
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages_ready{queue="flowfirst_dead_letters"}'
+        values: '0 0 0 3 3 3 3'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: FlowFirstDeadLetters, exp_alerts: []}
+      - eval_time: 6m
+        alertname: FlowFirstDeadLetters
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "3 message(s) waiting in flowfirst_dead_letters"
+              description: "These messages failed processing and were set aside, not lost. Find the cause in the logs, fix it, then scripts/replay_dead_letters.py (see ReadMe Production Rollout R3)."
+
+  - name: a process that stops answering scrapes is reported after 2 minutes
+    interval: 1m
+    input_series:
+      - series: 'up{job="flowfirst",instance="n1:9104"}'
+        values: '1 1 0 0 0 0'
+      - series: 'up{job="flowfirst",instance="n2:9104"}'
+        values: '1 1 1 1 1 1'
+    alert_rule_test:
+      - {eval_time: 3m, alertname: FlowFirstProcessDown, exp_alerts: []}
+      - eval_time: 5m
+        alertname: FlowFirstProcessDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: flowfirst, instance: "n1:9104"}
+            exp_annotations:
+              summary: "n1:9104 is not answering scrapes"
+              description: "The process is down, the node is unreachable, the metrics port is blocked, or (TLS) the Prometheus client certificate is rejected. Check systemctl status and the journal on that node. See ReadMe 'Monitoring and Alerting'."
+
+  - name: failed messages alert at once, successful ones do not
+    interval: 1m
+    input_series:
+      - series: 'flowfirst_messages_total{process="process2",flow="1",event="failed",instance="n1:9102"}'
+        values: '0 0 0 2 2 2'
+      - series: 'flowfirst_messages_total{process="process2",flow="2",event="processed",instance="n1:9102"}'
+        values: '0+100x5'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: FlowFirstMessagesFailing, exp_alerts: []}
+      - eval_time: 4m
+        alertname: FlowFirstMessagesFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, process: process2, flow: "1"}
+            exp_annotations:
+              summary: "process2 failed to handle flow 1 messages"
+              description: "2 message(s) failed in 5 minutes. Each is nacked without requeue: it goes to the dead-letter queue when the flowfirst-dlx policy is applied (scripts/setup_rabbitmq_dlx.sh), otherwise it is DISCARDED. Read the process log for the exception."
+
+  - name: pipeline stall fires only when Process 1 publishes and Process 4 persists nothing
+    interval: 1m
+    input_series:
+      - series: 'flowfirst_messages_total{process="process1",flow="1",event="published"}'
+        values: '0+10x20'
+      - series: 'flowfirst_messages_total{process="process4",flow="1",event="persisted"}'
+        values: '0+10x5 50x15'
+      - series: 'flowfirst_messages_total{process="process1",flow="2",event="published"}'
+        values: '0+10x20'
+      - series: 'flowfirst_messages_total{process="process4",flow="2",event="persisted"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - {eval_time: 8m, alertname: FlowFirstPipelineStalled, exp_alerts: []}
+      - eval_time: 20m
+        alertname: FlowFirstPipelineStalled
+        exp_alerts:
+          - exp_labels: {severity: critical, flow: "1"}
+            exp_annotations:
+              summary: "Flow 1: messages are accepted but none reach the database"
+              description: "Process 1 published to flow 1 for 10 minutes while Process 4 persisted nothing. Look for a stuck stage with the queue-depth alerts, a MariaDB outage, or an unavailable Process 4 leader. Needs Process 4 metrics to be scraped: if only Process 1 is, this fires falsely."
+
+  - name: 5xx rate above 5 percent
+    interval: 1m
+    input_series:
+      - series: 'flowfirst_http_responses_total{class="2xx"}'
+        values: '0+90x15'
+      - series: 'flowfirst_http_responses_total{class="5xx"}'
+        values: '0+10x15'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FlowFirstApi5xxRate
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "More than 5% of API responses are 5xx"
+              description: "Usually the broker refused or could not route a publish (503/500). The response carries a request_id that matches a line in the Process 1 log."
+
+  - name: certificate expiry warns at 30 days and is critical at 7 days
+    interval: 1m
+    input_series:
+      - series: 'flowfirst_tls_cert_expiry_seconds{instance="n1:9101",cert="api"}'
+        values: '2592000 2588400x200 604000x300'     # 30d, then just under 30d for 200 min, then just under 7d
+      - series: 'flowfirst_tls_cert_expiry_seconds{instance="n1:9101",cert="ca"}'
+        values: '31536000x500'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: FlowFirstCertificateExpiresSoon
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: FlowFirstCertificateExpiresSoon
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "n1:9101", cert: api}
+            exp_annotations:
+              summary: "api certificate on n1:9101 expires in 29d 23h 0m 0s"
+              description: "Renew with the security/ scripts (ReadMe Scenario 63). Only the certificates a process loads are reported (api, pipeline, ca); the broker, database and ZooKeeper certificates are not."
+      - eval_time: 150m
+        alertname: FlowFirstCertificateExpiresVerySoon
+        exp_alerts: []
+      - eval_time: 300m
+        alertname: FlowFirstCertificateExpiresVerySoon
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "n1:9101", cert: api}
+            exp_annotations:
+              summary: "api certificate on n1:9101 expires in 6d 23h 46m 40s"
+              description: "A negative value means it has already expired: connections using it are being refused."
+
+  - name: queue without consumers and Galera shrinking
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_consumers{queue="flow1_p1_to_p2"}'
+        values: '1 1 0 0 0 0 0 0 0 0'
+      - series: 'mysql_global_status_wsrep_cluster_size{job="mysqld",instance="a"}'
+        values: '3 3 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: FlowFirstQueueNoConsumers
+        exp_alerts:
+          - exp_labels: {severity: critical, queue: flow1_p1_to_p2}
+            exp_annotations:
+              summary: "Queue flow1_p1_to_p2 has no consumer"
+              description: "Nothing is reading this queue; messages will pile up. The consuming process is down or on standby everywhere."
+      - eval_time: 5m
+        alertname: GaleraClusterSizeLow
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Galera reports 2 member(s), expected 3"
+              description: "With 2 members the cluster still has quorum; with 1 it does not. Run mariadb-galera/check_galera_status.sh."

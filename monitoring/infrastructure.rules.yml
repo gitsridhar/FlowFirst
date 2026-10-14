@@ -1,0 +1,63 @@
+# Alerts on the infrastructure FlowFirst depends on. They use the standard series of three exporters that are
+# NOT part of FlowFirst: node_exporter, prometheus/mysqld_exporter and RabbitMQ's built-in rabbitmq_prometheus plugin.
+# The metric names below come from those projects' documentation; they were checked with promtool for syntax, NOT
+# against live exporters on a Galera cluster. ZooKeeper has no rule here: the repo's ZooKeeper install does not enable a
+# metrics provider - add metricsProvider.className=...PrometheusMetricsProvider to zoo.cfg to get one.
+groups:
+  - name: flowfirst-infrastructure
+    rules:
+      - alert: GaleraClusterSizeLow
+        expr: min(mysql_global_status_wsrep_cluster_size{job="mysqld"}) < 3
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Galera reports {{ $value }} member(s), expected 3"
+          description: "With 2 members the cluster still has quorum; with 1 it does not. Run mariadb-galera/check_galera_status.sh."
+
+      - alert: GaleraNodeNotSynced
+        expr: mysql_global_status_wsrep_local_state{job="mysqld"} != 4 or mysql_global_status_wsrep_ready{job="mysqld"} != 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} is not Synced (wsrep state {{ $value }})"
+          description: "A node that is donating (state 2) or joining (state 3) for long, or not ready, slows or stops writes through it."
+
+      - alert: MariaDbExporterDown
+        expr: up{job="mysqld"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "No MariaDB metrics from {{ $labels.instance }}"
+          description: "Either mysqld or its exporter is down on that node."
+
+      - alert: RabbitMqNodeDown
+        expr: up{job="rabbitmq"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "RabbitMQ metrics endpoint {{ $labels.instance }} is down"
+          description: "With pause_minority a minority partition stops serving; check rabbitmqctl cluster_status."
+
+      - alert: RabbitMqMemoryOrDiskAlarm
+        expr: rabbitmq_alarms_memory_used_watermark > 0 or rabbitmq_alarms_free_disk_space_watermark > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "RabbitMQ resource alarm on {{ $labels.instance }}"
+          description: "While an alarm is set the broker blocks publishers: the API will return errors."
+
+      - alert: NodeDiskFillingUp
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes < 0.10
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} {{ $labels.mountpoint }} has under 10% free"
+          description: "Check MariaDB data, the RabbitMQ store, Swift objects, backups and /var/log/flowfirst."
+
+      - alert: NodeClockSkew
+        expr: abs(node_timex_offset_seconds) > 0.5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} clock is {{ $value }}s off"
+          description: "RabbitMQ will not cluster and certificates misbehave when clocks drift. Check chronyc tracking."

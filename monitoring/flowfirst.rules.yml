@@ -1,0 +1,102 @@
+# Alerts built ONLY on series FlowFirst itself exposes (src/metrics/metrics.py) plus the RabbitMQ queue series from the
+# built-in rabbitmq_prometheus plugin. Thresholds are starting points: tune them to your own traffic.
+# Check:  promtool check rules monitoring/flowfirst.rules.yml     Test:  promtool test rules monitoring/tests/flowfirst.test.yml
+groups:
+  - name: flowfirst-pipeline
+    rules:
+      - alert: FlowFirstProcessDown
+        expr: up{job="flowfirst"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }} is not answering scrapes"
+          description: "The process is down, the node is unreachable, the metrics port is blocked, or (TLS) the Prometheus client certificate is rejected. Check systemctl status and the journal on that node. See ReadMe 'Monitoring and Alerting'."
+
+      - alert: FlowFirstNoActiveInstance
+        expr: max by (process) (flowfirst_greenthreads) == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "No node is running {{ $labels.process }} work"
+          description: "Every instance of {{ $labels.process }} that Prometheus can see is on standby (0 greenthreads): no leader holds the ZooKeeper election, or Pacemaker has not started the process. Messages for this stage are not being handled."
+
+      - alert: FlowFirstMessagesFailing
+        expr: sum by (process, flow) (increase(flowfirst_messages_total{event="failed"}[5m])) > 0
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.process }} failed to handle flow {{ $labels.flow }} messages"
+          description: "{{ $value | printf \"%.0f\" }} message(s) failed in 5 minutes. Each is nacked without requeue: it goes to the dead-letter queue when the flowfirst-dlx policy is applied (scripts/setup_rabbitmq_dlx.sh), otherwise it is DISCARDED. Read the process log for the exception."
+
+      - alert: FlowFirstPipelineStalled
+        expr: |
+          sum by (flow) (increase(flowfirst_messages_total{process="process1",event="published"}[10m])) > 0
+          and on (flow)
+          sum by (flow) (increase(flowfirst_messages_total{process="process4",event="persisted"}[10m])) == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Flow {{ $labels.flow }}: messages are accepted but none reach the database"
+          description: "Process 1 published to flow {{ $labels.flow }} for 10 minutes while Process 4 persisted nothing. Look for a stuck stage with the queue-depth alerts, a MariaDB outage, or an unavailable Process 4 leader. Needs Process 4 metrics to be scraped: if only Process 1 is, this fires falsely."
+
+      - alert: FlowFirstApi5xxRate
+        expr: |
+          sum(rate(flowfirst_http_responses_total{class="5xx"}[5m]))
+            / sum(rate(flowfirst_http_responses_total[5m])) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 5% of API responses are 5xx"
+          description: "Usually the broker refused or could not route a publish (503/500). The response carries a request_id that matches a line in the Process 1 log."
+
+      - alert: FlowFirstPublishConnectionsLow
+        expr: flowfirst_publish_connections_open < flowfirst_publish_connections_configured
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} has fewer RabbitMQ publisher connections than configured"
+          description: "Connections are opened lazily and re-opened on use, so a low value on an idle API is normal; on a busy one it means RabbitMQ is refusing or dropping connections."
+
+  - name: flowfirst-queues
+    rules:
+      - alert: FlowFirstDeadLetters
+        expr: max(rabbitmq_detailed_queue_messages_ready{queue="flowfirst_dead_letters"}) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} message(s) waiting in flowfirst_dead_letters"
+          description: "These messages failed processing and were set aside, not lost. Find the cause in the logs, fix it, then scripts/replay_dead_letters.py (see ReadMe Production Rollout R3)."
+
+      - alert: FlowFirstQueueBacklog
+        expr: max by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"flow[123]_.*"}) > 10000
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Queue {{ $labels.queue }} holds {{ $value | printf \"%.0f\" }} ready messages"
+          description: "The stage that consumes this queue is slower than the one before it. ReadMe Scenario 61 'Tuning' lists the levers (GT_CONSUMERS_PER_QUEUE, GT_PREFETCH_COUNT, API_PUBLISH_CONNECTIONS)."
+
+      - alert: FlowFirstQueueNoConsumers
+        expr: max by (queue) (rabbitmq_detailed_queue_consumers{queue=~"flow[123]_.*"}) == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Queue {{ $labels.queue }} has no consumer"
+          description: "Nothing is reading this queue; messages will pile up. The consuming process is down or on standby everywhere."
+
+  - name: flowfirst-tls
+    rules:
+      - alert: FlowFirstCertificateExpiresSoon
+        expr: min by (instance, cert) (flowfirst_tls_cert_expiry_seconds) < 30 * 86400
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.cert }} certificate on {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+          description: "Renew with the security/ scripts (ReadMe Scenario 63). Only the certificates a process loads are reported (api, pipeline, ca); the broker, database and ZooKeeper certificates are not."
+
+      - alert: FlowFirstCertificateExpiresVerySoon
+        expr: min by (instance, cert) (flowfirst_tls_cert_expiry_seconds) < 7 * 86400
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.cert }} certificate on {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+          description: "A negative value means it has already expired: connections using it are being refused."

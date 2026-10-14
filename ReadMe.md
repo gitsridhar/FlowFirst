@@ -204,7 +204,7 @@ erDiagram
 | Phase | Runs on | Description | Key script / command |
 |---|---|---|---|
 | **0a** | All nodes (1–4) | Time synchronisation — install & configure Chrony | `dnf install -y chrony` → `chronyc makestep` |
-| **0b** | All nodes (1–4) | Clone repo, create Python venv, copy `.env` | `git clone` → `python3 -m venv .venv` → `pip install -r requirements.txt` |
+| **0b** | All nodes (1–4) | Clone repo, create Python venv, copy `.env` | `git clone` → `python3 -m venv .venv` → `pip install --require-hashes -r requirements.txt` |
 | **1** | Nodes 1–3 only | MariaDB Galera cluster setup (server) | `mariadb-galera/setup_galera_node.sh` |
 | **1 bootstrap** | Node 1 only | Bootstrap the primary Galera node | `mariadb-galera/bootstrap_galera.sh` |
 | **1b** | Nodes 1–3 only | ZooKeeper 3-node ensemble (servers) | `zookeeper/setup_zookeeper.sh` |
@@ -286,7 +286,15 @@ erDiagram
 | [60](#scenario-60-pipeline-process-log-files-varlogflowfirst) | Pipeline Process Log Files | Logging | `/var/log/flowfirst/processN.log`, levels, rotation, tracing one message across processes |
 | [61](#scenario-61-scalability-test--thousands-of-concurrent-api-invocations-four-node-cluster) | Scalability Test — Thousands of Concurrent API Invocations | Scale | `scripts/load_test_api.py` step test, scale parameters, bottleneck table, queue drain, DB cross-check |
 | [62](#scenario-62-performance-test--measured-latency-throughput-and-freshness-for-client-expectations) | Performance Test — Latency, Throughput & Freshness for Client Expectations | Performance | Fixed workload profiles, warm-up + 3 repeats, end-to-end latency from MariaDB, resource sampling, soak run, load during failover, result template |
+| [63](#scenario-63-tls-everywhere--private-ca-mutual-tls-rest-api-and-encrypted-internal-traffic) | TLS Everywhere — Private CA, Mutual-TLS REST API, Encrypted Internal Traffic | Security | `security/` PKI scripts, certificate per use, HTTPS + client certificates on the API, RabbitMQ/MariaDB/ZooKeeper/Swift TLS, node4 identity, rotation, revocation, `verify_tls.sh` |
 
+> **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
+
+> **Backups:** see [Backup and Restore](#backup-and-restore) (encrypted, verified, restore-tested on containers only).
+>
+> **Message safety:** see [Message Safety](#message-safety-publisher-confirms-and-the-dead-letter-queue) (publisher confirms, the dead-letter policy, replaying rejected messages; without the policy a rejected message is **discarded**).
+>
+> **Monitoring:** see [Monitoring and Alerting](#monitoring-and-alerting) (Prometheus `/metrics` on every process, alert rules, tested against a real Prometheus; no dashboard).
 
 ---
 
@@ -432,11 +440,21 @@ cd /opt/flowfirst
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.txt
 
 # 4. Initialise environment configuration
 cp src/config/.env.example .env
+
+# 5. Generate strong secrets ONCE (RabbitMQ / MariaDB / Swift / HAProxy-stats passwords and the Swift hash values).
+#    The processes and install scripts refuse to start with the sample passwords from the example file.
+./scripts/generate_secrets.sh --write
 ```
+
+> **Pinned dependencies.** `requirements.txt` is a generated lock file: every package, including indirect ones, at an exact version with sha256 hashes, so every node installs the same code and a tampered or hijacked package is refused (`--require-hashes`). Humans edit only `requirements.in` (the direct, loosely constrained list) and regenerate with `./scripts/update_requirements.sh` (needs [`uv`](https://docs.astral.sh/uv/) on the machine that regenerates; nodes only need pip). One universal file covers Python 3.9 (the RHEL 9 default) to 3.14 and both x86_64 and aarch64, with environment markers choosing the right version per Python. Upgrade deliberately: `./scripts/update_requirements.sh --upgrade`, run the checks and a test cluster, then commit `requirements.in` and `requirements.txt` together. Tested: the lock installs with `--require-hashes` and passes `pip check` on Python 3.9 and 3.12 (macOS arm64) and every project module imports. Not tested: an install on RHEL 9 itself, or on x86_64. Limits: hashes prove the files are the ones that were locked, not that they are free of vulnerabilities (no scanner is wired in), and `eventlet` is in maintenance mode upstream, so the pin will stop receiving features. Wheels that need compiling (none were required on the tested platforms) would need a compiler on the node.
+
+> **Tests and the quality gate.** `./scripts/ci_check.sh` runs six checks and needs no cluster, network or `.env`: (1) every `.py` parses with the Python 3.9 grammar, (2) `bash -n` on every `.sh`, (3) `ruff` with bug-finding rules only (`ruff.toml`), (4) `pytest` (128 tests), (5) each `requirements*.txt` pins every package named in its `.in` file and carries hashes, (6) no `.env`, `.key`, `.pem` or `.p12` file is tracked by git. `--quick` skips the HTTP tests. Set up once on a dev or CI host: `pip install --require-hashes -r requirements.txt -r requirements-dev.txt` (pytest and ruff live only in `requirements-dev.txt`, never on cluster nodes). `.github/workflows/ci.yml` is an example for GitHub Actions on Python 3.9 and 3.12; any other CI system only has to run the same two commands. What the tests cover: admin authorisation (`authz.py`), secret checks and `.env` parsing (`config.py`), TLS context construction with a throw-away CA (`src/tls/tls.py`), and the real Process 1 HTTP handler for request limits, generic errors and the admin gate, `scripts/preflight_check.py`, the Prometheus `/metrics` listener (plain and mutual TLS), the backup scripts, the systemd units, and the CRL scripts. The handler tests start `tests/_p1_harness.py` as a subprocess (importing Process 1 monkey-patches the standard library, which must not happen inside pytest) with the broker, ZooKeeper and Swift stubbed. **Not covered by the automated tests:** anything that needs a real RabbitMQ, MariaDB, ZooKeeper or Swift (publisher confirms, the dead-letter policy, deduplication, failover), the message handlers of Processes 2 to 5, and the shell install scripts beyond a syntax check (the backup, CRL and systemd scripts have tests; `install_*`, `setup_*` and `enable_*_tls.sh` do not). Several of these were checked **by hand** against real containers on one workstation (publisher confirms and the dead-letter queue, mutual TLS, the systemd sandbox, backups, `/metrics` with a real Prometheus, the health probe with a real HAProxy); each chapter says exactly what was run. None of it ran on a four-node cluster. Passing the gate shows these rules still hold; it does not show the cluster works. To check that the tests can fail, deliberately breaking `admin_decision` and the body-size limit made 3 tests fail. The full gate was run on macOS with Python 3.9.22 and 3.12.10, each in a fresh virtual environment built with `pip install --require-hashes` from the lock files (128 tests passed on both); earlier phases also ran it on 3.14. It has not been run on Linux or RHEL. There, eventlet 0.40.x (the Python 3.9 pin) crashes in its kqueue hub, so the harness selects the `selects` hub on macOS. Linux uses a different hub (epoll) and the workflow in `.github/workflows/ci.yml` has never been run, so a first CI run may still need adjustment.
+
+> **Secrets are checked, not trusted.** `RABBITMQ_PASSWORD`, `MARIADB_PASSWORD`, `SWIFT_KEY` (when Swift is enabled) and `HAPROXY_STATS_PASS` must be at least `SECRET_MIN_LENGTH` (12) characters and not a well-known sample value (`flowpassword`, `admin123`, `testing`, anything starting `changeme`, …). Otherwise `config.py` raises at start (the message names the variable, never the value) and `install_rabbitmq_rhel9.sh`, `bootstrap_galera.sh`, `setup_swift.sh` and `setup_haproxy.sh` exit before changing anything. Run `generate_secrets.sh` on **one** node (or the admin host) and copy the resulting `.env` to the others — the values must be identical on every node, and `SWIFT_HASH_PATH_*` must never change once data is stored. The script keeps `.env.bak` (mode 600); delete it after copying. The check cannot tell a strong-looking but leaked password from a good one; it only blocks known-weak and short values. Never put the `.env` in git.
 
 Then **edit `.env`** on each node. The rules are simple:
 
@@ -744,7 +762,7 @@ sudo dnf install -y java-17-openjdk-headless
 > and the HTTP server — becomes co-operatively concurrent within a single OS process.
 
 The `eventlet` and `dnspython` packages are installed automatically when you run
-`pip install -r requirements.txt` in Phase 0b. This phase covers the OS-level
+`pip install --require-hashes -r requirements.txt` in Phase 0b. This phase covers the OS-level
 file descriptor limit that eventlet needs and verifies the installation.
 
 #### 1c-a — Raise the OS file descriptor limit (all nodes)
@@ -801,6 +819,9 @@ python -c "from src.gt import gt; gt.monkey_patch(); print('gt.py OK, pool size:
 | `GT_DEDUP_REAP_INTERVAL_S` | `600` | Seconds between ZK dedup znode reap runs |
 | `API_REQUEST_POOL_SIZE` | `0` | HTTP requests one Process 1 serves at once; `0` = `GT_WORKER_CONCURRENCY` × 10 (40). See Scenario 61 |
 | `API_LISTEN_BACKLOG` | `50` | Connections the kernel queues for Process 1 while all request slots are busy. See Scenario 61 |
+| `METRICS_ENABLED` | `false` | Each process serves Prometheus `/metrics` on `METRICS_PORT_BASE` + its number (9101–9105). See Monitoring and Alerting |
+| `METRICS_HOST` | `0.0.0.0` | Bind address of the metrics listener; use the node's own IP and firewall the ports |
+| `METRICS_PORT_BASE` | `9100` | Process N listens on this + N (1024–65530). `mysqld_exporter`'s default 9104 collides with Process 4 |
 | `GT_CONSUMERS_PER_QUEUE` | `1` | Consumer greenthreads per queue in Processes 2–5, each with its own RabbitMQ connection. See Scenario 61 |
 | `GT_PREFETCH_COUNT` | `1` | Unacknowledged messages RabbitMQ hands one consumer at a time. See Scenario 61 |
 
@@ -1254,6 +1275,35 @@ sudo ./systemd/install_services.sh /opt/flowfirst
 sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4
 ```
 
+#### Step 4c — The service sandbox (installed automatically by 4a and 4b)
+
+`install_services.sh` also installs `systemd/flowfirst-hardening.conf` next to every unit as `/etc/systemd/system/flowfirst-process<N>.service.d/10-hardening.conf`, so there is one copy of the settings for all five processes. Compare the score before and after with `systemd-analyze security flowfirst-process1.service`.
+
+| Setting | Effect on a FlowFirst process |
+|---|---|
+| `ProtectSystem=strict`, `PrivateTmp`, `PrivateDevices`, `ProtectHome=true` | the whole file system is read-only except `/var/log/flowfirst` (`LogsDirectory=`) and a private `/tmp`; no devices; `/home` and `/root` invisible |
+| `ProtectProc=invisible`, `ProtectKernel*`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname` | other users' processes, kernel tunables, modules, logs, cgroups, the clock and the host name cannot be touched |
+| `NoNewPrivileges`, `CapabilityBoundingSet=` (empty), `RestrictSUIDSGID`, `RestrictRealtime`, `RestrictNamespaces`, `LockPersonality` | no privilege gain, no capability at all (port 8082 needs none), no new namespaces |
+| `MemoryDenyWriteExecute=true` | memory cannot be writable and executable at once |
+| `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` | no raw, packet or netlink sockets |
+| `SystemCallFilter=@system-service` minus `@privileged @resources` | only ordinary service system calls; others fail with `EPERM` |
+| `UMask=0027` | log files are `0640`, not readable by other users |
+
+**Tested** on Ubuntu 23.10 (systemd 253, aarch64) in a Colima VM, with the real units, a Python 3.11 venv built from the locked wheels, and real RabbitMQ 3, ZooKeeper 3.9 and MariaDB 10.11 containers: all five processes ran, flow 1 went through Processes 1 to 4 into the database, flow 3 went through Process 5, the REST API answered, logging worked, and no sandbox denial appeared in the journal. `systemd-analyze security` scored each unit **1.2 OK**. Unsandboxed (previous units), Process 1 scored 8.6 EXPOSED and Process 5 9.2 UNSAFE. From inside the sandbox, a raw socket, a netlink socket, a packet socket, `setuid(0)`, `chown` and a write to `/etc` all failed; a TCP socket worked. A database outage under the sandbox behaved as the code does without the sandbox: Process 4 logged `Failed to connect to MariaDB`, rejected the message (`nack`, no requeue) and stayed up. In that test the dead-letter policy was **not** applied, so the rejected message was discarded (it never reached the database and `flowfirst_dead_letters` stayed empty); this is exactly why the policy in the Production Rollout Run-Book, R3, matters.
+
+**Things that need your action**
+* **`LOG_DIR` outside `/var/log/flowfirst`:** the process still starts but logs "file logging disabled" (read-only file system). Add a drop-in, `sudo systemctl edit flowfirst-process1` (or create `.../flowfirst-process1.service.d/99-local.conf`) containing `[Service]` and `ReadWritePaths=/your/dir`, then `daemon-reload` and restart. Tested.
+* **Application directory or TLS files under `/home` or `/root`:** `install_services.sh` switches `ProtectHome` to `read-only` when the install directory is there. It cannot know about `TLS_*` paths; keep them under `/etc/flowfirst/tls` (the default), or set `ProtectHome=read-only` in a `99-local.conf`. The `/home` branch was **not** exercised.
+* **Relaxing one setting:** put it in a `99-local.conf` drop-in (for example `MemoryDenyWriteExecute=false`); it sorts after `10-hardening.conf` and wins. `FLOWFIRST_NO_HARDENING=1 sudo ./systemd/install_services.sh ...` installs the units without the sandbox, for finding out whether the sandbox causes a problem.
+* **Upgrading an existing node:** re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload`, and restart **one node at a time** through Pacemaker standby as in the Production Rollout Run-Book. Pacemaker's `systemd:` resources pick up drop-ins; this was **not** run under Pacemaker.
+
+**Limits**
+1. Not run on RHEL 9 (systemd 252) or with SELinux enforcing. The directives used all exist in systemd 252, but an SELinux denial would be a separate problem. On RHEL 9 check `ausearch -m avc -ts recent` after the first start.
+2. `SystemCallFilter` was tested with what these code paths do on a quiet system: all five processes, the REST API, RabbitMQ, ZooKeeper and MariaDB connections, logging and a database outage. Not tested: TLS to every component, Swift (`SWIFT_ENABLED=false` in the test), a long run, a failover, a high-concurrency load. A blocked call shows up as `Operation not permitted` or a process killed by `SIGSYS`; look at `journalctl -u flowfirst-process1` first.
+3. The sandbox covers only the five FlowFirst units. MariaDB, RabbitMQ, ZooKeeper, HAProxy and Swift keep their packages' own units.
+4. Exposure 1.2 is the score for this unit; it is a rough guide, not a certificate. The remaining findings are things the process needs (network access, a user).
+5. `RemoveIPC=true` and `PrivateTmp=true` mean files other processes leave in `/tmp` are not visible to FlowFirst. Nothing in the code uses `/tmp`.
+
 #### Step 4b — Remote Node 4 (`node4` only)
 On Remote Node 4, **only Process 5** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, Swift server, HAProxy, or Pacemaker) run on Node 4; Process 5 acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`):
 
@@ -1337,6 +1387,17 @@ curl -s -u "${HAPROXY_STATS_USER}:${HAPROXY_STATS_PASS}" http://${FLOWFIRST_VIP}
 
 # Review HAProxy logs if anything looks wrong
 sudo journalctl -u haproxy -n 30 --no-pager
+```
+
+### Phase 6 (optional): TLS for the REST API and all internal links
+
+Everything above works in plain text, and TLS is **off by default** (`TLS_*_ENABLED=false`). Once the cluster is healthy you can add a private CA, mutual-TLS access to the REST API and encrypted RabbitMQ, MariaDB, ZooKeeper and Swift connections, including from the remote node4. Do it on a test cluster first, one component at a time. The full procedure (certificate inventory, rollout order with undo steps, client usage, rotation, revocation, troubleshooting) and an honest list of what was and was not tested are in [Scenario 63](#scenario-63-tls-everywhere--private-ca-mutual-tls-rest-api-and-encrypted-internal-traffic). In short:
+
+```bash
+./security/init_ca.sh && ./security/issue_all.sh     # admin host, once
+./security/install_certs.sh                          # copies each node only its own keys
+sudo ./security/enable_rabbitmq_tls.sh               # then the zookeeper, mariadb and swift scripts, one node at a time
+./security/verify_tls.sh                             # PASS/FAIL per endpoint
 ```
 
 ---
@@ -4617,6 +4678,11 @@ NODE3_IP=127.0.0.1
 # ZooKeeper — single local container
 ZK_HOSTS=127.0.0.1:2181
 
+# The Docker containers below use the sample password "flowpassword", which the
+# secret check rejects. For THIS throw-away local setup only, opt out explicitly
+# (it logs a warning). Never set this on a real node.
+ALLOW_DEFAULT_SECRETS=true
+
 # RabbitMQ — matches src/docker/docker-compose.yml credentials
 RABBITMQ_HOST=127.0.0.1
 RABBITMQ_USER=flowuser
@@ -4672,7 +4738,7 @@ mysql -h 127.0.0.1 -u "${MARIADB_USER}" -p"${MARIADB_PASSWORD}" -e "SELECT 1;"
 ```bash
 source .venv/bin/activate
 # If you haven't installed dependencies yet:
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.txt
 ```
 
 ### Step 4 — Start the four pipeline processes
@@ -4777,6 +4843,16 @@ docker compose -f src/docker/docker-compose.yml down -v
 ---
 
 ## ZooKeeper Scenarios
+
+> **Changing runtime configuration is restricted (admin authorisation).** `GET /zk/config` is open, but every `POST /zk/config` in this chapter needs an allow-listed identity, otherwise it returns `403 Forbidden`. Set `ADMIN_ALLOWED_CNS` (certificate Common Names allowed to write, default `admin-client`) and `ADMIN_TRUSTED_PROXY_CNS` (`node1-pipeline,node2-pipeline,node3-pipeline`) in `.env`; with `TLS_API_ENABLED=true` call it with the matching client certificate:
+>
+> ```bash
+> curl -s --cacert ca.crt --cert admin-client.crt --key admin-client.key \
+>      -X POST https://${FLOWFIRST_VIP}:8080/zk/config -H "Content-Type: application/json" \
+>      -d '{"key": "flow2_high_threshold", "value": 20.0}' | jq .
+> ```
+>
+> In the plain-HTTP examples below (written before TLS existed) the call returns `403` unless you are on a throw-away setup with `ALLOW_UNAUTHENTICATED_ADMIN=true`. Without TLS the caller cannot be identified, so the default is to refuse. A blank `ADMIN_ALLOWED_CNS` allows nobody. Denials are logged at WARNING (`[authz] DENIED …`) with the identity and the reason, never any secret. Details and the identity rules: Scenario 63.
 
 ### Scenario 34: ZooKeeper Ensemble Health & Leader Election Verification
 
@@ -5042,8 +5118,8 @@ Verify the ephemeral service registry updates in real time as processes start an
 #### A. Read the current service registry via REST and zkCli
 
 ```bash
-# Via REST API (Process 1 exposes live registry in /health)
-curl -s http://${FLOWFIRST_VIP}:8080/health | jq .zk_registered_workers
+# Via REST API (the live registry is on /zk/health; /health no longer calls ZooKeeper)
+curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .registered_workers
 # Expected: all 4 processes, all 3 nodes listed
 
 # Via zkCli
@@ -5071,7 +5147,7 @@ sleep 12
 # Expected: [node1, node3]  — node2 is gone
 
 # Confirm via REST
-curl -s http://${FLOWFIRST_VIP}:8080/health | jq '.zk_registered_workers.process3'
+curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.registered_workers.process3'
 # Expected: ["node1", "node3"]
 ```
 
@@ -5132,7 +5208,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/gt/status | jq .
 ```
 
 ```bash
-# 2. Check /health — now includes greenthread list and metrics
+# 2. Check /health — includes the greenthread list and metrics
 curl -s http://${FLOWFIRST_VIP}:8080/health | jq '{node: .node, greenthreads: .greenthreads, metrics: .metrics}'
 ```
 
@@ -5957,7 +6033,7 @@ TCP lines (`mariadb_galera_front`, `rabbitmq_amqp_front`) are shorter: `client:p
 
 | Log keyword (grep for) | Meaning | Typical scenarios |
 |---|---|---|
-| `Server flowfirst_api_back/nodeX is DOWN` | Health checks (`GET /health` every 3 s, `fall 2`) failed twice, so about 6 s after the fault. The text after `reason:` says why: `Layer4 connection problem` (port closed or host down), `Layer4 timeout`, `Layer7 wrong status, code: 503` (Process 1 up but unhealthy) | 8, 11, 12, 16–25 |
+| `Server flowfirst_api_back/nodeX is DOWN` | Health checks (`GET /health` every 3 s, `fall 2`) failed twice, so about 6 s after the fault. The text after `reason:` says why: `Layer4 connection problem` (port closed or host down), `Layer4 timeout`, `Layer7 wrong status, code: 503` (Process 1 is up but answering with an error) | 8, 11, 12, 16–25 |
 | `Server flowfirst_api_back/nodeX is UP` | Two consecutive passed checks (`rise 2`) | 11.2, 12, 16–19 |
 | `X active and Y backup servers left` | Servers still in rotation after a state change; `0 active` means the next request gets a 503 | 12 (all processes stopped) |
 | `backend flowfirst_api_back has no server available!` | All three backends are down | 12, 19 |
@@ -7270,7 +7346,7 @@ Settings in `.env` (see `src/config/.env.example`), all optional:
 | `LOG_MAX_BYTES` | `52428800` (50 MiB) | A file is rotated when it reaches this size. |
 | `LOG_BACKUP_COUNT` | `7` | Rotated files kept per process (`processN.log.1` … `.7`), so at most 8 files per process. |
 
-The unit files set `LogsDirectory=flowfirst`, so systemd creates `/var/log/flowfirst` owned by `flowuser` when a process starts. Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes on a node installed before this change.
+The unit files set `LogsDirectory=flowfirst`, so systemd creates `/var/log/flowfirst` owned by `flowuser` when a process starts. Under the service sandbox (Phase 4, Step 4c) this is the only directory the process can write, and new log files are mode `0640`: a user who is not `flowuser` needs `sudo` or the `flowuser` group to read them. Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes on a node installed before this change.
 
 #### A. Find the files and confirm logging started
 
@@ -7303,7 +7379,7 @@ sudo systemctl show flowfirst-process1 -p LogsDirectory
 |---|---|---|
 | `INFO` | Normal operation: process start/stop, each message consumed or forwarded, persisted rows, HTTP access lines | `[Flow 1] Persisted to MariaDB (row_id=..., counter=..., steps=...)` |
 | `WARNING` | Degraded but working: ZooKeeper unavailable, election failed, MariaDB init failed, duplicate skipped by the dedup barrier, Swift store failed (the message is still saved to MariaDB) | `[Flow 2] DUPLICATE via ZK dedup — skipping insert for <id>` |
-| `ERROR` | A message or request failed. The record is followed by a traceback. The message is dead-lettered (`requeue=False`). | `[Flow 1] Error: ...` |
+| `ERROR` | A message or request failed. The record is followed by a traceback. The message is rejected with `requeue=False`: kept in `flowfirst_dead_letters` if the dead-letter policy is applied, **discarded** if not (see Message Safety). | `[Flow 1] Error: ...` |
 | `CRITICAL` | An uncaught exception ended the process. The traceback is logged before it exits, so a crash is no longer visible only in the journal. | `Uncaught exception` |
 | `DEBUG` | Per-message detail such as the Process 4 history steps and ZK dedup first-seen | `  [process2_examined] @ ...` |
 
@@ -7497,6 +7573,8 @@ The script exits `0` when the last step passed, `1` when a step failed, and `2` 
 | Queue grows only in `flow1_p3_to_p4` / `flow2_p3_reflected` / `flow3_p2_to_p4` | Process 4: MariaDB or Swift | Step D; repeat with `SWIFT_ENABLED=false` | Consumers for Process 4; see below |
 | `LOAD GENERATOR SATURATED` | Client host | `top` on the client | More client hosts |
 
+With [Monitoring and Alerting](#monitoring-and-alerting) enabled, `FlowFirstQueueBacklog`, `FlowFirstQueueNoConsumers` and `FlowFirstApi5xxRate` raise the same symptoms outside a load test; the levers below are the same.
+
 To tell MariaDB from Swift as the Process 4 limit, run the same step twice: once normally and once after setting `SWIFT_ENABLED=false` on node1–node3 and restarting Process 4 (restart as in C). Process 4 does a ZooKeeper write, a MariaDB insert on a new connection, and, with Swift enabled, a container check plus an object upload through a fresh Swift connection for every message, so Swift is a likely cost. Set it back to `true` afterwards; with it off nothing is written to Swift.
 
 #### C. Apply a tuning change and re-run
@@ -7534,7 +7612,7 @@ Know what each lever costs:
 - **`GT_CONSUMERS_PER_QUEUE` > 1** lets several consumers read the same queue, so messages of one queue may finish **out of order**. Nothing in this pipeline depends on order across items; check that this holds for your use before raising it.
 - **`GT_PREFETCH_COUNT` > 1** means that after a consumer crash up to that many unacknowledged messages are redelivered. Process 4 is protected by the ZooKeeper dedup barrier; Processes 2, 3 and 5 are not, so a crash can produce a duplicate downstream message (Process 4 still stores each `message_id` once).
 - **One process is one CPU core.** Eventlet runs all greenthreads of a process on a single OS thread. If `top` shows a pipeline process at 100 % of one core, more consumers or request slots will not help.
-- **Failures lose messages.** Consumers reject failed messages with `requeue=False`, and the queues are declared without a dead-letter exchange, so a failed message is discarded. Under overload the difference between the `200` count and the MariaDB row count (step E) is the number of messages lost.
+- **Failures lose messages unless the dead-letter policy is applied.** Consumers reject failed messages with `requeue=False`; without the `flowfirst-dlx` policy ([Message Safety](#message-safety-publisher-confirms-and-the-dead-letter-queue)) RabbitMQ then discards them. With it they wait in `flowfirst_dead_letters`. Under overload the difference between the `200` count and the MariaDB row count (step E) is the number of messages lost or dead-lettered; check the dead-letter queue before calling them lost.
 
 #### D. Observe the cluster during a run
 
@@ -7887,3 +7965,653 @@ for ip in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do ssh "${ip}" "sudo 
 ```
 
 Keep the `perf_*.csv`, `perf_*.log`, `perf_conditions.txt` and the `perf_*_pid.txt` / `perf_*_sar.txt` files with the report so any number can be traced back to its run. The swift objects remain, as in Scenario 61.
+
+---
+
+## Security
+
+### Scenario 63: TLS Everywhere — Private CA, Mutual-TLS REST API and Encrypted Internal Traffic
+
+> **Runs on:** a trusted **admin/CA host** (the laptop or jump host that holds `security/` and the CA key; Bash 3.2+, OpenSSL 1.1.1+ or 3.x, passwordless `ssh` and `sudo` to node1–node4 if you want `install_certs.sh` to push files) and then **each cluster node** (node1–3 for the server-side `enable_*_tls.sh` scripts, node4 for its client identity only).
+
+> **Status — read this first.** Everything below was built and tested in pieces on a workstation, with containers for RabbitMQ, MariaDB, ZooKeeper, HAProxy and Swift. **It was never run on a real four-node RHEL cluster.** Section L lists exactly what was tested and what was not. Do the rollout on a test cluster first, one component at a time, with the plain-text listeners left on until each step is proven.
+
+TLS is **off by default** (every `TLS_*_ENABLED` is `false`), so an existing deployment behaves as before until you switch components on. When a switch is on the code **fails closed**: a missing certificate, an unreadable key or an `http://` Swift URL stops the process at start with a clear message instead of quietly falling back to plain text.
+
+#### A. What gets encrypted, and who must present a certificate
+
+| Link | Port | Server certificate | Client must present | Enforced by |
+|---|---|---|---|---|
+| External client → REST API (VIP) | 8080 (HTTPS) | `flowfirst-vip` on HAProxy | **Yes** — a certificate from the FlowFirst CA (mutual TLS) | HAProxy `verify required` |
+| HAProxy → Process 1 | 8082 (HTTPS) | `<node>-api` | `<node>-pipeline` (HAProxy's own identity) | Process 1 `CERT_REQUIRED` |
+| Processes 1–4 and node4's Process 5 → RabbitMQ | 5671 (AMQPS) | `<node>-rabbitmq` | `pipeline` identity | RabbitMQ `fail_if_no_peer_cert` |
+| Processes → MariaDB (through the VIP/HAProxy TCP pass-through) | 3306 / 3307 | `<node>-mariadb` | `pipeline` identity if `--require-client-cert` was run | MariaDB `REQUIRE X509` |
+| Processes → ZooKeeper | 2281 (secure client port) | `<node>-zookeeper` | `pipeline` identity | ZooKeeper `clientAuth=need` |
+| Processes → Swift (via HAProxy) | 8090 → 8888 | `flowfirst-vip`, `<node>-swift` | `pipeline` identity **at HAProxy only** | HAProxy (see limit L-3) |
+| RabbitMQ / Galera / ZooKeeper node ↔ node | 25672, 4567–4568, 2888/3888 | `peer` certificates | peer certificate | optional flags `--inter-node`, `--galera`, `--quorum` |
+
+The three certificate profiles: **server** (`serverAuth`: something clients connect to), **client** (`clientAuth`: an identity that connects, such as an API user, a pipeline process or node4) and **peer** (both: node-to-node traffic).
+
+`issue_all.sh` creates 21 certificates: `flowfirst-vip`; for each of node1–3 `<node>-api`, `-rabbitmq`, `-mariadb`, `-zookeeper`, `-swift` and `-pipeline`; `node4-pipeline`; and `admin-client`. The MariaDB and RabbitMQ node certificates also carry the VIP name and IP in their SAN, because `MARIADB_HOST` and `RABBITMQ_HOST` point at the VIP.
+
+#### B. Components added to the repository
+
+| Path | Purpose |
+|---|---|
+| `security/init_ca.sh`, `issue_cert.sh`, `issue_all.sh`, `install_certs.sh`, `revoke_cert.sh`, `list_certs.sh`, `lib.sh` | Self-signed root CA, leaf certificates, per-node distribution, revocation, expiry report |
+| `security/enable_rabbitmq_tls.sh`, `enable_mariadb_tls.sh`, `enable_zookeeper_tls.sh`, `enable_swift_tls.sh` | Server-side TLS configuration for each product (run on node1–3) |
+| `security/verify_tls.sh` | Probes every TLS endpoint and prints PASS/FAIL |
+| `src/tls/tls.py` | Python TLS contexts for all clients; fails closed |
+| `haproxy/setup_haproxy.sh`, `haproxy/haproxy.cfg.template` | HTTPS frontend with client certificates, re-encrypted backends, TLS pass-through for MariaDB and RabbitMQ |
+| `src/application/process1.py` | HTTPS listener with optional client-certificate check |
+| `scripts/load_test_api.py`, `test_flows_and_inspect_db.sh`, `tcpdump_flows.sh` | Updated to use HTTPS, the CA and a client certificate when TLS is on |
+
+The `pki/` directory (CA key, issued keys) and every `*.key` / `*.pem` are in `.gitignore`. **Never commit them.**
+
+#### C. Create the CA and issue the certificates (admin host, once)
+
+```bash
+cd /opt/flowfirst            # or your checkout on the admin host
+cp src/config/.env.example .env      # NODE1..4_IP and FLOWFIRST_VIP must be literal values
+./security/init_ca.sh                # asks for a passphrase; creates pki/ca/ca.key (AES-256), ca.crt, ca.crl
+./security/issue_all.sh              # 21 certificates under pki/issued/<name>/
+./security/list_certs.sh             # profile, expiry and status of each
+```
+
+Optional environment overrides: `PKI_VIP_DNS` (default `flowfirst.local`, the DNS name clients use for the VIP), `PKI_CA_DAYS` (default 3650), `PKI_LEAF_BITS` (default 2048), `PKI_DIR`.
+
+Key handling rules:
+
+- **`ca.key` stays on the admin host.** It is encrypted with your passphrase. Nodes only ever receive `ca.crt` (public) and their own leaf keys.
+- Leaf keys are **not** passphrase-protected, because services must start unattended. They are mode 600 and owned by the service account.
+- Add more external API users with `./security/issue_cert.sh --name alice --profile client --cn "alice"` and hand `alice.crt`, `alice.key` and `ca.crt` to that person over a secure channel.
+- Leaf certificates last 365 days by default (`PKI_LEAF_DAYS`, or `--days N` on `issue_cert.sh`). Short lifetimes are the main control for the revocation limits in section L.
+
+#### D. Install the certificates on the nodes
+
+```bash
+./security/install_certs.sh --stage /tmp/flowfirst-stage   # review the per-node trees first, no ssh
+./security/install_certs.sh                                # push to node1..4 over ssh + sudo
+./security/install_certs.sh --node 4                       # or one node at a time
+```
+
+Layout on each node (`TLS_DIR`, default `/etc/flowfirst/tls`):
+
+| File | Owner / mode | Nodes |
+|---|---|---|
+| `ca.crt`, `ca.crl` | `root` 644 | all |
+| `pipeline/pipeline.{crt,key}` | `flowuser` (key 600) | all — this is the client identity of Processes 1–5 |
+| `api/api.{crt,key}` | `flowuser` | node1–3 |
+| `haproxy/vip.pem`, `haproxy/backend.pem` | `haproxy` | node1–3 |
+| `rabbitmq/…`, `mariadb/…`, `zookeeper/…`, `swift/…` | the service account | node1–3 |
+
+If a service account does not exist yet, that file stays `root:root` 600 and the script prints a notice. Install the product first, then **re-run `install_certs.sh`**. The `systemd` units run as `flowuser`, so Processes 1–5 read `pipeline/` and `api/` through ownership; the units themselves need no change.
+
+> **Not tested:** the ssh push in `install_certs.sh`. Only `--stage` output was checked. Use `--stage` and copy by hand if you prefer.
+
+#### E. Switch the pipeline processes to TLS (`.env` on every node)
+
+All values are literals, as always. The two per-node values (`NODE_NAME`, `CURRENT_NODE_IP`) stay the only differences between nodes.
+
+```ini
+TLS_DIR=/etc/flowfirst/tls
+TLS_CRL_FILE=/etc/flowfirst/tls/ca.crl     # blank = no revocation check in HAProxy / Process 1 / Python clients
+TLS_MIN_VERSION=1.2                        # or 1.3
+TLS_API_ENABLED=true                       # Process 1 serves HTTPS; HAProxy fronts it with mutual TLS
+TLS_API_CLIENT_AUTH=required               # required | optional | none
+TLS_RABBITMQ_ENABLED=true                  # connect to 5671
+TLS_MARIADB_ENABLED=true
+TLS_ZK_ENABLED=true                        # connect to ZK_TLS_CLIENT_PORT (2281)
+TLS_SWIFT_ENABLED=true                     # SWIFT_AUTH_URL must then start with https://
+```
+
+Do **not** flip all of them at once. Section F gives the safe order, and each switch is only valid after the matching server-side script has been run.
+
+#### F. Safe rollout order (test cluster first)
+
+Every step keeps the plain-text listeners on until the encrypted path is proven, so you can stop at any step and the cluster still works. After each step run `./security/verify_tls.sh` (section J) and `./scripts/test_flows_and_inspect_db.sh`.
+
+| Step | Where | Command | How to undo |
+|---|---|---|---|
+| 1 | admin host | `init_ca.sh`, `issue_all.sh`, `install_certs.sh` (sections C–D) | delete `/etc/flowfirst/tls` |
+| 2 | node1, then node2, then node3 | `sudo ./security/enable_rabbitmq_tls.sh` | remove the `BEGIN/END FLOWFIRST TLS` block in `rabbitmq.conf`, restart |
+| 3 | node1–3 | `sudo ./security/enable_zookeeper_tls.sh`, one node at a time (two of three must stay up) | restore `zoo.cfg.pre-tls` |
+| 4 | node1–3 | `sudo ./security/enable_mariadb_tls.sh`, one node at a time | delete `zz-flowfirst-tls.cnf`, restart |
+| 5 | node1–3 | `sudo ./security/enable_swift_tls.sh` | remove the `cert_file`/`key_file` lines from `[DEFAULT]` |
+| 6 | node1–4 | set `TLS_RABBITMQ_ENABLED`, `TLS_ZK_ENABLED`, `TLS_MARIADB_ENABLED`, `TLS_SWIFT_ENABLED` to `true` in `.env` (one switch at a time) and restart the processes | set back to `false` |
+| 7 | node1–3 | `TLS_API_ENABLED=true`, restart Process 1 (Pacemaker), then `sudo ./haproxy/setup_haproxy.sh` | set back to `false` and re-run the setup script |
+| 8 | one node | `sudo ./security/enable_mariadb_tls.sh --require-client-cert` (replicates to the others) | `ALTER USER … REQUIRE NONE` |
+| 9 | node1–3 | optional hardening: `--disable-plain` on the RabbitMQ and ZooKeeper scripts | re-run without the flag |
+
+Notes that matter in practice:
+
+- **HAProxy is managed by Pacemaker.** After `setup_haproxy.sh` regenerates `/etc/haproxy/haproxy.cfg`, validate with `sudo haproxy -c -f /etc/haproxy/haproxy.cfg` and let Pacemaker pick it up (`sudo pcs resource restart haproxy-res`). **Never** start `haproxy.service` by hand. The setup script refuses to render when a required certificate file is missing, so a half-installed PKI cannot produce a broken config silently.
+- **Step 7 changes the API for every client at once.** Once HAProxy requires client certificates, plain `http://VIP:8080` and any client without a certificate get refused. Distribute client certificates first (section G).
+- **`--inter-node` (RabbitMQ), `--galera` (MariaDB) and `--quorum` (ZooKeeper)** encrypt node-to-node traffic. Each needs one maintenance window with the whole component stopped, because a node using TLS cannot talk to one that does not. The comments at the top of each script give the order. They were **not tested** (limit L-6).
+- Do step 8 only after step 6 for MariaDB is confirmed, otherwise the pipeline processes lose database access.
+
+#### G. Calling the REST API from outside (mutual TLS)
+
+Give each external user their own certificate (section C). Then:
+
+```bash
+# Health (note: /health asks ZooKeeper, so it fails if ZooKeeper is down; /gt/status does not)
+curl --cacert ca.crt --cert admin-client.crt --key admin-client.key https://flowfirst.local:8080/health | jq .
+
+curl -s --cacert ca.crt --cert admin-client.crt --key admin-client.key \
+     -X POST https://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
+     -d '{"item_id": 301, "counter": 500}' | jq .
+```
+
+Rules:
+
+- The certificate must be signed by the FlowFirst CA and still valid, and `--cacert` must be the FlowFirst `ca.crt`. There is deliberately no "insecure" option anywhere in the project.
+- The server name in the URL must be one the VIP certificate lists: the VIP IP, `flowfirst.local` (or your `PKI_VIP_DNS`), or `localhost`. For a DNS name add it to `/etc/hosts` or your DNS.
+- HAProxy sets the `X-SSL-Client-CN` header from the verified certificate and overwrites any value the client sent. Process 1 can therefore use it as "who called". This was tested and a spoofed header was replaced.
+- A refused connection shows up as `curl: (35)` or `(56)` (no or bad certificate), `(60)` (server not trusted or wrong name) or `(7)` (port closed). Exact codes vary with the curl and OpenSSL versions; read the message text, and confirm with `openssl s_client`.
+- Test scripts: `scripts/test_flows_and_inspect_db.sh` and `scripts/load_test_api.py` use the node's `pipeline` certificate by default; from an admin host set `TLS_CA_FILE`, `TLS_CLIENT_CERT` and `TLS_CLIENT_KEY` (or `LOAD_CACERT`, `LOAD_CERT`, `LOAD_KEY`) to the admin files.
+
+#### H. Remote node4 (Process 5)
+
+Node4 is outside the Pacemaker cluster and only **connects out**, so it gets one identity: `node4-pipeline`, installed as `pipeline/pipeline.{crt,key}` plus `ca.crt` and `ca.crl`. `install_certs.sh --node 4` does exactly that; no server key ever reaches node4.
+
+- Its `.env` is identical to the other nodes except `NODE_NAME` and `CURRENT_NODE_IP`, so the same `TLS_*` switches apply, and it reaches RabbitMQ (5671), ZooKeeper (2281), MariaDB and Swift with its own certificate.
+- The firewall between node4 and node1–3 must allow the TLS ports (5671, 2281, plus the existing MariaDB, Swift and HAProxy ports).
+- If node4 is compromised, revoke `node4-pipeline` (section I) and also rotate the RabbitMQ and MariaDB application passwords, because revocation is not enforced by every component (section L).
+
+#### I. Rotation, expiry and revocation
+
+```bash
+./security/list_certs.sh --warn-days 30      # exit 1 if anything is expiring or revoked: run it from cron
+./security/issue_cert.sh --name node2-api --profile server --san "…" --force     # re-issue one certificate
+./security/install_certs.sh --node 2         # copy the new files
+sudo systemctl restart flowfirst-process1    # or: restart the service that uses the certificate
+```
+
+Revocation:
+
+```bash
+./security/revoke_cert.sh alice keyCompromise
+./security/install_certs.sh --crl-only       # publish the new ca.crl to every node
+```
+
+Who actually honours the CRL (`TLS_CRL_FILE`):
+
+| Component | Honours `ca.crl`? | Evidence |
+|---|---|---|
+| HAProxy (API, Swift frontends) | Yes | tested: a revoked client certificate was refused |
+| Process 1 HTTPS listener | Yes | tested: a revoked client certificate was refused |
+| RabbitMQ | **No** | tested: a revoked certificate still connected |
+| MariaDB | **Yes**, when `TLS_CRL_FILE` is set (`ssl_crl`) | tested on a MariaDB 11.8 container: a revoked client certificate was refused (`certificate revoked`); without `ssl_crl` it connected. The server reads the file at start or on `FLUSH SSL` |
+| ZooKeeper | **No** (not read by its TLS settings) | documented, not tested |
+
+For the components that do not enforce it (RabbitMQ, ZooKeeper), revoking is not enough. Also change or delete the RabbitMQ user or password and re-issue the certificate. For ZooKeeper, remove the client's access at the network level and re-issue. ZooKeeper's `ssl.crl` option is documented to work from CRL distribution points inside the certificate, which these certificates do not carry (no `crlDistributionPoints` extension); I did not test it and did not enable it.
+
+**After `revoke_cert.sh` and `install_certs.sh --crl-only`:** run `mariadb -e "FLUSH SSL"` on each Galera node (otherwise MariaDB keeps the old list: tested, a newly revoked certificate still connected until `FLUSH SSL`), reload HAProxy, and restart the Python processes (they read the file at start-up).
+
+**The CRL expires, and an expired CRL is an outage.** The CRL has a `nextUpdate` date (`PKI_CRL_DAYS`, default 30). Tested on both a MariaDB server and Python's `ssl` module: once it passes, a certificate that is *not* revoked is refused as well (`certificate expired` / `certificate verify failed`), because the server can no longer prove the certificate is unrevoked. Every component that loads the CRL does this, so with `TLS_CRL_FILE` set you must re-issue it before the date:
+
+```bash
+./security/refresh_crl.sh [--days 30]        # on the CA host: new CRL, revocations kept, nothing revoked
+./security/install_certs.sh --crl-only       # push it to every node, then FLUSH SSL / reload / restart as above
+./security/list_certs.sh                     # prints the CRL's nextUpdate; exit 1 if expired or within 7 days
+```
+
+`refresh_crl.sh` can run from cron (`PKI_CA_PASSPHRASE_FILE`, see its header), but that stores the CA passphrase on the CA host: weigh that against remembering. `scripts/preflight_check.py` on each node also checks the installed CRL (PASS with days left and revoked count, WARN under 7 days or when `TLS_CRL_FILE` is blank, FAIL when expired or unreadable). Leaving `TLS_CRL_FILE` blank avoids the expiry risk and also disables revocation checking.
+
+CA expiry: the CA lasts 3650 days by default (`PKI_CA_DAYS`). Replacing the CA means re-issuing and re-installing everything; plan it well before expiry.
+
+#### J. Verify
+
+```bash
+./security/verify_tls.sh                      # from a node: uses that node's pipeline certificate
+./security/verify_tls.sh --env /path/.env --ca ca.crt --cert admin-client.crt --key admin-client.key   # from an admin host
+```
+
+Only components whose `TLS_*_ENABLED` is `true` are probed; the others print `SKIP`. For each endpoint it checks that a valid client is accepted, a client without a certificate is refused and plain text is refused. Exit code 0 means all passed, 1 at least one failed, 2 a usage or file error.
+
+What a PASS does **not** prove: revocation, cipher strength beyond what was negotiated, or that TLS 1.0/1.1 clients are refused (modern OpenSSL cannot even offer them). The RabbitMQ, MariaDB, ZooKeeper and Swift branches of this script have not been exercised against the real servers.
+
+Manual spot checks:
+
+```bash
+openssl s_client -connect ${FLOWFIRST_VIP}:8080 -CAfile /etc/flowfirst/tls/ca.crt -brief </dev/null      # server certificate + TLS version
+openssl s_client -connect ${NODE1_IP}:5671 -CAfile /etc/flowfirst/tls/ca.crt \
+    -cert /etc/flowfirst/tls/pipeline/pipeline.crt -key /etc/flowfirst/tls/pipeline/pipeline.key -brief </dev/null
+openssl x509 -in /etc/flowfirst/tls/pipeline/pipeline.crt -noout -subject -enddate -ext subjectAltName
+```
+
+With TLS on, `tcpdump` captures show encrypted payloads (see the `tcpdump` section above): handshakes and byte counts only. That is the expected result.
+
+#### K000. Publish confirms and Process 1 publish connections
+
+Process 1 answers `200` only after RabbitMQ has confirmed that it holds the message (publisher confirms, `mandatory=True`). A confirm costs one broker round trip per publish, so a single connection limits throughput. Process 1 therefore keeps `API_PUBLISH_CONNECTIONS` (default 4, range 1 to 32) connections, each with its own channel and lock, and spreads requests over them round-robin. Each connection reconnects and re-enables confirms by itself after a broker restart.
+
+Measured on **one RabbitMQ container, a 2-vCPU VM, 100 concurrent callers, a single run per row**. These are illustrative, not a cluster result and not a sizing guarantee; repeat with `scripts/load_test_api.py` on the real cluster (Scenario 61):
+
+| Design | Rate | p95 latency |
+|---|---|---|
+| No confirms (rejected: a message could be lost silently) | ~13,300 msg/s | 9.9 ms |
+| 1 connection with confirms | ~1,340 msg/s | 83 ms |
+| 2 connections | ~1,770 msg/s | 80 ms |
+| 4 connections (default) | ~2,630 msg/s | 60 ms |
+| 8 connections | ~4,270 msg/s | 32 ms |
+
+Tested against a real RabbitMQ 3 container: 2000 concurrent publishes all arrived exactly once (2000 distinct message ids, queue depth 2000), the heartbeat ran between publishes without deadlock, and after `rabbitmqctl stop_app` / `start_app` publishes failed with `StreamLostError` while the broker was down and then succeeded again without restarting Process 1.
+
+Limits: while the broker is down, requests fail (the client gets an error and should retry); nothing is queued in Process 1. More connections mean more RabbitMQ connections per Process 1 instance (3 instances x 4 = 12 by default). Confirm batching across requests would be faster still but was not built.
+
+#### K00. Request limits and error responses (Process 1)
+
+| Input | Limit (`.env`) | Refused with |
+|---|---|---|
+| POST body size | `API_MAX_BODY_BYTES` (1 MiB) | `413`; the body is not read |
+| `count` of `POST /api/batch` | `API_MAX_BATCH_COUNT` (100) | `400`; nothing is published |
+| `limit` of `GET /swift/objects` | `API_MAX_LIST_LIMIT` (1000) | `400` |
+| Time a connection may stall | `API_REQUEST_TIMEOUT_S` (30) | connection closed by the server |
+| Bad `Content-Length`, JSON that is not an object, non-numeric `item_id`, `counter`, `value`, `remote_metric`, `count` or `limit` | — | `400` (before this change a non-numeric field returned `500`, and a bad `limit` dropped the connection) |
+
+Error bodies are generic: `{"error": "...", "request_id": "<12 hex>"}`. The exception, with its stack trace for 5xx, goes to the process log (`/var/log/flowfirst/process1.log`) under the same `request_id`, so a support ticket can be matched to the log line: `grep <request_id> /var/log/flowfirst/process1.log`. 404 responses no longer echo the requested path or an unknown config key, and `/swift/status` no longer returns the Swift URL or the raw exception. `API_EXPOSE_ERROR_DETAILS=true` adds a `details` field for development.
+
+Tested with the real handler (26 checks, plain HTTP, no real RabbitMQ, ZooKeeper or Swift): every limit above, the boundary values (a body just under the limit is accepted, `count` 0/-3/`x`/100000000 are refused), a stalled client being cut off after the configured 3 s test timeout, the server staying healthy afterwards, and no host, path or library text in any error body.
+
+Limits of this work: (1) the log still contains the exception text, which can include host names or other content from the failing library, so protect the log files and do not log secrets in exception messages; (2) the stall timeout was tested over plain HTTP only, not over the TLS listener; (3) HAProxy has its own `timeout http-request 10s`, but no request-size limit was added there; (4) these are per-request limits, not rate limiting: a client with a valid certificate can still send many valid requests, which Scenario 61 sizes; (5) `/health`, `/gt/status` and `/swift/objects` still return operational detail (node names, greenthread lists, object names) to any API client.
+
+#### K0. Who may change runtime configuration (`POST /zk/config`)
+
+Writing a runtime config value affects every process in the cluster, so it is not open to every certificate holder. Process 1 resolves the caller as follows:
+
+1. The caller's **client certificate** on the connection to Process 1 gives its CN.
+2. **Only if** that connection was made by one of `ADMIN_TRUSTED_PROXY_CNS` (HAProxy's backend identity, `<node>-pipeline`), the `X-SSL-Client-CN` header is believed. HAProxy deletes any client-sent copy and sets it from the verified certificate. A direct caller with some other certificate that sends the header is treated as its own certificate CN.
+3. The CN must be in `ADMIN_ALLOWED_CNS`. A blank list allows nobody. Without TLS there is no caller identity, so the request is refused unless `ALLOW_UNAUTHENTICATED_ADMIN=true` (dev only).
+
+Tested with the real handler over real mutual TLS (certificates from `security/`): the `admin-client` certificate got 200; another valid certificate got 403, also when it forged the header; the HAProxy backend certificate forwarding `admin-client` got 200, and forwarding another name got 403; another node's certificate sending the admin header got 403; a client with no certificate was refused by TLS. Without TLS the default was 403 and the opt-out 200. ZooKeeper itself was replaced by a stub in that test, so the write to ZooKeeper was not exercised. The behind-HAProxy path was reproduced by sending the header directly, not through a running HAProxy.
+
+Limits: this protects the one config-write endpoint. It is not general role-based access control, every other endpoint (including the Swift and flow endpoints) still accepts any valid client certificate, and `GET /zk/config` is readable by any API client.
+
+#### K. Troubleshooting
+
+| Symptom | Likely cause | Check / fix |
+|---|---|---|
+| A process exits at start with a TLS message | Fail-closed: file missing, unreadable key, or `http://` Swift URL with TLS on | `journalctl -u flowfirst-processN`, `ls -l /etc/flowfirst/tls/…`; key must be readable by `flowuser`; re-run `install_certs.sh` |
+| `certificate verify failed` / `(60)` | Wrong CA, or the name used is not in the SAN | `openssl x509 -noout -ext subjectAltName`; use the VIP name listed there |
+| `certificate has expired` or `not yet valid` | Expiry, or clock skew between nodes | `chronyc tracking`; `./security/list_certs.sh` |
+| HAProxy refuses every client | Out-of-date CRL (suspected, untested), or `ca-file` missing | `openssl crl -in ca.crl -noout -nextupdate`; re-publish the CRL |
+| HAProxy backend `DOWN`, log says handshake failure | Backend certificate does not match or Process 1 not on HTTPS | backend server lines use `sni` + `verifyhost <node>`; Process 1 must run with `TLS_API_ENABLED=true` |
+| RabbitMQ: `handshake_failure` | Client certificate not signed by the CA, or none presented | `/var/log/rabbitmq/*.log`; check `TLS_CLIENT_CERT` |
+| MariaDB: `Access denied` after `--require-client-cert` | Client sends no certificate | `TLS_MARIADB_ENABLED=true` and certificate readable; undo with `ALTER USER … REQUIRE NONE` |
+| ZooKeeper: `ruok` / `mntr` return nothing on the TLS port | Four-letter words do not work over TLS | use the plain port while it exists, or the admin server on `ZK_ADMIN_PORT` |
+| Swift client certificate is not requested | Swift 2.38 proxy hardcodes `CERT_NONE` | by design; enforcement is at HAProxy (L-3) |
+| `.env` TLS values have no effect | `${VAR}` in a value is not expanded by python-dotenv | use literal paths |
+
+#### L. What was tested, and the limits
+
+**Tested** (workstation, with containers where noted; never on RHEL nodes):
+
+- The PKI scripts: CA, 21 certificates, expiry report, revocation and CRL, per-node `--stage` layout.
+- The Python TLS module (fails closed) and Process 1's HTTPS listener with the real eventlet code: valid certificates got `200`; no certificate, a revoked certificate, plain HTTP, an untrusted CA and a TLS 1.1 client were refused.
+- HAProxy 3.4 in a container in front of mutual-TLS backends: same refusals, plus a wrong hostname; `X-SSL-Client-CN` set from the certificate and not spoofable. `haproxy -c` passes for TLS off and on.
+- RabbitMQ 3 (container): valid certificate connected; none or wrong hostname refused.
+- MariaDB 11 (container): valid certificate worked; untrusted server CA rejected by the client; `REQUIRE X509` worked with a certificate and denied without.
+- ZooKeeper 3.9 (container, kazoo): valid certificate worked; none, rogue-CA and plain clients on the TLS port refused.
+- Swift 2.38.2 proxy (container): served HTTPS; untrusted CA and plain HTTP refused.
+- `verify_tls.sh` against local TLS servers (13 of 13 checks, and deliberate failures caught); `load_test_api.py` against a local mutual-TLS server; the RabbitMQ queue-depth monitor against a local TLS server.
+
+**Not tested, or limited:**
+
+1. **No run on a real four-node cluster**, and none through Pacemaker/pcsd (both are unchanged by this work).
+2. The `sudo`, restart and firewall paths of the `enable_*_tls.sh` scripts, the ssh push of `install_certs.sh`, and the ZooKeeper keystore step inside the script (the same commands were run by hand). The HAProxy-to-MariaDB/RabbitMQ TLS pass-through was designed as TCP pass-through and not run end to end with Galera.
+3. **Swift is not mutual TLS at the proxy**: Swift 2.38 hardcodes `ssl.CERT_NONE`, and prints that SSL there is for testing only. This is in the upstream Swift code and cannot be changed from this repository. Client certificates are enforced by HAProxy; the HAProxy-to-proxy hop is encrypted. For stronger isolation put stunnel or nginx in front of the proxy. Anyone who can reach port 8888 on a node directly can talk to the proxy without a client certificate: firewall it to the HAProxy hosts.
+4. **Revocation** is not enforced by RabbitMQ or ZooKeeper (see I). It is enforced by HAProxy, Process 1 and (with `ssl_crl`) MariaDB client connections; whether Galera replication traffic honours the CRL was not tested. Every component that does enforce it fails closed when the CRL expires (see I).
+5. **Galera SST with `rsync` is not encrypted** by Galera TLS. Keep the cluster network private or switch to a TLS-capable SST method.
+6. `--inter-node`, `--galera` and `--quorum` were not tested.
+7. Pacemaker/Corosync (and pcsd) traffic uses their own mechanisms and is not covered here.
+8. Leaf keys are not passphrase-protected, so protect `/etc/flowfirst/tls` with filesystem permissions and disk encryption. The CA key is protected only by its passphrase and the admin host.
+9. Encryption protects the network. It does not replace the application passwords (RabbitMQ, MariaDB, Swift, HAProxy stats): change the sample values in `.env`.
+
+---
+
+## Backup and Restore
+
+> **Status:** the scripts below were tested with real MariaDB 10.11, ZooKeeper 3.9 and RabbitMQ 3 containers on one workstation (database round trip with 500 awkward rows, a simulated table loss, ZooKeeper config, RabbitMQ definitions, damage and wrong-passphrase detection). **They have not been run on the four-node cluster**, not against Galera, not with TLS on, not on RHEL, and not from Pacemaker or cron. Rehearse a full restore on a test cluster before relying on them.
+
+### What needs a backup, and what does not
+
+| State | Where it lives | In the backup? | Why |
+|---|---|---|---|
+| Processed messages (the business data) | MariaDB `processed_messages`, incl. `raw_payload` | **Yes** (`db`) | the only copy of record |
+| Swift objects | `/srv/node` on nodes 1-3 | No | each object is a copy of `raw_payload`, so the database dump contains the same data. If you rely on Swift as an independent archive, back up `/srv/node` separately (not provided). |
+| Swift hash prefix/suffix and rings | `/etc/swift` | **Yes** (`config`) | without them no stored object can ever be located again |
+| `.env`, `galera.cnf`, `haproxy.cfg`, `zoo.cfg` + `myid`, `rabbitmq.conf`, systemd units | each node | **Yes** (`config`) | they hold the passwords and node identity |
+| TLS directory including **private keys** and, if you keep it there, the CA | `/etc/flowfirst/tls` | **Yes** (`config`) | re-issuing is possible, but every certificate would change at once |
+| ZooKeeper runtime tuning | `/flowfirst/config/*` | **Yes** (`zk`) | operator-chosen values |
+| ZooKeeper election, registry, health, dedup | `/flowfirst/...` | No | rebuilt by the running processes |
+| RabbitMQ users, permissions, policies (`flowfirst-dlx`), queue definitions | RabbitMQ | **Yes** (`rabbit`) | rebuilding by hand is error-prone |
+| **Messages waiting in queues** (including `flowfirst_dead_letters`) | RabbitMQ | **No** | transient pipeline state. After a total loss they are lost; clients whose request returned `200` but whose message had not reached the database yet must resend. Run `replay_dead_letters.py` and let queues drain before a planned restore. |
+| The CA private key kept offline | admin host | not by these scripts | back it up yourself, offline and separately |
+
+Because Galera has three members, most single-node database failures need **no restore**: a replacement node re-syncs (IST/SST). RabbitMQ is different: the pipeline queues are classic durable queues on one node each and are **not** replicated (see [Message Safety](#message-safety-publisher-confirms-and-the-dead-letter-queue), limit 1), so messages queued on a lost node can be lost. Backups are for the cases replication does not help with: a bad `DELETE`, a bug that wrote wrong data to all three copies, ransomware, loss of the whole site, or a wrong password change.
+
+### Making a backup
+
+```bash
+# once: a passphrase of at least 16 characters, mode 600, kept OFF the cluster and away from the backups
+sudo sh -c 'umask 077; openssl rand -base64 32 > /root/.flowfirst-backup.pass'
+
+# on ONE of nodes 1-3 (needs mariadb-dump or mysqldump, rabbitmqctl, and the Python venv for ZooKeeper):
+sudo ./scripts/backup_flowfirst.sh --out /backup/flowfirst --passphrase-file /root/.flowfirst-backup.pass --keep 14
+
+# on EVERY node (each has its own .env, myid and certificates):
+sudo ./scripts/backup_flowfirst.sh --out /backup/flowfirst --passphrase-file /root/.flowfirst-backup.pass --only config
+```
+
+* Everything is encrypted with AES-256-CBC and PBKDF2 (600,000 iterations) **before** it touches disk; the database dump is streamed through `openssl`, so no plaintext dump ever exists. The files are mode 600 in a mode 700 directory.
+* The database dump uses `--single-transaction`, so it is consistent without locking writers, and reads from this node. On Galera a dump does not desync the node (unlike an `rsync` SST).
+* After writing, each file is decrypted again and checked (`gzip -t`), and its SHA-256 goes into `MANIFEST.sha256`. The exit code is 0 only if every selected part succeeded. A failed part leaves `BACKUP.info` saying `parts_failed=...`, and `--keep` never deletes older backups when the new one is incomplete.
+* **Losing the passphrase loses every backup.** Store it in a password manager or vault, not on the backup host.
+* To run it daily, call the first command from a systemd timer or root's cron (an example is not provided and was not tested). Copy `/backup/flowfirst` off the site; this script does not.
+
+### Checking a backup (do this on a schedule)
+
+```bash
+./scripts/restore_flowfirst.sh --from /backup/flowfirst/flowfirst-<host>-<time> --passphrase-file /root/.flowfirst-backup.pass --verify
+```
+
+`--verify` changes nothing. It checks the manifest, the checksums, that every file decrypts with this passphrase and that archives and dumps can be read to the end. A backup that has never been verified is a hope, not a backup.
+
+### Restoring
+
+| Goal | Command |
+|---|---|
+| Prove a dump is usable, and compare it | `restore_flowfirst.sh --from DIR --passphrase-file F --db --into-database flowfirst_restore_check` then compare `SELECT COUNT(*)` / `CHECKSUM TABLE` with the live table |
+| Recover some rows after a bad delete | the same, then `INSERT ... SELECT` from `flowfirst_restore_check` into the live table; drop the check database afterwards |
+| Replace the live database | stop Process 4 (`sudo pcs resource disable flowfirst-p4-res-clone`), then `restore_flowfirst.sh ... --db --in-place --yes-overwrite`, then `pcs resource enable flowfirst-p4-res-clone`. The dump drops and recreates `MARIADB_DB`; Galera replicates the result to the other nodes. |
+| Get configuration files back | `restore_flowfirst.sh ... --extract-config /root/restore-tmp` (an existing, **empty** directory). Nothing is copied over `/`; you copy the files you need by hand, then delete the directory because it holds keys and passwords. |
+| ZooKeeper runtime tuning | `restore_flowfirst.sh ... --zk` (only the four known keys are written; anything else in a doctored file is skipped) |
+| RabbitMQ users and policies | `restore_flowfirst.sh ... --rabbit` decrypts to a temporary file and prints the `rabbitmqctl import_definitions` command to run from a second terminal; it merges, it does not wipe |
+
+Full-site recovery order: time sync (Phase 0a), restore `config` on each node, bring up MariaDB (bootstrap one node, `--db` restore, join the others), ZooKeeper, RabbitMQ (import definitions), Swift (restore `/etc/swift` first so the rings match, then let the pipeline re-create objects or restore them from `raw_payload`), HAProxy, Pacemaker, then the processes. Only the database part of this sequence was exercised.
+
+**Recovery point and time:** the recovery point is the time of the last backup (messages after it are gone unless clients resend); the recovery time is whatever the dump size and the network dictate. Neither was measured on the cluster; time a restore of a production-sized dump and record it.
+
+### Limits of this work
+
+1. Logical dump: `mariadb-dump` is simple and portable, but slow to restore for very large tables. For hundreds of gigabytes use `mariabackup` (physical, supports incremental) instead; no script for that is provided.
+2. No point-in-time recovery: binary logging is not configured, so you cannot restore "to 14:03".
+3. Swift data is not backed up on its own (see the table). If objects are modified or deleted in Swift independently of the database, those changes are not protected.
+4. The encryption protects confidentiality and uses a checksum for damage; it does not stop someone who can write the backup store from replacing files **and** the manifest. Keep an out-of-band copy of the manifest digests if that matters.
+5. `--only config` copies keys into the archive; protect and rotate the passphrase like the keys themselves. The CA key is only included if it lives under `TLS_DIR`.
+6. Tested with MariaDB 10.11 in a container, not the Galera build in production, and without `TLS_MARIADB_ENABLED`; the TLS client options in the generated option file were not exercised.
+7. `mapfile`, used by `--keep`, needs bash 4 (RHEL 9 has it; macOS' default bash 3.2 does not). The retention step was not exercised.
+8. Restoring a database does not restore the ZooKeeper dedup znodes (they expire anyway), so replaying old messages after a restore can insert rows again where the database no longer has them. This is intended, because the database is the record.
+
+## Message Safety: Publisher Confirms and the Dead-Letter Queue
+
+> **Status:** tested on one workstation against a real RabbitMQ 3 container (single node, not a cluster) using the repo's own `config.setup_queues()`, the policy command from `scripts/setup_rabbitmq_dlx.sh --print`, and `scripts/replay_dead_letters.py`. Every behaviour listed under "Tested" was observed, not assumed. **Not tested:** a three-node RabbitMQ cluster, node failure during a publish, quorum or mirrored queues (the queues here are classic durable queues), TLS on these paths, or Process 2 to 5 rejecting a real message end to end (the rejection was simulated by a client doing `basic_nack(requeue=False)`, which is exactly what the handlers do).
+
+This chapter explains two protections and how they fit together. The run-book step that applies them is [R3](#r3-dead-letter-policy-and-publisher-confirms).
+
+**1. Publisher confirms and `mandatory=True` (in the code, no switch).** Every publish to RabbitMQ, from Process 1 and from Processes 2 to 5, waits for the broker's answer (`channel.confirm_delivery()` in `setup_queues`) and sets `mandatory=True`. So a publish either succeeds or **raises**:
+
+| Situation | Result | Tested |
+|---|---|---|
+| Queue exists | accepted | yes |
+| Routing key matches no queue, `mandatory=True` | `pika.exceptions.UnroutableError`; Process 1 answers with an error instead of `200` | yes |
+| Same, with `mandatory=False` | accepted and **silently dropped** | yes (this is why the flag is set) |
+| Broker refuses the message (`basic.nack`) | `pika.exceptions.NackError` | not provoked |
+| Connection lost mid-publish | exception from pika; Process 1 reconnects on the next request | covered by the broker-restart test in the throughput chapter |
+
+A consumer (Process 2 to 5) acknowledges its input message only after its own publish was confirmed, so a message is never acknowledged upstream and lost downstream. Confirms cost one broker round trip per publish; see the throughput chapter and `API_PUBLISH_CONNECTIONS`. A confirm means the broker took the message, not that it reached the database.
+
+**2. The dead-letter queue (a RabbitMQ policy you must apply).** When a handler raises, the process logs the exception, increments `flow<N>_failed`, and does `basic_nack(requeue=False)`. What happens next depends on one policy:
+
+| Policy `flowfirst-dlx` | A rejected message | Tested |
+|---|---|---|
+| **Not applied** | **discarded**: both the pipeline queue and `flowfirst_dead_letters` are empty afterwards | yes |
+| Applied | moved to the durable queue `flowfirst_dead_letters` (via the fanout exchange `flowfirst.dlx`), with an `x-death` header recording the queue it came from and the reason `rejected` | yes |
+
+`sudo ./scripts/setup_rabbitmq_dlx.sh` applies it once on one RabbitMQ node (`--print` shows the command, `--remove` clears it). It is a policy rather than a queue argument so it can be added to a running cluster; changing queue arguments would make RabbitMQ refuse every process's queue declaration. The pattern `^flow[123]_` matches the nine pipeline queues and not `flowfirst_dead_letters`, so a dead-lettered message cannot be dead-lettered again in a loop. The exchange and queue are created by the processes (`setup_queues`) and are idempotent. `scripts/preflight_check.py` reports a missing policy as **FAIL** and a non-empty dead-letter queue as WARN.
+
+**What fills the dead-letter queue.** Anything that makes a handler raise: a database that is down or has a lock timeout (Process 4), Swift errors that are not caught, a malformed message, a bug. While MariaDB is down, every message Process 4 receives goes to the dead-letter queue (or is discarded without the policy), so an outage can create many entries. The `FlowFirstDeadLetters` alert fires on the first one ([Monitoring and Alerting](#monitoring-and-alerting)).
+
+**Working the queue** (`scripts/replay_dead_letters.py`; uses the same `.env`, TLS and client certificate as the pipeline):
+
+```bash
+python3 scripts/replay_dead_letters.py                    # list: message_id, item_id, flow, origin queue, reason. Changes nothing.
+python3 scripts/replay_dead_letters.py --replay --limit 1 # try one first
+python3 scripts/replay_dead_letters.py --replay           # send every message back to the queue it was rejected from
+python3 scripts/replay_dead_letters.py --discard          # delete them, after you decided they are not worth keeping
+```
+
+1. **Find the cause first** (the process log has the traceback and the `[Flow N] Error` line). A message that fails for a permanent reason goes straight back to the dead-letter queue after replay.
+2. Replay republishes with a confirm and `mandatory=True`, then acknowledges the dead-letter copy. If the broker refuses the republish the message **stays** in the dead-letter queue. Tested: bodies came back identical, persistent (`delivery_mode=2`), and without the `x-death` header, so a replayed message that fails again is a fresh failure.
+3. A message **without** an `x-death` header (for example one put into the dead-letter queue by hand) has an unknown origin: replay lists it as `UNKNOWN`, says it cannot replay it and leaves it. `--discard` removes it. Tested.
+4. Replay and discard handle the messages waiting when the script starts (or `--limit N`). `--limit` does not choose which messages: it takes them in queue order. The listing is read-only: messages are released back unchanged.
+5. Duplicates: a replayed message reuses its original `message_id`. Process 4 checks the ZooKeeper dedup barrier first, so a message that was already persisted is skipped, **but only for `ZK_DEDUP_TTL_MS` (default 5 minutes)** after it was first marked. After that the same id passes the barrier again. The table has a `UNIQUE` key on `message_id` and the insert is `ON DUPLICATE KEY UPDATE` (`src/db/db.py`), so a second pass **overwrites the existing row with the replayed message's values instead of adding a second row**: no duplicate rows, but the stored values become those of the replayed copy. I read this in the code; I did not run a replay through Process 4 against MariaDB.
+6. If the origin queue was deleted, the script re-declares it first (`setup_queues`) and the replay succeeds. Tested.
+
+**Limits (read these).**
+1. **Pipeline queues hold messages on one RabbitMQ node unless you configure replication.** The queues are classic durable queues. A node that dies before the message is consumed can lose the messages stored only on it; confirms do not change that. Quorum queues or an `ha` policy are the usual answer and are **not** configured here.
+2. The dead-letter queue is just another queue: it has no size or age limit, and nothing replays it automatically. Messages wait until a person acts. It is not part of the backup (see [Backup and Restore](#backup-and-restore)).
+3. The policy and the script assume RabbitMQ's default virtual host `/`; the code connects without choosing another one.
+4. Replay does not preserve ordering relative to newer messages.
+5. Process 1 can answer `200` only for what the broker confirmed, but a message that the broker took and a later stage then rejects is no longer visible to the client: the `200` response does not mean the row exists. Use the dead-letter alert and the persisted/published counters to notice.
+
+---
+
+## Health, Readiness and Dependencies
+
+> **Status:** tested two ways on one workstation. (1) Unit tests with the real Process 1 handler and a stubbed ZooKeeper whose calls hang 20 s: `/health` and `/ready` answer in well under 3 s, and deliberately re-adding a ZooKeeper call to `/health` made the test fail. (2) The real Process 1 (`python -m src.application.process1`) in a container with a real single-node ZooKeeper 3.9 and RabbitMQ 3, with a real HAProxy (`haproxy:lts`) probing it every 3 s. With ZooKeeper **stopped**: `/health` 200 in about 1 ms, `/ready` 200 in about 1 ms and reporting ZooKeeper `disconnected`, `POST /api/flow1` still 200, a probe on `/health` stayed up (HAProxy returned 200), while a probe on `/zk/health` (the kind of call the old `/health` made) made HAProxy mark the backend down (503). The old `list_registered` call took 10.1 s to fail (`ZK_TIMEOUT`), and `/zk/health` did not answer within 40 s. After ZooKeeper was started again `/ready` returned to `connected` and every probe passed. **Not tested:** a three-node ensemble, Pacemaker, or this on RHEL. The old `/health` itself was not re-run end to end: its behaviour is inferred from the `/zk/health` probe, which makes the same kind of call.
+
+Process 1 has three questions it can answer, and they use different endpoints so that one dependency problem cannot take the whole API out of rotation:
+
+| Endpoint | Question | Calls out to | Used by |
+|---|---|---|---|
+| `GET /health` | Is this process alive and answering? | nothing (local state only) | **HAProxy** (`option httpchk GET /health`, every 3 s, `fall 2`) |
+| `GET /ready` | Can this node publish right now? | nothing: it reads state the process already holds | operators, scripts, a load balancer you add yourself |
+| `GET /zk/health` | What do ZooKeeper's registry and health tree say, and which workers are registered? | ZooKeeper | operators (`jq .registered_workers`) |
+
+**Why `/health` changed.** It used to call ZooKeeper (`list_registered` for five processes). When ZooKeeper is slow or unreachable that call waits up to `ZK_TIMEOUT` (default 10 s), which is longer than HAProxy's patience for a probe (`fall 2` at 3 s intervals), so a ZooKeeper problem would make HAProxy mark **every** API node down at once (shown above with a probe on `/zk/health`), even though publishing does not need ZooKeeper. `/health` now returns the greenthread list, counters and the endpoint list, from memory. The fields `zk_config` and `zk_registered_workers` were **removed** from it: `zk_registered_workers` moved to `/zk/health` as `registered_workers`; `zk_config` stays on `GET /zk/config`. Anything you wrote that reads those two fields from `/health` must change.
+
+**`/ready`** returns `200 {"status": "ready"}` when at least one RabbitMQ publisher connection is open and the process is not shutting down, otherwise `503 {"status": "not_ready"}`. It lists the open and configured connections and the ZooKeeper client state (`connected`, `disconnected`, `not_started`) as *information*: ZooKeeper being down does not make a node not ready, because publishing works without it (runtime config falls back to defaults, and leader election only affects Processes 2 to 4). The check reads local state only; it does not test the broker, so a connection that died a moment ago can still count as open until the heartbeat greenthread notices (up to 30 s).
+
+**Do not point HAProxy at `/ready`.** Publisher connections are re-opened by the next publish, not in the background. A node that reports `not_ready` after a broker restart would be taken out of rotation, receive no requests, and therefore never reconnect. `/health` is the right probe; use `/ready` to look, not to route.
+
+**Limits.**
+1. `/health` being green means the process is running. It says nothing about RabbitMQ, MariaDB, ZooKeeper or Swift; for those use `/ready`, `/zk/health`, `/swift/status` and the alerts in [Monitoring and Alerting](#monitoring-and-alerting).
+2. No endpoint checks MariaDB: Process 1 never talks to it.
+3. `/ready` after an idle broker restart can say `not_ready` until the first request reconnects; see above.
+4. `/health`, `/ready` and `/zk/health` follow the same TLS and client-certificate rules as the rest of the API.
+
+---
+
+## Monitoring and Alerting
+
+> **Status:** the `/metrics` listener was tested on one workstation: unit tests, a child process serving it over plain HTTP and over mutual TLS, and a real Prometheus (container) scraping it with a client certificate (target `up`) and without one (target `down`). The alert rules pass `promtool check rules` and 7 `promtool test rules` scenarios on synthetic series. The RabbitMQ metric names were checked against a real RabbitMQ 3 container. **Not tested:** a scrape of a running 4-node cluster, the Galera/MariaDB exporter names (written from the exporter's documentation, syntax-checked only), `node_exporter` names, Alertmanager routing, and any dashboard (none is shipped).
+
+**What you get.** With `METRICS_ENABLED=true` each process serves `GET /metrics` in Prometheus text format on `METRICS_PORT_BASE` + its number: Process 1 on 9101, Process 2 on 9102, … Process 5 on 9105. It is a separate listener, not part of the REST API and **not behind HAProxy**, so Prometheus scrapes every node directly, including Node 4. The processes already counted what they handled; the listener only exposes it. It is off by default and a listener that cannot start (port in use, bad certificate) is logged and skipped: the pipeline keeps running, and it never falls back to plaintext when TLS is on.
+
+| Series | Meaning |
+|---|---|
+| `flowfirst_messages_total{process,flow,event}` | Counters since process start. Events: `published` (P1), `processed` (P2, P5), `forwarded`/`reflected` (P3), `persisted`, `swift_stored`, `dedup_skipped` (P4), and **`failed`** (P2–P5: the handler raised and the message was nacked without requeue). |
+| `flowfirst_http_responses_total{class}` | REST API responses by status class (`2xx`…`5xx`), Process 1 only. |
+| `flowfirst_events_total{event}` | Other counters (`dedup_reaped`). |
+| `flowfirst_up`, `flowfirst_start_time_seconds`, `flowfirst_stopping` | The process answers; when it started (a changing value means a restart); asked to stop. |
+| `flowfirst_greenthreads` | Greenthreads running. **0 on a standby instance**: a process that lost (or has not won) the ZooKeeper election serves `/metrics` but does no work, so `up` alone cannot tell active from standby. |
+| `flowfirst_publish_connections_open` / `_configured` | Process 1 publisher connections (see API_PUBLISH_CONNECTIONS). |
+| `flowfirst_tls_cert_expiry_seconds{cert}` | Seconds until the `api`, `pipeline` and `ca` certificates this process loads expire (negative = expired). Present only when `TLS_API_ENABLED=true`. |
+
+Every series carries `node` and `process` labels. The output holds counters and expiry times, never message content, hostnames of other systems, or credentials. Counters a process can emit are created at 0 when it starts, so the first failure after a restart is visible to `increase()`.
+
+**Turn it on** (every node, in `.env`; then restart the processes):
+
+```bash
+METRICS_ENABLED=true
+METRICS_HOST=<this node's own IP>      # not 0.0.0.0 unless the firewall limits who can connect
+METRICS_PORT_BASE=9100
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="<prometheus-ip>" port port="9101-9105" protocol="tcp" accept'
+sudo firewall-cmd --reload
+sudo python3 scripts/preflight_check.py        # the "metrics" line: PASS with mutual TLS, WARN if open to the network
+```
+
+With `TLS_API_ENABLED=true` the listener reuses the API server certificate and `TLS_API_CLIENT_AUTH`, so Prometheus needs a client certificate signed by the FlowFirst CA (`security/issue_cert.sh`, see Scenario 63) and `server_name` must match a name in that node's `-api` certificate. Without TLS, anyone who can reach the port can read the counters: firewall it. The systemd sandbox allows this listener (it only needs TCP).
+
+**Prometheus.** `monitoring/prometheus.yml` is a sample scrape configuration (replace the `<…>` placeholders): the five FlowFirst targets per node, plus the infrastructure exporters the alerts rely on. Those are **not part of FlowFirst**: RabbitMQ's built-in plugin (`rabbitmq-plugins enable rabbitmq_prometheus`, port 15692; per-queue series come from `/metrics/detailed?family=queue_coarse_metrics&family=queue_consumer_count`), `mysqld_exporter` on the Galera nodes (run it on 9114, because its default 9104 is Process 4's metrics port), and `node_exporter`. ZooKeeper is not scraped: the repo's `zoo.cfg` does not enable a Prometheus metrics provider.
+
+**Alerts.** `monitoring/flowfirst.rules.yml` (FlowFirst's own series and the RabbitMQ queue series) and `monitoring/infrastructure.rules.yml` (Galera, RabbitMQ alarms, disk, clock). Thresholds are starting points; tune them to your traffic.
+
+| Alert | Fires when | First action |
+|---|---|---|
+| `FlowFirstDeadLetters` (critical) | any message in `flowfirst_dead_letters` | Read the logs, fix the cause, `scripts/replay_dead_letters.py` (Run-Book R3) |
+| `FlowFirstMessagesFailing` (warning) | a handler failed any message in 5 min | Process log; without the DLX policy these messages are **discarded** |
+| `FlowFirstProcessDown` (critical) | a scrape target is down 2 min | `systemctl status`, the journal, firewall, client certificate |
+| `FlowFirstNoActiveInstance` (critical) | every instance of a process is on standby | ZooKeeper quorum, Pacemaker |
+| `FlowFirstPipelineStalled` (critical) | P1 published and P4 persisted nothing for 10 min on a flow | Queue alerts, MariaDB, the Process 4 leader |
+| `FlowFirstApi5xxRate` (warning) | over 5% of API responses are 5xx | Process 1 log by the `request_id` in the response |
+| `FlowFirstQueueBacklog`, `FlowFirstQueueNoConsumers` | over 10 000 ready / no consumer on a `flow*` queue | Scenario 61 tuning table |
+| `FlowFirstCertificateExpiresSoon` / `…VerySoon` | under 30 / 7 days | Scenario 63 renewal |
+| `GaleraClusterSizeLow`, `GaleraNodeNotSynced`, `RabbitMq…`, `NodeDiskFillingUp`, `NodeClockSkew` | see the file | the description in the alert |
+
+Check the rules without a cluster: `promtool check rules monitoring/*.rules.yml` and, from `monitoring/tests/`, `promtool test rules flowfirst.test.yml`.
+
+**Limits (read these).**
+1. A counter restarts at 0 when its process restarts (Prometheus' `increase()` and `rate()` handle that). The counters are per process instance, not per cluster: `sum by (flow, event)` across nodes gives the cluster view.
+2. `FlowFirstPipelineStalled` assumes Process 1 **and** Process 4 are both scraped; with only one of them it will fire falsely. It cannot tell a stuck pipeline from messages that are legitimately still in flight for under 10 minutes.
+3. Failures are counted when the handler raises. A message lost *before* a handler runs (for example, an unroutable publish) shows as a 5xx, not as `failed`.
+4. `FlowFirstProcessDown` also fires for a process that is up but whose metrics port is blocked or whose client certificate was rejected: the cause is in the Prometheus target page (`lastError`).
+5. Dedup-skipped messages are counted, but there is no alert on them: failover re-deliveries make a non-zero value normal.
+6. There is no ZooKeeper, HAProxy or Swift alert, and no dashboard. Alertmanager (routing, paging, silences) is yours to run; the rules only define when something fires.
+7. The listener has no request limits beyond a small connection pool and a 10 s socket timeout; do not expose it beyond the monitoring network.
+
+---
+
+## Production Rollout Run-Book
+
+> **Status: nothing in this run-book has been run on a real four-node cluster.** Every step below was written from the scripts and the tests that exist in the repository (containers on one workstation, unit tests, and the real Process 1 handler with the broker, ZooKeeper and Swift stubbed). Treat the first run as a rehearsal on a **test cluster**, record what differs, and correct this document. Commands that are not in a repository script (for example `ALTER USER`, `rabbitmqctl change_password`) are the standard tools' syntax and were not run here.
+
+Use it in two situations: **(1) a new cluster**, where you follow Phases 0 to 6 above and use this chapter as the order of the additions; **(2) an existing cluster** that was installed before these changes (sample passwords, no dead-letter policy, no request limits), where you apply them one at a time with the checks below. Do one node at a time for anything that restarts a process, and never on all three nodes at once.
+
+### R0. Before you touch anything
+
+| Step | Command | You expect |
+|---|---|---|
+| Record the starting state | `sudo pcs status`, `./scripts/test_flows_and_inspect_db.sh` | all resources `Started`; flows 1 and 2 reach the database |
+| Backup the `.env` | `sudo cp -p /opt/flowfirst/.env /root/flowfirst.env.$(date +%F)` (mode 600, keep it off the cluster too) | file exists |
+| Run the node check | `sudo python3 scripts/preflight_check.py` on **every** node | list of PASS / WARN / FAIL: the FAILs are your work list |
+
+`scripts/preflight_check.py` is read-only. It checks `.env` permissions and literals, blank host lists, secret strength (never printing a value), `ALLOW_DEFAULT_SECRETS`, the request limits, `API_EXPOSE_ERROR_DETAILS`, the admin settings, which TLS switches are off, the certificate files, and (on nodes 1-3 as root) whether the dead-letter policy exists and the dead-letter queue is empty. It does **not** contact MariaDB, ZooKeeper or Swift and does not prove the cluster works.
+
+### R1. Deploy the new code (one node at a time)
+
+```bash
+cd /opt/flowfirst && git pull
+source .venv/bin/activate
+pip install --require-hashes -r requirements.txt      # the locked versions; nothing newer is picked up
+./scripts/ci_check.sh --quick                         # optional, needs requirements-dev.txt
+sudo pcs node standby node1                           # drain node1 (VIP and clones move away)
+sudo systemctl restart flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4
+sudo pcs node unstandby node1
+curl -s http://<VIP>:8080/health | jq .status         # "healthy"
+```
+
+Then node2, then node3. **Expected failure on an unchanged `.env`:** the processes refuse to start with `Refusing to start with weak secrets` if the old sample passwords are still in `.env`. That is intended; do R2 first, or set `ALLOW_DEFAULT_SECRETS=true` for the length of the rollout only, and remove it afterwards.
+
+### R2. Replace the sample passwords (existing clusters)
+
+`generate_secrets.sh` writes new values into `.env`, but **the services still have the old passwords**. Changing the file alone locks the pipeline out, so rotate in each service and then restart. Do it in a maintenance window; messages published during the switch can fail.
+
+| Secret | Where the old value lives | Change it there (run once, on one node) | Then |
+|---|---|---|---|
+| `RABBITMQ_PASSWORD` | RabbitMQ user `RABBITMQ_USER` | `sudo rabbitmqctl change_password <user> '<new>'` (the install script does not change an existing user's password) | restart P1 to P5 |
+| `MARIADB_PASSWORD` | MariaDB user `MARIADB_USER` | `ALTER USER '<user>'@'%' IDENTIFIED BY '<new>'; ALTER USER '<user>'@'localhost' IDENTIFIED BY '<new>';` (replicates through Galera) | restart P1 to P5 |
+| `SWIFT_KEY` | `/etc/swift/proxy-server.conf` (`user_<account>_<user> = <key> .admin`) on nodes 1-3 | re-run `sudo ./swift/setup_swift.sh` after updating `.env` (it rewrites that file; it keeps the existing rings) | restart `swift-proxy`, then P4 |
+| `HAPROXY_STATS_PASS` | `/etc/haproxy/haproxy.cfg` | `sudo ./haproxy/setup_haproxy.sh`, then `sudo haproxy -c -f /etc/haproxy/haproxy.cfg`, then `sudo pcs resource restart haproxy-res` (never start `haproxy.service` yourself) | open `:9000` with the new login |
+| `SWIFT_HASH_PATH_PREFIX` / `_SUFFIX` | `/etc/swift/swift.conf` and the object placement | **Do not change these on a cluster that already stores objects.** Keep the existing values in `.env`. | none |
+
+Procedure: `./scripts/generate_secrets.sh` (prints, writes nothing), copy the four password values you intend to rotate, edit `.env` on **one** node, change the service side as above, copy `.env` to the other nodes (only `NODE_NAME` and `CURRENT_NODE_IP` differ), restart one node at a time, `sudo python3 scripts/preflight_check.py`, and finally delete `.env.bak` and the shell history lines that contained a password. The old passwords were public sample values, so treat any cluster that ever ran with them as exposed and review who could reach RabbitMQ, MariaDB and Swift.
+
+### R3. Dead-letter policy and publisher confirms
+
+Background, tested behaviour and limits: [Message Safety](#message-safety-publisher-confirms-and-the-dead-letter-queue).
+
+```bash
+sudo ./scripts/setup_rabbitmq_dlx.sh --print      # show the command first
+sudo ./scripts/setup_rabbitmq_dlx.sh              # once, on one RabbitMQ node
+sudo rabbitmqctl list_policies                    # flowfirst-dlx   ^flow[123]_
+python3 scripts/replay_dead_letters.py            # list what is waiting (read-only)
+```
+
+Confirms and `mandatory=True` need no switch: they are in the code from R1. To prove the policy works, publish a message that a consumer will reject (for example stop the database so Process 4 nacks), then check that `flowfirst_dead_letters` grew by one and that `python3 scripts/replay_dead_letters.py --replay --limit 1` puts it back once the database is up again. Without the policy a rejected message is **discarded**: `preflight_check.py` reports that as FAIL. Operations: look at the queue depth during every check (`rabbitmqctl list_queues name messages | grep dead`); find out **why** before replaying (the process log has the exception), because replaying a message that fails for a permanent reason only puts it back.
+
+### R4. Admin endpoint (`POST /zk/config`)
+
+The endpoint is refused for everyone until TLS is on and the caller's certificate CN is allowed:
+
+```bash
+# .env on nodes 1-3 (after R6 has turned TLS_API_ENABLED on)
+ADMIN_ALLOWED_CNS=admin-client
+ADMIN_TRUSTED_PROXY_CNS=node1-pipeline,node2-pipeline,node3-pipeline
+ALLOW_UNAUTHENTICATED_ADMIN=false
+```
+
+Check both directions: with the `admin-client` certificate `POST /zk/config` returns `200`; with any other valid certificate it returns `403 {"error":"Forbidden"}` and the process log shows `[authz] DENIED`. Before TLS is on, `GET /zk/config` still works; only the write is closed.
+
+### R5. Request limits and publish connections
+
+| Setting | Default | Check |
+|---|---|---|
+| `API_MAX_BODY_BYTES`, `API_MAX_BATCH_COUNT`, `API_MAX_LIST_LIMIT`, `API_REQUEST_TIMEOUT_S` | 1 MiB, 100, 1000, 30 s | `curl -s -o /dev/null -w '%{http_code}' -X POST http://<VIP>:8080/api/batch -d '{"count":100000}'` returns `400`; a 2 MiB body returns `413` |
+| `API_EXPOSE_ERROR_DETAILS` | `false` | an error body has `error` and `request_id` only; `grep <request_id> /var/log/flowfirst/process1.log` finds the cause |
+| `API_PUBLISH_CONNECTIONS` | 4 | `sudo rabbitmqctl list_connections | grep -c flowuser` rises by 4 per running Process 1 |
+
+Raise `API_PUBLISH_CONNECTIONS` only after a load run shows publish latency is the bottleneck (Scenario 61 section C), and watch RabbitMQ memory and connection count. HAProxy has its own `timeout http-request 10s` and no body-size limit; if a limit at the edge matters to you, that is not done.
+
+### R6. TLS rollout
+
+Follow Scenario 63 sections C to F exactly (CA and certificates on an admin host, `install_certs.sh`, one component at a time, `security/verify_tls.sh` after each). The order that keeps the cluster up: MariaDB, ZooKeeper, RabbitMQ, Swift, then the API. Turn each `TLS_*_ENABLED` on in `.env` on all nodes **before** restarting any node on that component, because a process with TLS on cannot talk to a server still on plaintext and the reverse. If a step fails, the rollback is the previous `.env` and the previous server setting; `enable_*_tls.sh` keeps backups.
+
+If you set `TLS_CRL_FILE`, also schedule `security/refresh_crl.sh` + `install_certs.sh --crl-only` (an expired CRL makes every component that loads it refuse **all** certificates: Scenario 63 section I). `preflight_check.py` reports the CRL's remaining life on each node.
+
+### R7. Sandbox, health probe and monitoring
+
+1. **Sandbox.** `sudo ./systemd/install_services.sh /opt/flowfirst` installs the hardening drop-in with the units (Phase 4, Step 4c); restart the processes and check `systemd-analyze security flowfirst-process1`. `preflight_check.py` warns when a unit lacks the drop-in.
+2. **Health probe.** HAProxy keeps probing `GET /health`, which no longer touches ZooKeeper (chapter *Health, Readiness and Dependencies*). Anything of yours that read `zk_config` or `zk_registered_workers` from `/health` must move to `/zk/config` and `/zk/health`. Do not point HAProxy at `/ready`.
+3. **Monitoring.** Set `METRICS_ENABLED=true`, `METRICS_HOST=<node ip>` and open ports 9101 to 9105 to Prometheus only; use `monitoring/prometheus.yml` and `monitoring/*.rules.yml`, then enable `rabbitmq_prometheus`, `mysqld_exporter` (on 9114) and `node_exporter` (chapter *Monitoring and Alerting*). Send a test message to `flowfirst_dead_letters` and confirm `FlowFirstDeadLetters` fires.
+4. **Backups.** Schedule `backup_flowfirst.sh` and rehearse `restore_flowfirst.sh --verify` (chapter *Backup and Restore*).
+
+### R8. Measure it (Scenarios 61 and 62)
+
+Run these from a separate client host, **once before** and **once after** R2 to R6, so each change has a number:
+
+| What | Scenario | Compare |
+|---|---|---|
+| Throughput and error rate at 100, 500, 1000 concurrent callers | 61 B | requests per second, error %, p95 |
+| Does `API_PUBLISH_CONNECTIONS` help on this hardware | 61 C | rate and p95 at 1, 4, 8 |
+| Freshness (API call to stored record) | 62 D | seconds |
+| Behaviour with a node down | 62 G | errors during, time to recover |
+| Cost of TLS | 62 B/E | CPU and p95 with and without |
+
+The only benchmark in this repository (one RabbitMQ container, 2 vCPU, ReadMe K000) is not a cluster result; do not quote it as one.
+
+### R9. Sign-off checklist
+
+| Done | Check | Evidence |
+|---|---|---|
+| | `preflight_check.py` has no FAIL on all 4 nodes | saved output |
+| | `scripts/test_flows_and_inspect_db.sh` passes through the VIP | saved output |
+| | `security/verify_tls.sh` all PASS (if TLS is on) | saved output |
+| | dead-letter test (R3) done; queue empty | queue depth |
+| | admin allowed for `admin-client`, refused for another CN (R4) | two curl outputs |
+| | limits answer 400/413 (R5) | curl codes |
+| | node failure test (Scenario 62 G) with the new code | recovery time |
+| | load result recorded with conditions (Scenario 62 H) | report |
+| | `.env` backups exist off-cluster; no `.env.bak` left | `ls -la` |
+| | `backup_flowfirst.sh` ran on every node and `restore_flowfirst.sh --verify` passed; a restore into a second database matched `CHECKSUM TABLE` | saved output |
+| | `systemd-analyze security flowfirst-process1` shows the sandbox; all five units active | saved output |
+| | `curl http://<node>:8082/health` answers while ZooKeeper is briefly stopped on a test node; `/ready` shows `zookeeper: disconnected` | two curl outputs |
+| | Prometheus targets `up` on every node; the test dead-letter alert fired and was routed to a person | target page, alert |
+| | CRL refresh scheduled; `list_certs.sh` shows the CRL `nextUpdate` more than 7 days away (if `TLS_CRL_FILE` is set) | saved output |
+
+### R10. What this run-book does not cover
+
+Still open: no backup of Swift object data on its own and no point-in-time recovery; no dashboard, no Alertmanager setup and no ZooKeeper, HAProxy or Swift alerts; RabbitMQ queues are classic durable queues with no replication, so a node failure can lose messages that sit only on it; Swift cannot require client certificates at its proxy; RabbitMQ and ZooKeeper do not honour the CRL; Galera SST with `rsync` is not encrypted; no scan for vulnerable packages; no rate limiting per client; the GitHub Actions workflow has never been run; and **nothing here has been run on a real four-node cluster, on RHEL 9, with SELinux enforcing, or under Pacemaker**. The chapters above state what was tested and how.

@@ -1813,23 +1813,31 @@ gcache ring buffer on donor:
 
 #### 6.1 — Set wsrep_sst_method (choose rsync or mariabackup)
 
+Set `MARIADB_SST_METHOD` in `.env` on **all nodes** and re-run `setup_galera_node.sh`, then do a rolling restart (node3 → node2 → node1). All nodes must use the same method.
+
 **rsync** (default — no extra packages required):
-```bash
-# /etc/my.cnf.d/galera.cnf on all nodes
-wsrep_sst_method=rsync
 ```
+MARIADB_SST_METHOD=rsync
+```
+Simple, but it blocks the donor for the duration of the copy and is **unencrypted**. Acceptable when the cluster network is isolated.
 
 **mariabackup** (non-blocking donor — recommended for production):
-```bash
-# Install the package first on all nodes
-sudo dnf install -y mariadb-backup
-
-# /etc/my.cnf.d/galera.cnf on all nodes
-wsrep_sst_method=mariabackup
 ```
+MARIADB_SST_METHOD=mariabackup
+```
+`setup_galera_node.sh` installs `mariadb-backup` automatically when this is set. The donor stays online during SST. To also encrypt the stream with the cluster's own TLS certificates (Scenario 63 must be done first):
+```
+MARIADB_SST_METHOD=mariabackup
+MARIADB_SST_ENCRYPT=true
+```
+`TLS_DIR` / `TLS_CA_FILE` / `TLS_CLIENT_CERT` / `TLS_CLIENT_KEY` must point at the issued certificates. `setup_galera_node.sh` writes a `[sst]` section with `encrypt=4` (OpenSSL TLS over socat). **This path has not been tested on a real cluster.**
 
-After changing `wsrep_sst_method`, restart MariaDB on all nodes **one at a time** (rolling restart — never all simultaneously):
+After setting the values, apply to all nodes and do the rolling restart:
 ```bash
+# On all nodes (regenerates /etc/my.cnf.d/galera.cnf):
+sudo ./mariadb-galera/setup_galera_node.sh
+
+# Rolling restart — never restart all nodes at once:
 sudo systemctl restart mariadb   # on node3 first, then node2, then node1
 ```
 
@@ -8263,7 +8271,7 @@ Limits: this protects the one config-write endpoint. It is not general role-base
 2. The `sudo`, restart and firewall paths of the `enable_*_tls.sh` scripts, the ssh push of `install_certs.sh`, and the ZooKeeper keystore step inside the script (the same commands were run by hand). The HAProxy-to-MariaDB/RabbitMQ TLS pass-through was designed as TCP pass-through and not run end to end with Galera.
 3. **Swift is not mutual TLS at the proxy**: Swift 2.38 hardcodes `ssl.CERT_NONE`, and prints that SSL there is for testing only. This is in the upstream Swift code and cannot be changed from this repository. Client certificates are enforced by HAProxy; the HAProxy-to-proxy hop is encrypted. For stronger isolation put stunnel or nginx in front of the proxy. Anyone who can reach port 8888 on a node directly can talk to the proxy without a client certificate: firewall it to the HAProxy hosts.
 4. **Revocation** is not enforced by RabbitMQ or ZooKeeper (see I). It is enforced by HAProxy, Process 1 and (with `ssl_crl`) MariaDB client connections; whether Galera replication traffic honours the CRL was not tested. Every component that does enforce it fails closed when the CRL expires (see I).
-5. **Galera SST with `rsync` is not encrypted** by Galera TLS. Keep the cluster network private or switch to a TLS-capable SST method.
+5. **Galera SST with `rsync` is not encrypted** by Galera TLS, and blocks the donor. Switch to `MARIADB_SST_METHOD=mariabackup` (non-blocking, no extra encryption by default) and add `MARIADB_SST_ENCRYPT=true` to encrypt the stream with the cluster's own TLS certificates. All nodes must use the same method; change it with a rolling restart (node3 → node2 → node1). This has not been tested on a real cluster.
 6. `--inter-node`, `--galera` and `--quorum` were not tested.
 7. Pacemaker/Corosync (and pcsd) traffic uses their own mechanisms and is not covered here.
 8. Leaf keys are not passphrase-protected, so protect `/etc/flowfirst/tls` with filesystem permissions and disk encryption. The CA key is protected only by its passphrase and the admin host.
@@ -8632,4 +8640,4 @@ The only benchmark in this repository (one RabbitMQ container, 2 vCPU, ReadMe K0
 
 ### R10. What this run-book does not cover
 
-Still open: no point-in-time database recovery; no dashboard; no ZooKeeper, HAProxy or Swift alerts; the file-receiver Alertmanager setup records alerts to a log file but sends no page (add a real receiver in `alertmanager.yml`); live Alertmanager routing has not been tested; Swift objects are now backed up but the swift backup part has not been tested against a real Swift cluster; Swift cannot require client certificates at its proxy; RabbitMQ and ZooKeeper do not honour the CRL; Galera SST with `rsync` is not encrypted; no scan for vulnerable packages; no rate limiting per client; the GitHub Actions workflow has never been run; and **nothing here has been run on a real four-node cluster, on RHEL 9, with SELinux enforcing, or under Pacemaker**. The chapters above state what was tested and how.
+Still open: no point-in-time database recovery; no dashboard; no ZooKeeper, HAProxy or Swift alerts; the file-receiver Alertmanager setup records alerts to a log file but sends no page (add a real receiver in `alertmanager.yml`); live Alertmanager routing has not been tested; Swift objects are now backed up but the swift backup part has not been tested against a real Swift cluster; Swift cannot require client certificates at its proxy; RabbitMQ and ZooKeeper do not honour the CRL; `MARIADB_SST_METHOD=mariabackup` with `MARIADB_SST_ENCRYPT=true` is implemented but not tested on a real cluster; no scan for vulnerable packages; no rate limiting per client; the GitHub Actions workflow has never been run; and **nothing here has been run on a real four-node cluster, on RHEL 9, with SELinux enforcing, or under Pacemaker**. The chapters above state what was tested and how.

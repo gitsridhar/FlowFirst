@@ -52,12 +52,19 @@ require_strong_secret HAPROXY_STATS_PASS "${HAPROXY_STATS_PASS}"
 # Scale limits (defaults = the values that were previously hard-coded in the template)
 HAPROXY_MAXCONN="${HAPROXY_MAXCONN:-4000}"                      # global: max concurrent connections for the whole process
 HAPROXY_FRONTEND_MAXCONN="${HAPROXY_FRONTEND_MAXCONN:-3000}"    # defaults: max concurrent connections per frontend
+# Request body limit on the API frontend. Must match or be >= API_MAX_BODY_BYTES in .env.
+# 0 = unlimited (disables the check). Default: 1 MiB = 1048576 bytes.
+HAPROXY_MAX_BODY_BYTES="${HAPROXY_MAX_BODY_BYTES:-1048576}"
 for _var in HAPROXY_MAXCONN HAPROXY_FRONTEND_MAXCONN; do
     if ! [[ "${!_var}" =~ ^[1-9][0-9]*$ ]]; then
         echo "ERROR: ${_var} must be a positive integer (got '${!_var}')."
         exit 1
     fi
 done
+if ! [[ "${HAPROXY_MAX_BODY_BYTES}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: HAPROXY_MAX_BODY_BYTES must be a non-negative integer (got '${HAPROXY_MAX_BODY_BYTES}')."
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # TLS (see security/ and ReadMe Scenario 63).  Every switch is OFF by default, in which case the
@@ -148,6 +155,7 @@ render_config() {
         -e "s/__HAPROXY_STATS_PASS__/${HAPROXY_STATS_PASS}/g" \
         -e "s/__HAPROXY_MAXCONN__/${HAPROXY_MAXCONN}/g" \
         -e "s/__HAPROXY_FRONTEND_MAXCONN__/${HAPROXY_FRONTEND_MAXCONN}/g" \
+        -e "s/__HAPROXY_MAX_BODY_BYTES__/${HAPROXY_MAX_BODY_BYTES}/g" \
         -e "s|__TLS_MIN_VERSION__|${HAP_TLS_MIN}|g" \
         -e "s|__TLS_CIPHERS__|${TLS_CIPHERS}|g" \
         -e "s|__STATS_BIND_TLS__|${HAP_STATS_TLS}|g" \

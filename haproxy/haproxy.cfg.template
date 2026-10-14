@@ -58,6 +58,14 @@ frontend flowfirst_api_front
     mode http
     option httplog
     option forwardfor except 127.0.0.0/8
+    # Buffer the request body so req.body_size is available for the size check below.
+    # This does NOT buffer indefinitely: HAProxy enforces the client timeout while reading.
+    option http-buffer-request
+    # Reject oversized request bodies before they reach Process 1 (returns HTTP 413).
+    # HAPROXY_MAX_BODY_BYTES must match or exceed API_MAX_BODY_BYTES in .env; the process
+    # enforces the limit too, but stopping it at the load balancer saves a backend round-trip.
+    # 0 means unlimited (disabled). Default: 1 MiB (same as API_MAX_BODY_BYTES default).
+    http-request deny deny_status 413 if { req.body_size gt __HAPROXY_MAX_BODY_BYTES__ }
     # Never trust an identity header sent by a client; set it only from the verified client certificate.
     http-request del-header X-SSL-Client-CN
     http-request set-header X-SSL-Client-CN %[ssl_c_s_dn(cn)] if { ssl_c_used }

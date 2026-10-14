@@ -1,0 +1,5 @@
+# Tools for tests and CI only. Never installed on cluster nodes.
+# requirements-dev.txt is GENERATED (exact versions + hashes): ./scripts/update_requirements.sh
+-c requirements.txt
+pytest>=8.0
+ruff>=0.5

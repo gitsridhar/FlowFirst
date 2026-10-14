@@ -20,6 +20,10 @@ from src.config.config import (
     ADMIN_ALLOWED_CNS,
     ADMIN_TRUSTED_PROXY_CNS,
     ALLOW_UNAUTHENTICATED_ADMIN,
+    AUTH_MODE,
+    AUTH_API_KEYS,
+    AUTH_TOKEN_SECRET,
+    AUTH_TOKEN_TTL_S,
     API_MAX_BODY_BYTES,
     API_MAX_BATCH_COUNT,
     API_MAX_LIST_LIMIT,
@@ -49,6 +53,7 @@ log = logging.getLogger("flowfirst.p1")
 _config_watcher = None
 _ADMIN_ALLOWED_CNS = authz.parse_list(ADMIN_ALLOWED_CNS)
 _ADMIN_PROXY_CNS = authz.parse_list(ADMIN_TRUSTED_PROXY_CNS)
+_AUTH_API_KEYS = authz.parse_api_keys(AUTH_API_KEYS)
 
 import eventlet
 
@@ -396,12 +401,66 @@ class RestApiHandler(BaseHTTPRequestHandler):
         self._send_json(403, {"error": "Forbidden"})
         return False
 
+    def _peer_cert(self):
+        """ssl.SSLSocket.getpeercert() result for the current connection, or None."""
+        fn = getattr(self.connection, "getpeercert", None)
+        return fn() if fn else None
+
+    def _bearer_token(self):
+        """Value of the Authorization: Bearer <token> header, or None."""
+        auth = self.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip() or None
+        return None
+
+    def _require_auth(self) -> bool:
+        """Enforce AUTH_MODE on flow endpoints. Returns True if allowed; sends 401 and returns False otherwise."""
+        if AUTH_MODE == "none":
+            return True
+        ok, label, reason = authz.check_request_auth(
+            mode=AUTH_MODE,
+            raw_api_key=self.headers.get("X-Api-Key"),
+            bearer_token=self._bearer_token(),
+            peer_cert=self._peer_cert(),
+            api_keys=_AUTH_API_KEYS,
+            token_secret=AUTH_TOKEN_SECRET,
+        )
+        if ok:
+            log.debug(f"[auth] {self.command} {self.path} accepted ({reason}) label={label!r}")
+            return True
+        log.warning(f"[auth] {self.command} {self.path} from {self.address_string()} DENIED — {reason}")
+        self._send_json(401, {"error": "Unauthorized", "detail": reason})
+        return False
+
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
+
+        # /auth/token issues a bearer token; it needs an api_key credential but is NOT itself gated by _require_auth
+        if path == "/auth/token":
+            ok_body, post_data = self._read_json_body()
+            if not ok_body:
+                return
+            raw_key = post_data.get("api_key", "")
+            label = authz.verify_api_key(raw_key, _AUTH_API_KEYS)
+            if not label:
+                self._send_json(401, {"error": "Unauthorized", "detail": "invalid api_key"})
+                return
+            try:
+                token = authz.issue_token(label, AUTH_TOKEN_TTL_S, AUTH_TOKEN_SECRET)
+            except ValueError as e:
+                self._fail(500, "Token issuance failed", e)
+                return
+            self._send_json(200, {"token": token, "expires_in": AUTH_TOKEN_TTL_S, "label": label})
+            return
+
         ok, post_data = self._read_json_body()
         if not ok:
             return
         try:
+            if path in ("/api/flow1", "/api/flow2", "/api/flow3", "/api/batch"):
+                if not self._require_auth():
+                    return
+
             if path == "/api/flow1":
                 item_id = int(post_data["item_id"]) if "item_id" in post_data else None
                 counter = int(post_data["counter"]) if "counter" in post_data else None

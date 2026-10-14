@@ -91,6 +91,26 @@ TLS_SWIFT_ENABLED     = _bool_env("TLS_SWIFT_ENABLED")
 ADMIN_ALLOWED_CNS             = _str_env("ADMIN_ALLOWED_CNS", "")
 ADMIN_TRUSTED_PROXY_CNS       = _str_env("ADMIN_TRUSTED_PROXY_CNS", "")
 ALLOW_UNAUTHENTICATED_ADMIN   = _bool_env("ALLOW_UNAUTHENTICATED_ADMIN")
+
+# Flow-endpoint authentication (see src/application/authz.py for full description).
+# AUTH_MODE: none (default, original behaviour) | api_key | token | cert
+#   none     — no authentication on flow endpoints; admin endpoint is unaffected (still cert-gated).
+#   api_key  — X-Api-Key header required on every flow request. Keys in AUTH_API_KEYS.
+#   token    — Authorization: Bearer <token> OR X-Api-Key accepted. POST /auth/token issues tokens.
+#   cert     — any valid client certificate (signed by the FlowFirst CA) required. TLS_API_ENABLED must be true.
+# AUTH_API_KEYS: comma-separated 'label:sha256hex' entries. Generate:
+#   python3 -c "import secrets,hashlib; k=secrets.token_urlsafe(32); \
+#     print(f'myapp:{hashlib.sha256(k.encode()).hexdigest()}  # raw key: {k}')"
+# AUTH_TOKEN_SECRET: random secret for HMAC-SHA256 token signing. Minimum 32 characters.
+#   Generate: python3 -c "import secrets; print(secrets.token_hex(32))"
+# AUTH_TOKEN_TTL_S: token lifetime in seconds (default 3600 = 1 hour).
+_AUTH_MODE_VALID = frozenset({"none", "api_key", "token", "cert"})
+AUTH_MODE         = _str_env("AUTH_MODE", "none").lower()
+if AUTH_MODE not in _AUTH_MODE_VALID:
+    raise ValueError(f"AUTH_MODE must be one of {sorted(_AUTH_MODE_VALID)}, not '{AUTH_MODE}'")
+AUTH_API_KEYS     = os.getenv("AUTH_API_KEYS", "")        # not run through _str_env: may be blank
+AUTH_TOKEN_SECRET = os.getenv("AUTH_TOKEN_SECRET", "")    # blank means tokens cannot be issued/verified
+AUTH_TOKEN_TTL_S  = max(60, _int_env("AUTH_TOKEN_TTL_S", 3600))
 RABBITMQ_TLS_PORT     = _int_env("RABBITMQ_TLS_PORT", 5671)
 ZK_TLS_CLIENT_PORT    = _int_env("ZK_TLS_CLIENT_PORT", 2281)
 

@@ -452,7 +452,7 @@ cp src/config/.env.example .env
 
 > **Pinned dependencies.** `requirements.txt` is a generated lock file: every package, including indirect ones, at an exact version with sha256 hashes, so every node installs the same code and a tampered or hijacked package is refused (`--require-hashes`). Humans edit only `requirements.in` (the direct, loosely constrained list) and regenerate with `./scripts/update_requirements.sh` (needs [`uv`](https://docs.astral.sh/uv/) on the machine that regenerates; nodes only need pip). One universal file covers Python 3.9 (the RHEL 9 default) to 3.14 and both x86_64 and aarch64, with environment markers choosing the right version per Python. Upgrade deliberately: `./scripts/update_requirements.sh --upgrade`, run the checks and a test cluster, then commit `requirements.in` and `requirements.txt` together. Tested: the lock installs with `--require-hashes` and passes `pip check` on Python 3.9 and 3.12 (macOS arm64) and every project module imports. Not tested: an install on RHEL 9 itself, or on x86_64. Limits: hashes prove the files are the ones that were locked, not that they are free of vulnerabilities (no scanner is wired in), and `eventlet` is in maintenance mode upstream, so the pin will stop receiving features. Wheels that need compiling (none were required on the tested platforms) would need a compiler on the node.
 
-> **Tests and the quality gate.** `./scripts/ci_check.sh` runs six checks and needs no cluster, network or `.env`: (1) every `.py` parses with the Python 3.9 grammar, (2) `bash -n` on every `.sh`, (3) `ruff` with bug-finding rules only (`ruff.toml`), (4) `pytest` (130 tests), (5) each `requirements*.txt` pins every package named in its `.in` file and carries hashes, (6) no `.env`, `.key`, `.pem` or `.p12` file is tracked by git. `--quick` skips the HTTP tests. Set up once on a dev or CI host: `pip install --require-hashes -r requirements.txt -r requirements-dev.txt` (pytest and ruff live only in `requirements-dev.txt`, never on cluster nodes). `.github/workflows/ci.yml` is an example for GitHub Actions on Python 3.9 and 3.12; any other CI system only has to run the same two commands. What the tests cover: admin authorisation (`authz.py`), secret checks and `.env` parsing (`config.py`), TLS context construction with a throw-away CA (`src/tls/tls.py`), and the real Process 1 HTTP handler for request limits, generic errors and the admin gate, `scripts/preflight_check.py`, the Prometheus `/metrics` listener (plain and mutual TLS), the backup scripts, the systemd units, and the CRL scripts. The handler tests start `tests/_p1_harness.py` as a subprocess (importing Process 1 monkey-patches the standard library, which must not happen inside pytest) with the broker, ZooKeeper and Swift stubbed. **Not covered by the automated tests:** anything that needs a real RabbitMQ, MariaDB, ZooKeeper or Swift (publisher confirms, the dead-letter policy, deduplication, failover), the message handlers of Processes 2 to 5, and the shell install scripts beyond a syntax check (the backup, CRL and systemd scripts have tests; `install_*`, `setup_*` and `enable_*_tls.sh` do not). Several of these were checked **by hand** against real containers on one workstation (publisher confirms and the dead-letter queue, mutual TLS, the systemd sandbox, backups, `/metrics` with a real Prometheus, the health probe with a real HAProxy); each chapter says exactly what was run. None of it ran on a four-node cluster. Passing the gate shows these rules still hold; it does not show the cluster works. To check that the tests can fail, deliberately breaking `admin_decision` and the body-size limit made 3 tests fail. The full gate was run on macOS with Python 3.9.22 and 3.12.10, each in a fresh virtual environment built with `pip install --require-hashes` from the lock files (128 tests passed on both); earlier phases also ran it on 3.14. It has not been run on Linux or RHEL. There, eventlet 0.40.x (the Python 3.9 pin) crashes in its kqueue hub, so the harness selects the `selects` hub on macOS. Linux uses a different hub (epoll) and the workflow in `.github/workflows/ci.yml` has never been run, so a first CI run may still need adjustment.
+> **Tests and the quality gate.** `./scripts/ci_check.sh` runs six checks and needs no cluster, network or `.env`: (1) every `.py` parses with the Python 3.9 grammar, (2) `bash -n` on every `.sh`, (3) `ruff` with bug-finding rules only (`ruff.toml`), (4) `pytest` (155 tests), (5) each `requirements*.txt` pins every package named in its `.in` file and carries hashes, (6) no `.env`, `.key`, `.pem` or `.p12` file is tracked by git. `--quick` skips the HTTP tests. Set up once on a dev or CI host: `pip install --require-hashes -r requirements.txt -r requirements-dev.txt` (pytest and ruff live only in `requirements-dev.txt`, never on cluster nodes). `.github/workflows/ci.yml` is an example for GitHub Actions on Python 3.9 and 3.12; any other CI system only has to run the same two commands. What the tests cover: admin authorisation (`authz.py`), secret checks and `.env` parsing (`config.py`), TLS context construction with a throw-away CA (`src/tls/tls.py`), and the real Process 1 HTTP handler for request limits, generic errors and the admin gate, `scripts/preflight_check.py`, the Prometheus `/metrics` listener (plain and mutual TLS), the backup scripts, the systemd units, and the CRL scripts. The handler tests start `tests/_p1_harness.py` as a subprocess (importing Process 1 monkey-patches the standard library, which must not happen inside pytest) with the broker, ZooKeeper and Swift stubbed. **Not covered by the automated tests:** anything that needs a real RabbitMQ, MariaDB, ZooKeeper or Swift (publisher confirms, the dead-letter policy, deduplication, failover), the message handlers of Processes 2 to 5, and the shell install scripts beyond a syntax check (the backup, CRL and systemd scripts have tests; `install_*`, `setup_*` and `enable_*_tls.sh` do not). Several of these were checked **by hand** against real containers on one workstation (publisher confirms and the dead-letter queue, mutual TLS, the systemd sandbox, backups, `/metrics` with a real Prometheus, the health probe with a real HAProxy); each chapter says exactly what was run. None of it ran on a four-node cluster. Passing the gate shows these rules still hold; it does not show the cluster works. To check that the tests can fail, deliberately breaking `admin_decision` and the body-size limit made 3 tests fail. The full gate was run on macOS with Python 3.9.22 and 3.12.10, each in a fresh virtual environment built with `pip install --require-hashes` from the lock files (128 tests passed on both); earlier phases also ran it on 3.14. It has not been run on Linux or RHEL. There, eventlet 0.40.x (the Python 3.9 pin) crashes in its kqueue hub, so the harness selects the `selects` hub on macOS. Linux uses a different hub (epoll) and the workflow in `.github/workflows/ci.yml` has never been run, so a first CI run may still need adjustment.
 
 > **Secrets are checked, not trusted.** `RABBITMQ_PASSWORD`, `MARIADB_PASSWORD`, `SWIFT_KEY` (when Swift is enabled) and `HAPROXY_STATS_PASS` must be at least `SECRET_MIN_LENGTH` (12) characters and not a well-known sample value (`flowpassword`, `admin123`, `testing`, anything starting `changeme`, …). Otherwise `config.py` raises at start (the message names the variable, never the value) and `install_rabbitmq_rhel9.sh`, `bootstrap_galera.sh`, `setup_swift.sh` and `setup_haproxy.sh` exit before changing anything. Run `generate_secrets.sh` on **one** node (or the admin host) and copy the resulting `.env` to the others — the values must be identical on every node, and `SWIFT_HASH_PATH_*` must never change once data is stored. The script keeps `.env.bak` (mode 600); delete it after copying. The check cannot tell a strong-looking but leaked password from a good one; it only blocks known-weak and short values. Never put the `.env` in git.
 
@@ -8276,6 +8276,148 @@ Limits: this protects the one config-write endpoint. It is not general role-base
 7. Pacemaker/Corosync (and pcsd) traffic uses their own mechanisms and is not covered here.
 8. Leaf keys are not passphrase-protected, so protect `/etc/flowfirst/tls` with filesystem permissions and disk encryption. The CA key is protected only by its passphrase and the admin host.
 9. Encryption protects the network. It does not replace the application passwords (RabbitMQ, MariaDB, Swift, HAProxy stats): change the sample values in `.env`.
+
+---
+
+## Authentication Architecture
+
+> **Status:** API-key and HMAC token authentication are implemented in `src/application/authz.py` and wired into Process 1. The `none` (default) and `cert` modes re-use the existing cert infrastructure. All modes are unit-tested (25 new tests in `tests/test_authz.py`). The HTTP handler integration (`_require_auth`, `POST /auth/token`) was tested by running the existing process1 harness tests with `AUTH_MODE=none`; the harness does not yet exercise auth refusals on flow endpoints directly — add them if you extend this. MFA, biometric, SSO and FIDO2 are documented below but **not implemented**.
+
+### Why authentication matters here
+
+TLS (Scenario 63) proves the *connection* is encrypted and the *certificate* came from the FlowFirst CA — but any client with a valid FlowFirst certificate, or any client that can reach port 8080 without TLS, can publish messages to the pipeline. The flow endpoints (`/api/flow1-3`, `/api/batch`) have no caller gate by default. The options below add one.
+
+### Option 1 — Password / API-key authentication
+
+**How it works.** The caller puts a random key in the `X-Api-Key` header. Process 1 hashes the incoming value with SHA-256 and compares it (constant-time, no timing oracle) against the stored hash. The raw key never touches disk; only its digest is stored in `.env`.
+
+**To enable:**
+```bash
+# Generate a key (run once per calling service):
+python3 -c "import secrets,hashlib; k=secrets.token_urlsafe(32); \
+  print(f'myapp:{hashlib.sha256(k.encode()).hexdigest()}  # raw key: {k}')"
+# → myapp:7f3a...  # raw key: abc123...
+```
+Add the `label:digest` pair to `AUTH_API_KEYS` in `.env` on every node (comma-separated for multiple callers), then:
+```
+AUTH_MODE=api_key
+AUTH_API_KEYS=myapp:7f3a...,ci_bot:9e2c...
+```
+
+**Call the API:**
+```bash
+curl -X POST http://<VIP>:8080/api/flow1 \
+  -H "X-Api-Key: abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 1}'
+```
+A missing or wrong key returns HTTP 401. The key label appears in the Process 1 log so you can see which caller sent each request.
+
+**Key rotation:** add the new key alongside the old one (both work), update all callers, then remove the old digest from `AUTH_API_KEYS` and reload (`sudo systemctl reload flowfirst-process1`). There is no downtime if you overlap.
+
+**Limits:** API keys are long-lived secrets. Anyone who intercepts the key can use it until it is rotated. Use TLS to protect the key in transit; without TLS the key is visible to anyone on the network.
+
+---
+
+### Option 2 — Token / Bearer authentication (HMAC-signed)
+
+**How it works.** Process 1 issues short-lived tokens at `POST /auth/token`. Each token is a base64-encoded JSON payload (`sub`, `exp`, version) plus an HMAC-SHA256 signature over it, separated by `.`. The signature is computed with `AUTH_TOKEN_SECRET` (a shared secret, never sent to callers). Tokens expire after `AUTH_TOKEN_TTL_S` (default 1 hour). On every flow request the caller sends `Authorization: Bearer <token>`; Process 1 verifies the signature and the expiry before proceeding.
+
+**To enable:**
+```bash
+# Generate the signing secret (run ONCE, put the SAME value on all nodes):
+python3 -c "import secrets; print(secrets.token_hex(32))"
+```
+```
+AUTH_MODE=token
+AUTH_API_KEYS=myapp:7f3a...     # api_key used to authenticate the token-issuance request
+AUTH_TOKEN_SECRET=<64 hex chars from above>
+AUTH_TOKEN_TTL_S=3600           # token lifetime; shorten for higher-risk environments
+```
+
+**Token flow:**
+```bash
+# Step 1 — get a token (once per session / per expiry):
+TOKEN=$(curl -s -X POST http://<VIP>:8080/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"api_key": "abc123..."}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# Step 2 — use it for flow requests:
+curl -X POST http://<VIP>:8080/api/flow1 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 1}'
+```
+In `token` mode, `X-Api-Key` is also accepted directly on flow endpoints, so short-lived clients don't need to implement the token exchange.
+
+**Token rotation / secret rotation:** change `AUTH_TOKEN_SECRET` and restart all Process 1 instances. Every token signed with the old secret is immediately invalid; callers must obtain a new token. Because `AUTH_API_KEYS` is separate, key rotation and secret rotation are independent.
+
+**Limits:** tokens are not revokable before expiry — a stolen token is valid until `exp`. Keep `AUTH_TOKEN_TTL_S` short for sensitive environments. The token payload is base64-encoded (not encrypted): the subject and expiry are readable to anyone who has the token, though the content is not a secret. This is not a JWT and does not use an external identity provider.
+
+---
+
+### Option 3 — Certificate authentication (cert mode)
+
+**How it works.** This re-uses the mutual-TLS infrastructure from Scenario 63. Any client that presents a certificate signed by the FlowFirst CA is allowed to call the flow endpoints. The certificate's CN is logged as the caller identity.
+
+**To enable:**
+```
+TLS_API_ENABLED=true            # must be on; without TLS there are no client certificates
+AUTH_MODE=cert
+```
+Issue a certificate for each calling service with `security/issue_cert.sh`. The admin gate (`POST /zk/config`) stays on its own `ADMIN_ALLOWED_CNS` list and is not affected by `AUTH_MODE`.
+
+**Limits:** every valid FlowFirst certificate grants access, including internal service certificates (`<node>-pipeline`). To restrict to specific callers, use `AUTH_MODE=none` and rely on the admin gate's `ADMIN_ALLOWED_CNS` pattern — but that only gates the admin endpoint. For flow-level per-caller restrictions, switch to `api_key` or `token` mode.
+
+---
+
+### Combining modes with the existing admin gate
+
+| Concern | Mechanism | Configured by |
+|---|---|---|
+| Flow endpoint access (publish messages) | `AUTH_MODE` | `AUTH_MODE`, `AUTH_API_KEYS`, `AUTH_TOKEN_SECRET` |
+| Admin config changes (`POST /zk/config`) | Certificate CN allow-list | `ADMIN_ALLOWED_CNS`, `ADMIN_TRUSTED_PROXY_CNS` |
+| Transport confidentiality and peer identity | Mutual TLS | `TLS_API_ENABLED`, Scenario 63 |
+
+The three layers are independent. You can run `AUTH_MODE=none` with mutual TLS (only cert-holders can connect, but any cert-holder can publish), or `AUTH_MODE=api_key` without TLS (keys work but are sent in clear text — not recommended), or both together.
+
+---
+
+### Options documented here but not implemented: MFA, biometric, SSO, FIDO2
+
+These require an external identity system (an identity provider, authenticator app, hardware key or browser). They are not feasible without one. The descriptions below explain what each is and how it would integrate.
+
+#### Multi-Factor Authentication (MFA)
+
+MFA requires a caller to prove two independent factors, typically something they know (a password or API key) and something they possess (a one-time code from an authenticator app, an SMS, a hardware token). In a REST API context the most common pattern is TOTP (Time-based One-Time Password, RFC 6238): the caller presents `{"api_key": "...", "totp": "123456"}` to the token endpoint; the server verifies the TOTP against the shared seed and issues a short-lived token only if both checks pass.
+
+To add MFA to this solution: store a TOTP seed alongside each API key in a secrets store (not `.env`), verify the 6-digit code with a library such as `pyotp`, and issue the token only on success. The flow endpoint does not change — it still validates a Bearer token. MFA adds a second gate at the token-issuance step. Not implemented here because it requires a secrets store and out-of-band seed distribution.
+
+#### Biometric authentication
+
+Biometrics (fingerprint, face, iris) authenticate a person at a device. The biometric match runs on the device, not the server; the server receives a signed assertion proving the match occurred. In a web context this is almost always delivered via WebAuthn (the FIDO2 protocol). In a machine-to-machine API like FlowFirst (where there is no browser or human at the keyboard) biometrics are not applicable: calling services are not people, and pipeline processes run unattended. Biometrics could be used to protect the operator's console login (Linux PAM, SSH keys managed by a hardware authenticator), but that is outside the scope of the API itself.
+
+#### Single Sign-On (SSO) — SAML and OIDC
+
+SSO lets users authenticate once with a central Identity Provider (IdP — e.g. Entra ID, Okta, Keycloak) and receive a credential they can use with multiple services. For REST APIs the common protocol is OpenID Connect (OIDC), which sits on top of OAuth 2.0: the IdP issues a signed JWT access token; the service verifies it against the IdP's public key (fetched from the JWKS endpoint).
+
+To add OIDC to this solution: replace `POST /auth/token` with an OIDC authorisation code or client-credentials flow at the IdP; verify the `Authorization: Bearer <id_token>` on each request by checking the JWT signature against the IdP's JWKS URL and validating `iss`, `aud`, `exp` and `iat` claims. The `verify_token` function in `authz.py` would be replaced by a standard JWT library (e.g. `python-jose` or `PyJWT`). The `AUTH_TOKEN_SECRET` shared secret is replaced by the IdP's asymmetric key pair, so the server never holds a signing key. This is the correct approach when the cluster is part of a larger platform with an existing user directory. Not implemented here because it requires an external IdP.
+
+#### Passwordless / FIDO2 passkeys
+
+FIDO2 passkeys use public-key cryptography on a device (hardware security key, phone, or platform authenticator) to authenticate without a password. The server stores only a public key; the private key never leaves the device. The protocol (WebAuthn) requires a browser or platform runtime, a user presence check, and a challenge-response round trip: the server sends a nonce, the authenticator signs it with the private key, the server verifies with the stored public key.
+
+In the context of FlowFirst: passkeys are relevant for the *operator* accessing the management endpoints (e.g. `/zk/config`) from a browser-based admin tool, not for machine-to-machine API calls. To add passkey support: implement the WebAuthn registration and assertion flows on a management UI, issue a session token (similar to `POST /auth/token`) after a successful assertion, and use that token for subsequent management API calls. Libraries: `py_webauthn` (Python). Hardware key support adds phishing resistance that software TOTP does not provide. Not implemented here because it requires a management UI and a WebAuthn-capable client.
+
+---
+
+### Limits of the implemented authentication
+
+1. API keys and token secrets are stored in `.env` — a flat file on each node. Anyone who can read `/opt/flowfirst/.env` (typically `flowuser` and `root`) can extract them. Protect the file with filesystem permissions (`chmod 600`) and disk encryption. A proper secrets manager (Vault, AWS Secrets Manager, RHEL IdM) would seal them at rest.
+2. Tokens are not revokable before expiry. If a token is stolen, the only remediation is to rotate `AUTH_TOKEN_SECRET` (which invalidates all tokens immediately, logging out all current callers).
+3. There is no per-caller rate limiting. An authenticated caller can submit as many requests as the pipeline can handle. Scenario 61 sizes the cluster capacity; a malicious or buggy authenticated caller can fill the queues.
+4. `AUTH_API_KEYS` and `AUTH_TOKEN_SECRET` must be identical on all three nodes. They are not auto-synced — change them in `.env` on every node and restart Process 1 on each (rolling restart is safe: during the restart one node will briefly use the old secret, tokens signed by the other nodes still work because the secret is the same).
+5. The `cert` mode does not distinguish between calling services: every certificate issued by the CA grants the same access. For per-service access control use `api_key` or `token` mode with a separate key per service.
 
 ---
 

@@ -16,6 +16,16 @@ from src.config.config import (
     QUEUE_FLOW2_P2_TO_P3,
     QUEUE_FLOW3_P5_TO_P2,
     QUEUE_FLOW3_P2_TO_P4,
+    QUEUE_FLOW4_P1_TO_P2,
+    QUEUE_FLOW4_P2_TO_P3,
+    QUEUE_FLOW5_P1_TO_P2,
+    QUEUE_FLOW5_P2_TO_P3,
+    QUEUE_FLOW6_P1_TO_P2,
+    QUEUE_FLOW6_P2_TO_P3,
+    QUEUE_FLOW6_P5_TO_P2,
+    QUEUE_FLOW6_P2_TO_P4,
+    QUEUE_FLOW7_P1_TO_P2,
+    QUEUE_FLOW7_P2_TO_P3,
     GT_PREFETCH_COUNT,
     GT_CONSUMERS_PER_QUEUE,
 )
@@ -157,6 +167,191 @@ def handle_flow3_message(ch, method, properties, body):
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
+def handle_flow4_message(ch, method, properties, body):
+    """Flow 4 (create device) handler on Process 2. Enriches device payload with fingerprint."""
+    import hashlib
+    try:
+        data = json.loads(body.decode("utf-8"))
+        log.info(f"[Flow 4] Received create-device '{data.get('device_name')}' (msg_id={data.get('message_id')})")
+
+        fingerprint_src = f"{data.get('device_name','')!s}:{data.get('device_type','')!s}:{data.get('location','')!s}"
+        data["device_fingerprint"] = hashlib.sha256(fingerprint_src.encode()).hexdigest()
+        data["enriched_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        data["history"].append({
+            "stage": "process2_enriched",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "enrichment": "device_fingerprint_computed",
+        })
+
+        ch.basic_publish(
+            exchange="",
+            mandatory=True,
+            routing_key=QUEUE_FLOW4_P2_TO_P3,
+            body=json.dumps(data, indent=2),
+            properties=pika.BasicProperties(
+                delivery_mode=pika.DeliveryMode.Persistent,
+                content_type="application/json",
+            ),
+        )
+        gt.metrics_counter["flow4_processed"] += 1
+        log.info(f"[Flow 4] Enriched and forwarded to '{QUEUE_FLOW4_P2_TO_P3}'")
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
+    except Exception as e:
+        log.error(f"[Flow 4] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow4_failed"] += 1
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+
+def handle_flow5_message(ch, method, properties, body):
+    """Flow 5 (query devices) handler on Process 2. Normalizes filter values."""
+    try:
+        data = json.loads(body.decode("utf-8"))
+        log.info(f"[Flow 5] Received device query (msg_id={data.get('message_id')})")
+
+        filters = data.get("filters", {})
+        if isinstance(filters.get("device_type"), str):
+            filters["device_type"] = filters["device_type"].lower()
+        if isinstance(filters.get("status"), str):
+            filters["status"] = filters["status"].lower()
+        data["filters"] = filters
+        data["query_enriched_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        data["history"].append({
+            "stage": "process2_query_normalized",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "enrichment": "filter_values_normalized",
+        })
+
+        ch.basic_publish(
+            exchange="",
+            mandatory=True,
+            routing_key=QUEUE_FLOW5_P2_TO_P3,
+            body=json.dumps(data, indent=2),
+            properties=pika.BasicProperties(
+                delivery_mode=pika.DeliveryMode.Persistent,
+                content_type="application/json",
+            ),
+        )
+        gt.metrics_counter["flow5_processed"] += 1
+        log.info(f"[Flow 5] Normalized and forwarded to '{QUEUE_FLOW5_P2_TO_P3}'")
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
+    except Exception as e:
+        log.error(f"[Flow 5] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow5_failed"] += 1
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+
+def handle_flow6_message(ch, method, properties, body):
+    """Flow 6 (update device) handler on Process 2. Adds update_sequence counter."""
+    try:
+        data = json.loads(body.decode("utf-8"))
+        log.info(f"[Flow 6] Received update for device_id={data.get('device_id')} (msg_id={data.get('message_id')})")
+
+        update_seq = _config_watcher.get_int("flow6_update_seq") if _config_watcher else int(time.time() * 1000)
+        data["update_sequence"] = update_seq
+        data["previous_state_tracked"] = True
+        data["history"].append({
+            "stage": "process2_sequenced",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "update_sequence": update_seq,
+        })
+
+        ch.basic_publish(
+            exchange="",
+            mandatory=True,
+            routing_key=QUEUE_FLOW6_P2_TO_P3,
+            body=json.dumps(data, indent=2),
+            properties=pika.BasicProperties(
+                delivery_mode=pika.DeliveryMode.Persistent,
+                content_type="application/json",
+            ),
+        )
+        gt.metrics_counter["flow6_processed"] += 1
+        log.info(f"[Flow 6] Sequenced (seq={update_seq}) and forwarded to '{QUEUE_FLOW6_P2_TO_P3}'")
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
+    except Exception as e:
+        log.error(f"[Flow 6] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow6_failed"] += 1
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+
+def handle_flow6_remote_return_message(ch, method, properties, body):
+    """Flow 6 remote return handler on Process 2. Forwards P5 result to P4."""
+    try:
+        data = json.loads(body.decode("utf-8"))
+        log.info(f"[Flow 6] Received remote-sync result for device_id={data.get('device_id')} "
+                 f"(msg_id={data.get('message_id')})")
+
+        data["process2_remote_return_verified"] = True
+        data["history"].append({
+            "stage": "process2_received_remote_sync_result",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "action": f"Received edge-sync from {data.get('remote_node')} and forwarding to P4",
+        })
+
+        ch.basic_publish(
+            exchange="",
+            mandatory=True,
+            routing_key=QUEUE_FLOW6_P2_TO_P4,
+            body=json.dumps(data, indent=2),
+            properties=pika.BasicProperties(
+                delivery_mode=pika.DeliveryMode.Persistent,
+                content_type="application/json",
+            ),
+        )
+        gt.metrics_counter["flow6_remote_processed"] += 1
+        log.info(f"[Flow 6] Remote-return forwarded to '{QUEUE_FLOW6_P2_TO_P4}'")
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
+    except Exception as e:
+        log.error(f"[Flow 6] Remote return error: {e}", exc_info=True)
+        gt.metrics_counter["flow6_failed"] += 1
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+
+def handle_flow7_message(ch, method, properties, body):
+    """Flow 7 (soft-delete device) handler on Process 2. Marks deletion metadata."""
+    try:
+        data = json.loads(body.decode("utf-8"))
+        log.info(f"[Flow 7] Received soft-delete for device_id={data.get('device_id')} "
+                 f"(msg_id={data.get('message_id')})")
+
+        grace_period_s = _config_watcher.get_int("flow7_grace_period_s") if _config_watcher else 0
+        data["deletion_requested_by"] = NODE_NAME
+        data["grace_period_s"] = grace_period_s
+        data["history"].append({
+            "stage": "process2_deletion_marked",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "processed_by": NODE_NAME,
+            "grace_period_s": grace_period_s,
+        })
+
+        ch.basic_publish(
+            exchange="",
+            mandatory=True,
+            routing_key=QUEUE_FLOW7_P2_TO_P3,
+            body=json.dumps(data, indent=2),
+            properties=pika.BasicProperties(
+                delivery_mode=pika.DeliveryMode.Persistent,
+                content_type="application/json",
+            ),
+        )
+        gt.metrics_counter["flow7_processed"] += 1
+        log.info(f"[Flow 7] Marked (grace={grace_period_s}s) and forwarded to '{QUEUE_FLOW7_P2_TO_P3}'")
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        gt.sleep(0)
+    except Exception as e:
+        log.error(f"[Flow 7] Error: {e}", exc_info=True)
+        gt.metrics_counter["flow7_failed"] += 1
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+
 # ---------------------------------------------------------------------------
 # Per-queue consumer greenthreads — each owns its own pika connection+channel
 # ---------------------------------------------------------------------------
@@ -222,6 +417,91 @@ def _gt_consume_flow3():
         log.info("flow3-consumer greenthread stopped.")
 
 
+def _gt_consume_flow4():
+    """Greenthread: dedicated consumer for QUEUE_FLOW4_P1_TO_P2 (own connection)."""
+    conn = gt.get_rmq_connection_with_retry("p2-flow4")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
+    ch.basic_consume(queue=QUEUE_FLOW4_P1_TO_P2, on_message_callback=handle_flow4_message, auto_ack=False)
+    log.info(f"flow4-consumer greenthread started — consuming '{QUEUE_FLOW4_P1_TO_P2}'")
+    try:
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
+    finally:
+        conn.close()
+        log.info("flow4-consumer greenthread stopped.")
+
+
+def _gt_consume_flow5():
+    """Greenthread: dedicated consumer for QUEUE_FLOW5_P1_TO_P2 (own connection)."""
+    conn = gt.get_rmq_connection_with_retry("p2-flow5")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
+    ch.basic_consume(queue=QUEUE_FLOW5_P1_TO_P2, on_message_callback=handle_flow5_message, auto_ack=False)
+    log.info(f"flow5-consumer greenthread started — consuming '{QUEUE_FLOW5_P1_TO_P2}'")
+    try:
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
+    finally:
+        conn.close()
+        log.info("flow5-consumer greenthread stopped.")
+
+
+def _gt_consume_flow6():
+    """Greenthread: dedicated consumer for QUEUE_FLOW6_P1_TO_P2 (own connection)."""
+    conn = gt.get_rmq_connection_with_retry("p2-flow6")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
+    ch.basic_consume(queue=QUEUE_FLOW6_P1_TO_P2, on_message_callback=handle_flow6_message, auto_ack=False)
+    log.info(f"flow6-consumer greenthread started — consuming '{QUEUE_FLOW6_P1_TO_P2}'")
+    try:
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
+    finally:
+        conn.close()
+        log.info("flow6-consumer greenthread stopped.")
+
+
+def _gt_consume_flow6_remote_return():
+    """Greenthread: dedicated consumer for QUEUE_FLOW6_P5_TO_P2 (own connection)."""
+    conn = gt.get_rmq_connection_with_retry("p2-flow6-remote")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
+    ch.basic_consume(queue=QUEUE_FLOW6_P5_TO_P2, on_message_callback=handle_flow6_remote_return_message, auto_ack=False)
+    log.info(f"flow6-remote-return-consumer greenthread started — consuming '{QUEUE_FLOW6_P5_TO_P2}'")
+    try:
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
+    finally:
+        conn.close()
+        log.info("flow6-remote-return-consumer greenthread stopped.")
+
+
+def _gt_consume_flow7():
+    """Greenthread: dedicated consumer for QUEUE_FLOW7_P1_TO_P2 (own connection)."""
+    conn = gt.get_rmq_connection_with_retry("p2-flow7")
+    ch   = conn.channel()
+    setup_queues(ch)
+    ch.basic_qos(prefetch_count=GT_PREFETCH_COUNT)
+    ch.basic_consume(queue=QUEUE_FLOW7_P1_TO_P2, on_message_callback=handle_flow7_message, auto_ack=False)
+    log.info(f"flow7-consumer greenthread started — consuming '{QUEUE_FLOW7_P1_TO_P2}'")
+    try:
+        while not gt.is_stopping():
+            conn.process_data_events(time_limit=1)
+            gt.sleep(0)
+    finally:
+        conn.close()
+        log.info("flow7-consumer greenthread stopped.")
+
+
 def _gt_zk_health_reporter():
     while not gt.is_stopping():
         try:
@@ -244,10 +524,25 @@ def _consume():
     # Greenthread 3: Flow 3 consumer (from remote Process 5)
     gt.spawn_consumers("p2_flow3_consumer", _gt_consume_flow3, GT_CONSUMERS_PER_QUEUE)
 
-    # Greenthread 4: ZooKeeper health reporter
+    # Flow 4 consumer (create device)
+    gt.spawn_consumers("p2_flow4_consumer", _gt_consume_flow4, GT_CONSUMERS_PER_QUEUE)
+
+    # Flow 5 consumer (query devices)
+    gt.spawn_consumers("p2_flow5_consumer", _gt_consume_flow5, GT_CONSUMERS_PER_QUEUE)
+
+    # Flow 6 consumer (update device — from P1)
+    gt.spawn_consumers("p2_flow6_consumer", _gt_consume_flow6, GT_CONSUMERS_PER_QUEUE)
+
+    # Flow 6 remote return consumer (from P5 edge-sync)
+    gt.spawn_consumers("p2_flow6_remote_consumer", _gt_consume_flow6_remote_return, GT_CONSUMERS_PER_QUEUE)
+
+    # Flow 7 consumer (soft-delete device)
+    gt.spawn_consumers("p2_flow7_consumer", _gt_consume_flow7, GT_CONSUMERS_PER_QUEUE)
+
+    # ZooKeeper health reporter
     gt.periodic("p2_zk_health", _gt_zk_health_reporter, 30)
 
-    # Greenthread 5: Metrics reporter
+    # Metrics reporter
     gt.start_metrics_reporter("process2")
 
     log.info(f"All greenthreads started: {gt.list_greenthreads()}")

@@ -251,8 +251,11 @@ import fnmatch  # used for resource glob matching (flow:*)
 # Built-in roles available without any configuration.
 # Operators may define additional roles in AUTHZ_ROLES and AUTHZ_IDENTITY_ROLES.
 _BUILTIN_ROLES: dict = {
-    # publisher: may submit messages to all three flows (and batch).
-    "publisher": frozenset({"flow:1:publish", "flow:2:publish", "flow:3:publish"}),
+    # publisher: may submit messages to all flows (1-7) and batch.
+    "publisher": frozenset({
+        "flow:1:publish", "flow:2:publish", "flow:3:publish",
+        "flow:4:publish", "flow:5:publish", "flow:6:publish", "flow:7:publish",
+    }),
     # reader: may inspect health, status, ZooKeeper config and Swift listings.
     "reader": frozenset({
         "health:read", "ready:read", "gt:status:read",
@@ -268,6 +271,7 @@ _BUILTIN_ROLES: dict = {
     # operator: publisher + reader + admin (all-access built-in role).
     "operator": frozenset({
         "flow:1:publish", "flow:2:publish", "flow:3:publish",
+        "flow:4:publish", "flow:5:publish", "flow:6:publish", "flow:7:publish",
         "health:read", "ready:read", "gt:status:read",
         "zk:health:read", "zk:config:read", "zk:config:write",
         "swift:objects:list", "swift:object:read",

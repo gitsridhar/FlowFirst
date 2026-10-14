@@ -39,6 +39,10 @@ from src.config.config import (
     QUEUE_FLOW1_P1_TO_P2,
     QUEUE_FLOW2_P1_TO_P2,
     QUEUE_FLOW3_P1_TO_P5,
+    QUEUE_FLOW4_P1_TO_P2,
+    QUEUE_FLOW5_P1_TO_P2,
+    QUEUE_FLOW6_P1_TO_P2,
+    QUEUE_FLOW7_P1_TO_P2,
     GT_METRICS_INTERVAL_S,
     API_REQUEST_POOL_SIZE,
     API_LISTEN_BACKLOG,
@@ -206,6 +210,123 @@ def publish_flow3_message(item_id: int = None, custom_data: str = None, remote_m
     return payload
 
 
+def publish_flow4_message(device_name: str = None, device_type: str = None, location: str = None,
+                          firmware_version: str = None, tags: dict = None, owner_team: str = None) -> dict:
+    """Prepare and publish a Flow 4 message (create IoT device)."""
+    import uuid as _uuid
+    device_id = str(_uuid.uuid4())
+    if device_name is None:
+        device_name = f"sensor-{int(time.time() * 1000) % 100000}"
+    if device_type is None:
+        device_type = "temperature_sensor"
+    if location is None:
+        location = "facility/zone-1"
+    if firmware_version is None:
+        firmware_version = "1.0.0"
+    if owner_team is None:
+        owner_team = "ops"
+
+    payload = {
+        "flow": 4,
+        "message_id": str(uuid.uuid4()),
+        "operation": "create",
+        "device_id": device_id,
+        "device_name": device_name,
+        "device_type": device_type,
+        "location": location,
+        "firmware_version": firmware_version,
+        "tags": tags or {},
+        "status": "active",
+        "owner_team": owner_team,
+        "history": [{
+            "stage": "process1_created",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "published_by": NODE_NAME,
+            "operation": "create_device",
+        }],
+    }
+    body = json.dumps(payload, indent=2)
+    _publish(QUEUE_FLOW4_P1_TO_P2, body)
+    gt.metrics_counter["flow4_published"] += 1
+    log.info(f"[Flow 4] Published create device '{device_name}' ({device_type})")
+    return payload
+
+
+def publish_flow5_message(filters: dict = None) -> dict:
+    """Prepare and publish a Flow 5 message (query IoT devices)."""
+    if filters is None:
+        filters = {}
+
+    payload = {
+        "flow": 5,
+        "message_id": str(uuid.uuid4()),
+        "operation": "query",
+        "filters": filters,
+        "history": [{
+            "stage": "process1_created",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "published_by": NODE_NAME,
+            "operation": "query_devices",
+        }],
+    }
+    body = json.dumps(payload, indent=2)
+    _publish(QUEUE_FLOW5_P1_TO_P2, body)
+    gt.metrics_counter["flow5_published"] += 1
+    log.info(f"[Flow 5] Published device query (filters={filters})")
+    return payload
+
+
+def publish_flow6_message(device_id: str, updates: dict = None) -> dict:
+    """Prepare and publish a Flow 6 message (update IoT device)."""
+    if not device_id:
+        raise ValueError("device_id is required for flow 6 (update)")
+    if updates is None:
+        updates = {}
+
+    payload = {
+        "flow": 6,
+        "message_id": str(uuid.uuid4()),
+        "operation": "update",
+        "device_id": device_id,
+        "updates": updates,
+        "history": [{
+            "stage": "process1_created",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "published_by": NODE_NAME,
+            "operation": "update_device",
+        }],
+    }
+    body = json.dumps(payload, indent=2)
+    _publish(QUEUE_FLOW6_P1_TO_P2, body)
+    gt.metrics_counter["flow6_published"] += 1
+    log.info(f"[Flow 6] Published update for device_id={device_id}")
+    return payload
+
+
+def publish_flow7_message(device_id: str) -> dict:
+    """Prepare and publish a Flow 7 message (soft-delete IoT device)."""
+    if not device_id:
+        raise ValueError("device_id is required for flow 7 (delete)")
+
+    payload = {
+        "flow": 7,
+        "message_id": str(uuid.uuid4()),
+        "operation": "delete",
+        "device_id": device_id,
+        "history": [{
+            "stage": "process1_created",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "published_by": NODE_NAME,
+            "operation": "soft_delete_device",
+        }],
+    }
+    body = json.dumps(payload, indent=2)
+    _publish(QUEUE_FLOW7_P1_TO_P2, body)
+    gt.metrics_counter["flow7_published"] += 1
+    log.info(f"[Flow 7] Published soft-delete for device_id={device_id}")
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # HTTP Handler
 # ---------------------------------------------------------------------------
@@ -263,7 +384,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(body)
@@ -271,7 +392,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
@@ -296,11 +417,15 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     "GET /swift/status": "Swift object storage connection and container status",
                     "GET /swift/objects": "List stored objects in Swift (?prefix=...&limit=...)",
                     "GET /swift/object/<path>": "Retrieve stored message payload from Swift",
-                    "POST /zk/config":   "Update a runtime config value in ZK",
-                    "POST /api/flow1":   "Publish message to Flow 1",
-                    "POST /api/flow2":   "Publish message to Flow 2",
-                    "POST /api/flow3":   "Publish message to Flow 3 (Remote Node 4 / Process 5 pipeline)",
-                    "POST /api/batch":   "Publish batch to all flows",
+                    "POST /zk/config":         "Update a runtime config value in ZK",
+                    "POST /api/flow1":          "Publish message to Flow 1",
+                    "POST /api/flow2":          "Publish message to Flow 2",
+                    "POST /api/flow3":          "Publish message to Flow 3 (Remote Node 4 / Process 5 pipeline)",
+                    "POST /api/batch":          "Publish batch to all flows",
+                    "POST /api/devices":        "Create IoT device (Flow 4)",
+                    "POST /api/devices/query":  "Query IoT devices (Flow 5)",
+                    "PUT  /api/devices/{id}":   "Update IoT device (Flow 6, also fans out to remote node)",
+                    "DELETE /api/devices/{id}": "Soft-delete IoT device (Flow 7)",
                 },
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
@@ -503,7 +628,8 @@ class RestApiHandler(BaseHTTPRequestHandler):
         if not ok:
             return
         try:
-            if path in ("/api/flow1", "/api/flow2", "/api/flow3", "/api/batch"):
+            if path in ("/api/flow1", "/api/flow2", "/api/flow3", "/api/batch",
+                        "/api/devices", "/api/devices/query"):
                 if not self._require_auth():
                     return
 
@@ -553,6 +679,27 @@ class RestApiHandler(BaseHTTPRequestHandler):
                                       "message": f"Published {count} messages to both flows",
                                       "flow1_messages": results1, "flow2_messages": results2})
 
+            elif path == "/api/devices":
+                if not self._require_authz("publish", "flow:4"):
+                    return
+                p = publish_flow4_message(
+                    device_name=post_data.get("device_name"),
+                    device_type=post_data.get("device_type"),
+                    location=post_data.get("location"),
+                    firmware_version=post_data.get("firmware_version"),
+                    tags=post_data.get("tags"),
+                    owner_team=post_data.get("owner_team"),
+                )
+                self._send_json(200, {"status": "success", "flow": 4, "handled_by_node": NODE_NAME,
+                                      "target_queue": QUEUE_FLOW4_P1_TO_P2, "payload": p})
+
+            elif path == "/api/devices/query":
+                if not self._require_authz("publish", "flow:5"):
+                    return
+                p = publish_flow5_message(filters=post_data.get("filters", post_data))
+                self._send_json(200, {"status": "success", "flow": 5, "handled_by_node": NODE_NAME,
+                                      "target_queue": QUEUE_FLOW5_P1_TO_P2, "payload": p})
+
             elif path == "/zk/config":
                 if not self._require_admin():
                     return
@@ -573,6 +720,55 @@ class RestApiHandler(BaseHTTPRequestHandler):
             self._fail(400, "Invalid field value: item_id, counter, value, remote_metric and count must be numbers", e)
         except Exception as e:
             self._fail(500, "Internal Server Error", e)
+
+    def do_PUT(self):
+        path = urlparse(self.path).path.rstrip("/")
+        # PUT /api/devices/{device_id}  — update a device (Flow 6)
+        if path.startswith("/api/devices/"):
+            device_id = path[len("/api/devices/"):]
+            if not device_id:
+                self._send_json(400, {"error": "device_id is required in URL path"})
+                return
+            if not self._require_auth():
+                return
+            if not self._require_authz("publish", "flow:6"):
+                return
+            ok, put_data = self._read_json_body()
+            if not ok:
+                return
+            try:
+                p = publish_flow6_message(device_id=device_id, updates=put_data)
+                self._send_json(200, {"status": "success", "flow": 6, "handled_by_node": NODE_NAME,
+                                      "target_queue": QUEUE_FLOW6_P1_TO_P2, "payload": p})
+            except (ValueError, TypeError) as e:
+                self._fail(400, "Invalid field value", e)
+            except Exception as e:
+                self._fail(500, "Internal Server Error", e)
+        else:
+            self._send_json(404, {"error": "Not Found"})
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path.rstrip("/")
+        # DELETE /api/devices/{device_id}  — soft-delete a device (Flow 7)
+        if path.startswith("/api/devices/"):
+            device_id = path[len("/api/devices/"):]
+            if not device_id:
+                self._send_json(400, {"error": "device_id is required in URL path"})
+                return
+            if not self._require_auth():
+                return
+            if not self._require_authz("publish", "flow:7"):
+                return
+            try:
+                p = publish_flow7_message(device_id=device_id)
+                self._send_json(200, {"status": "success", "flow": 7, "handled_by_node": NODE_NAME,
+                                      "target_queue": QUEUE_FLOW7_P1_TO_P2, "payload": p})
+            except (ValueError, TypeError) as e:
+                self._fail(400, "Invalid field value", e)
+            except Exception as e:
+                self._fail(500, "Internal Server Error", e)
+        else:
+            self._send_json(404, {"error": "Not Found"})
 
     def log_message(self, fmt, *args):
         log.info(f"[http] {self.address_string()} — {fmt % args}")

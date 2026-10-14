@@ -292,6 +292,35 @@ QUEUE_FLOW3_P1_TO_P5 = "flow3_p1_to_p5"
 QUEUE_FLOW3_P5_TO_P2 = "flow3_p5_to_p2"
 QUEUE_FLOW3_P2_TO_P4 = "flow3_p2_to_p4"
 
+# Flow 4 Queues (IoT Device Create)
+# Flow 4: P1 -> [flow4_p1_to_p2] -> P2 (enrich) -> [flow4_p2_to_p3] -> P3 (validate) -> [flow4_p3_to_p4] -> P4 (persist)
+QUEUE_FLOW4_P1_TO_P2 = "flow4_p1_to_p2"
+QUEUE_FLOW4_P2_TO_P3 = "flow4_p2_to_p3"
+QUEUE_FLOW4_P3_TO_P4 = "flow4_p3_to_p4"
+
+# Flow 5 Queues (IoT Device Query)
+# Flow 5: P1 -> [flow5_p1_to_p2] -> P2 (normalize) -> [flow5_p2_to_p3] -> P3 (validate) -> [flow5_p3_to_p4] -> P4 (query+archive)
+QUEUE_FLOW5_P1_TO_P2 = "flow5_p1_to_p2"
+QUEUE_FLOW5_P2_TO_P3 = "flow5_p2_to_p3"
+QUEUE_FLOW5_P3_TO_P4 = "flow5_p3_to_p4"
+
+# Flow 6 Queues (IoT Device Update — also fans out to remote P5)
+# Flow 6: P1 -> [flow6_p1_to_p2] -> P2 (sequence) -> [flow6_p2_to_p3] -> P3 (validate)
+#         -> [flow6_p3_to_p4] (direct persist) AND [flow6_p3_to_p5] (remote fan-out)
+#         -> P5 (edge sync) -> [flow6_p5_to_p2] -> P2 -> [flow6_p2_to_p4] -> P4 (remote result persist)
+QUEUE_FLOW6_P1_TO_P2 = "flow6_p1_to_p2"
+QUEUE_FLOW6_P2_TO_P3 = "flow6_p2_to_p3"
+QUEUE_FLOW6_P3_TO_P4 = "flow6_p3_to_p4"
+QUEUE_FLOW6_P3_TO_P5 = "flow6_p3_to_p5"
+QUEUE_FLOW6_P5_TO_P2 = "flow6_p5_to_p2"
+QUEUE_FLOW6_P2_TO_P4 = "flow6_p2_to_p4"
+
+# Flow 7 Queues (IoT Device Soft-Delete)
+# Flow 7: P1 -> [flow7_p1_to_p2] -> P2 (mark) -> [flow7_p2_to_p3] -> P3 (validate) -> [flow7_p3_to_p4] -> P4 (decommission)
+QUEUE_FLOW7_P1_TO_P2 = "flow7_p1_to_p2"
+QUEUE_FLOW7_P2_TO_P3 = "flow7_p2_to_p3"
+QUEUE_FLOW7_P3_TO_P4 = "flow7_p3_to_p4"
+
 # Greenthread (eventlet) settings
 GT_POOL_SIZE          = int(os.getenv("GT_POOL_SIZE",          "1000"))
 GT_WORKER_CONCURRENCY = int(os.getenv("GT_WORKER_CONCURRENCY", "4"))
@@ -341,6 +370,21 @@ ALL_QUEUES = [
     QUEUE_FLOW3_P1_TO_P5,
     QUEUE_FLOW3_P5_TO_P2,
     QUEUE_FLOW3_P2_TO_P4,
+    QUEUE_FLOW4_P1_TO_P2,
+    QUEUE_FLOW4_P2_TO_P3,
+    QUEUE_FLOW4_P3_TO_P4,
+    QUEUE_FLOW5_P1_TO_P2,
+    QUEUE_FLOW5_P2_TO_P3,
+    QUEUE_FLOW5_P3_TO_P4,
+    QUEUE_FLOW6_P1_TO_P2,
+    QUEUE_FLOW6_P2_TO_P3,
+    QUEUE_FLOW6_P3_TO_P4,
+    QUEUE_FLOW6_P3_TO_P5,
+    QUEUE_FLOW6_P5_TO_P2,
+    QUEUE_FLOW6_P2_TO_P4,
+    QUEUE_FLOW7_P1_TO_P2,
+    QUEUE_FLOW7_P2_TO_P3,
+    QUEUE_FLOW7_P3_TO_P4,
 ]
 
 

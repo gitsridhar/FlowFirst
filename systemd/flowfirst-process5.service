@@ -17,6 +17,7 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=flowfirst-p5
+# Sandbox: systemd/flowfirst-hardening.conf, installed as a drop-in.
 LimitNOFILE=65536
 TimeoutStopSec=5s
 KillMode=mixed

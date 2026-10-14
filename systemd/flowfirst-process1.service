@@ -23,12 +23,9 @@ TimeoutStopSec=5s
 KillMode=mixed
 KillSignal=SIGTERM
 
-# Security Sandbox options
+# Sandbox (file system, privileges, network, system calls): systemd/flowfirst-hardening.conf, installed as a drop-in.
 # Greenthread support: allow up to 65536 open file descriptors per process
 LimitNOFILE=65536
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=read-only
 
 [Install]
 WantedBy=multi-user.target

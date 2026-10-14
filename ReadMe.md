@@ -8421,6 +8421,243 @@ In the context of FlowFirst: passkeys are relevant for the *operator* accessing 
 
 ---
 
+## Authorization Architecture
+
+> **Status:** RBAC, ACL, and ABAC authorization are fully implemented in [`src/application/authz.py`](src/application/authz.py) and wired into Process 1. Default `AUTHZ_MODE=none` preserves existing behaviour. 54 new tests in [`tests/test_authz.py`](tests/test_authz.py). OAuth2, ReBAC, DAC, MAC, and Policy-as-Code are documented below but **not implemented** (each requires external infrastructure).
+
+Authorization runs **after** authentication. Authentication answers *"who are you?"* (identity); authorization answers *"what are you allowed to do?"* (access control). They are independent layers — you can run `AUTH_MODE=api_key` with full RBAC, or `AUTH_MODE=none` (no authentication) with `AUTHZ_MODE=none` (no authorization, the default), or any combination.
+
+### Resources and actions
+
+Every protected endpoint is represented as `resource:action`:
+
+| Endpoint | Resource | Action |
+|---|---|---|
+| `POST /api/flow1` | `flow:1` | `publish` |
+| `POST /api/flow2` | `flow:2` | `publish` |
+| `POST /api/flow3` | `flow:3` | `publish` |
+| `POST /api/batch` | `flow:*` | `publish` |
+| `POST /zk/config` | `zk:config` | `write` |
+| `GET /zk/config` | `zk:config` | `read` |
+| `GET /zk/health` | `zk:health` | `read` |
+| `GET /swift/objects` | `swift:objects` | `list` |
+| `GET /swift/object/<name>` | `swift:object` | `read` |
+| `GET /gt/status` | `gt:status` | `read` |
+| `GET /health` | `health` | `read` |
+| `GET /ready` | `ready` | `read` |
+
+Resource patterns support `fnmatch` globs: `flow:*` matches `flow:1`, `flow:2`, and `flow:3`.
+
+---
+
+### Option 1 — RBAC (Role-Based Access Control)
+
+**How it works.** Every identity is assigned one or more roles. Each role carries a set of `resource:action` permission tokens. If any of the identity's roles grants the requested `resource:action`, the request is allowed.
+
+**Built-in roles** (always available, no configuration needed):
+
+| Role | Permissions |
+|---|---|
+| `publisher` | `flow:1:publish`, `flow:2:publish`, `flow:3:publish` |
+| `reader` | `health:read`, `ready:read`, `gt:status:read`, `zk:health:read`, `zk:config:read`, `swift:objects:list`, `swift:object:read` |
+| `admin` | Everything in `reader` + `zk:config:write` |
+| `operator` | All of the above (`publisher` + `admin`) |
+
+**To enable:**
+```
+AUTHZ_MODE=rbac
+AUTHZ_IDENTITY_ROLES=ci_bot=publisher;  ops_alice=operator;  monitor_svc=reader
+```
+
+`ci_bot` may publish to any flow; `ops_alice` has all access; `monitor_svc` may only read.
+
+**Custom roles** — define additional roles in `AUTHZ_ROLES`:
+```
+# Format: rolename=resource:action,resource:action;  rolename2=...
+AUTHZ_ROLES=ingest=flow:1:publish,flow:2:publish;  readonly_monitor=health:read,ready:read
+AUTHZ_IDENTITY_ROLES=legacy_app=ingest;  nagios=readonly_monitor
+```
+
+**Identity source.** The identity used for role lookup is:
+- In `AUTH_MODE=api_key` or `token` — the API key label (e.g. `ci_bot`) or the token subject.
+- In `AUTH_MODE=cert` — the client certificate CN.
+- In `AUTH_MODE=none` — the client certificate CN if present, otherwise `anonymous`.
+
+---
+
+### Option 2 — ACL (Access Control List)
+
+**How it works.** An explicit per-resource allow-list maps each `resource:action` to a set of permitted identities. There are no roles — each identity must appear in the ACL for each resource it needs.
+
+**To enable:**
+```
+AUTHZ_MODE=acl
+# Format: resource:action=identity1,identity2;  resource2:action=identity3
+AUTHZ_ACL=flow:1:publish=ci_bot,data_ingest;  zk:config:write=admin-cert;  flow:*:publish=batch_svc
+```
+
+`ci_bot` and `data_ingest` may publish to Flow 1; `admin-cert` may write ZK config; `batch_svc` may publish to any flow. Any identity **not in the list for a given resource:action** is denied even if it appears elsewhere in the ACL.
+
+**Wildcard resources** work in ACL entries exactly as in RBAC permissions: `flow:*:publish=batch_svc` grants publish on `flow:1`, `flow:2`, and `flow:3`.
+
+---
+
+### Option 3 — ABAC (Attribute-Based Access Control)
+
+**How it works.** A JSON list of rules is evaluated in order. Each rule has a `when` map of attribute conditions and an `effect` of `"allow"` or `"deny"`. The first rule whose conditions all match wins.
+
+**Supported `when` keys:**
+
+| Key | Matches when |
+|---|---|
+| `identity` | Caller's identity equals this value exactly |
+| `role` | Caller has this role (requires `AUTHZ_IDENTITY_ROLES`) |
+| `action` | Action equals this value (`publish`, `read`, etc.) |
+| `resource` | Resource equals or glob-matches this value |
+| `method` | HTTP method (`GET`, `POST`, …) |
+| `hour_utc_lt` | Current UTC hour is **less than** this number (0–23) |
+| `hour_utc_gte` | Current UTC hour is **≥** this number (0–23) |
+
+**To enable:**
+```
+AUTHZ_MODE=abac
+# JSON must be on one line in .env (python-dotenv limitation)
+AUTHZ_POLICY=[{"when":{"identity":"bad_bot"},"effect":"deny"},{"when":{"action":"publish","hour_utc_lt":8},"effect":"deny"},{"when":{"action":"publish","hour_utc_gte":18},"effect":"deny"},{"when":{"role":"publisher"},"effect":"allow"}]
+```
+
+This policy: denies `bad_bot` at any time, denies all publishes outside 08:00–18:00 UTC, and allows anyone with the `publisher` role during business hours.
+
+**Unknown `when` keys are silently ignored** (forward compatibility) — add new keys in a future version without breaking existing policies.
+
+---
+
+### Combining layers: `rbac+acl`, `rbac+abac`, `rbac+acl+abac`
+
+For production the recommended mode is `rbac+acl+abac`. Each layer adds a different kind of control:
+
+```
+AUTHZ_MODE=rbac+acl+abac
+AUTHZ_IDENTITY_ROLES=ci_bot=publisher;  ops=operator
+AUTHZ_ACL=flow:1:publish=ci_bot,emergency_svc
+AUTHZ_POLICY=[{"when":{"identity":"banned_key"},"effect":"deny"}]
+```
+
+**Evaluation order** (hardwired, cannot be changed):
+
+```
+1.  ABAC deny rules     — explicit deny beats everything
+2.  RBAC                — role-based grant
+3.  ACL                 — per-resource explicit grant (can override RBAC denial)
+4.  ABAC allow rules    — last-chance grant (can override RBAC + ACL denial)
+5.  Default: DENY       — fail closed
+```
+
+```mermaid
+flowchart TD
+    A["Request: identity, action, resource"] --> B{"AUTHZ_MODE=none?"}
+    B -- yes --> ALLOW["Allow"]
+    B -- no --> C{"ABAC deny rule matches?"}
+    C -- yes --> DENY["Deny 403"]
+    C -- no --> D{"rbac in mode AND identity has roles?"}
+    D -- "grants" --> ALLOW
+    D -- "denies" --> E{"acl in mode?"}
+    D -- "no roles" --> F{"acl in mode?"}
+    E -- "acl grants" --> ALLOW
+    E -- "acl denies" --> G{"abac in mode AND allow rule matches?"}
+    F -- "acl grants" --> ALLOW
+    F -- "acl denies / no entry" --> G
+    G -- yes --> ALLOW
+    G -- no --> DENY
+```
+
+---
+
+### End-to-end example: ci_bot publishes to Flow 1
+
+```bash
+# .env configuration
+AUTHZ_MODE=rbac+acl+abac
+AUTHZ_IDENTITY_ROLES=ci_bot=publisher
+AUTHZ_ACL=flow:1:publish=ci_bot
+AUTHZ_POLICY=[{"when":{"identity":"banned_key"},"effect":"deny"}]
+AUTH_MODE=api_key
+AUTH_API_KEYS=ci_bot:<sha256_of_ci_bot_key>
+
+# Request:
+curl -X POST http://<VIP>:8080/api/flow1 \
+  -H "X-Api-Key: <ci_bot_raw_key>" \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 42}'
+
+# Process 1 checks, in order:
+# 1. Authentication: sha256(key) matches ci_bot digest → identity = "ci_bot"
+# 2. ABAC deny: "banned_key" rule does not match "ci_bot" → continue
+# 3. RBAC: "ci_bot" has role "publisher" → "publisher" grants "flow:1:publish" → ALLOW
+```
+
+---
+
+### Options documented here but not implemented
+
+#### OAuth 2.0 / OpenID Connect (OIDC)
+
+OAuth 2.0 is an authorization *delegation* framework, not a self-contained implementation. It requires an **Authorization Server (AS)** — a separate service such as Keycloak, Okta, Entra ID, or Auth0 — that issues signed JWT access tokens. Process 1 would verify each token against the AS's public key (fetched from its JWKS endpoint) without needing the signing key itself.
+
+**How it would integrate:**
+- Replace `POST /auth/token` with an OAuth2 client-credentials flow at the AS.
+- On each request, verify `Authorization: Bearer <jwt>` by checking the signature (RS256/ES256), `iss`, `aud`, `exp`, and `iat` claims.
+- Extract the caller identity from the `sub` claim; feed it into the existing `check_authz` pipeline.
+- Replace `AUTH_TOKEN_SECRET` with the AS's JWKS URL.
+
+**Why not implemented here:** requires an external AS. The token mechanism in `authz.py` is a deliberate simplified stand-in for environments without an AS, not a production OAuth2 implementation.
+
+---
+
+#### ReBAC / Zanzibar (Relationship-Based Access Control)
+
+ReBAC models permissions as a **graph of relationships** between principals and objects (e.g. "alice is member of group_a, group_a is editor of project_1, project_1 owns flow:1"). Google Zanzibar is the canonical design; open-source implementations include SpiceDB and OpenFGA.
+
+**Why not implemented here:** ReBAC requires a persistent graph store (an external service) and a query API. For FlowFirst's flat resource model (9 resources, 4 actions, a handful of identities) the added complexity is not justified. RBAC covers the same ground with less infrastructure.
+
+---
+
+#### DAC (Discretionary Access Control)
+
+In DAC, the *owner* of a resource decides who may access it and can delegate that right. Classic example: UNIX file permissions where the file owner can `chmod` and `chown`.
+
+**Why not implemented here:** FlowFirst has no concept of resource ownership. Messages are produced by Process 1 and consumed by Processes 2–4; there is no per-message owner whose permissions should vary. Implementing DAC would require attaching an owner identity and a permission mask to every resource object and checking them at every access point — a significant data-model change with no clear benefit for a pipeline.
+
+---
+
+#### MAC (Mandatory Access Control)
+
+In MAC, a central authority assigns **sensitivity labels** (e.g. Confidential, Secret, Top Secret) to subjects and objects. Access is controlled by comparing labels: a subject may only read objects at its clearance level or below (no-read-up) and write objects at its clearance level or above (no-write-down). The owner cannot override the label. SELinux on RHEL 9 is a MAC system for the OS layer.
+
+**Why not implemented here:** MAC requires a classification system. FlowFirst does not classify messages — all pipeline data is treated uniformly. MAC would be appropriate if the pipeline carried data of different sensitivity levels (e.g. PII vs. non-PII flows) and callers needed to be restricted by clearance. To add it: assign a numeric level to each flow (`flow:1 = level 1`, `flow:2 = level 2`, …) and store a maximum-clearance level per identity; reject requests where the identity's clearance is below the resource's level.
+
+---
+
+#### Policy-as-Code (OPA / Cedar)
+
+Policy-as-Code separates authorization logic from application code. The application makes an authorization query (`{"principal": ..., "action": ..., "resource": ...}`) to a policy engine, which evaluates it against a policy written in a dedicated language and returns allow/deny.
+
+- **Open Policy Agent (OPA)**: uses Rego, a declarative query language. The application calls the OPA REST API or embeds the OPA Go library. Policies are stored in and hot-reloaded from version-controlled `.rego` files.
+- **Cedar**: AWS's policy language, designed for fine-grained authorization. The Cedar SDK is available in Python.
+
+**Why not implemented here:** the ABAC engine in `authz.py` covers the same use cases (attribute matching, time-based rules) with a far smaller footprint — no external process, no Rego learning curve, no SDK dependency. For an organization that already runs OPA as a policy sidecar, replacing `check_authz` with an OPA query is straightforward: call `http://localhost:8181/v1/data/flowfirst/allow` with the same attribute dict and interpret the response.
+
+---
+
+### Limits of the implemented authorization
+
+1. **No session persistence.** `_AUTHZ_ROLES`, `_AUTHZ_IDENTITY_ROLES`, `_AUTHZ_ACL`, and `_AUTHZ_POLICY` are parsed once at process start from `.env`. Changing them requires restarting Process 1 on every node (rolling restart is safe: each node picks up the new policy independently).
+2. **Flat identity model.** There are no groups within RBAC — assign each identity individually in `AUTHZ_IDENTITY_ROLES`. For large deployments, consider OPA or a directory-backed identity store.
+3. **`flow:*` in the ACL is a glob, not a literal.** An ACL entry `flow:*:publish=svc` grants `svc` publish access on all three flows. If you need per-flow ACLs alongside a wildcard entry, list the flows explicitly.
+4. **ABAC time rules use UTC server time.** If callers are in different time zones, make sure the time window in `AUTHZ_POLICY` accounts for them.
+5. **No deny logging to a SIEM.** Denied requests are logged to the Process 1 journal at `WARNING` level (`[authz] DENIED`). For audit trails, forward the journal to a SIEM (e.g. with `systemd-journal-remote` or Filebeat).
+
+---
+
 ## Backup and Restore
 
 > **Status:** the scripts below were tested with real MariaDB 10.11, ZooKeeper 3.9 and RabbitMQ 3 containers on one workstation (database round trip with 500 awkward rows, a simulated table loss, ZooKeeper config, RabbitMQ definitions, damage and wrong-passphrase detection). **They have not been run on the four-node cluster**, not against Galera, not with TLS on, not on RHEL, and not from Pacemaker or cron. Rehearse a full restore on a test cluster before relying on them.

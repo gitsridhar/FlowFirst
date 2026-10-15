@@ -1577,12 +1577,17 @@ curl -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 \
 ```
 
 #### D. Verify Round-Robin Load Balancing
+
+The loop below includes `Content-Type: application/json` — without it Process 1 rejects the body with a 400 before setting `handled_by_node`, causing every response to print `null` regardless of which node answered.
+
 ```bash
 for i in {1..6}; do
-  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -d "{\"item_id\": $i}" | jq -r '.handled_by_node'
+  curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
+    -H "Content-Type: application/json" \
+    -d "{\"item_id\": $i, \"counter\": 100}" | jq -r '.handled_by_node'
 done
 ```
-*Output demonstrates traffic distributed across all 3 nodes:*
+*Expected output — each of the three nodes handles two requests:*
 ```text
 node1
 node2
@@ -1591,6 +1596,23 @@ node1
 node2
 node3
 ```
+
+> **If all six lines show the same node** HAProxy is balancing correctly but the responses are 400s whose JSON has no `handled_by_node` key (jq prints `null`). Confirm with:
+> ```bash
+> curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
+>   -H "Content-Type: application/json" \
+>   -d '{"item_id": 1, "counter": 100}'
+> ```
+> A successful response contains `"status": "success"` and `"handled_by_node": "nodeN"`. A 400 contains `"error"` instead.
+
+Confirm the distribution using the HAProxy stats API (no `jq` required):
+```bash
+curl -s -u "${HAPROXY_STATS_USER}:${HAPROXY_STATS_PASS}" \
+  "http://${FLOWFIRST_VIP}:9000/stats;csv" \
+  | grep -E "^api_backend,(node1|node2|node3)" \
+  | awk -F',' '{printf "%-10s  sessions: %s\n", $2, $8}'
+```
+*Each backend (`node1`, `node2`, `node3`) should show a non-zero and roughly equal session count.*
 
 ---
 

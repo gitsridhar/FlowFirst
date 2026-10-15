@@ -150,3 +150,40 @@ def test_missing_crl_file_fails(tmp_path):
     settings["TLS_CRL_FILE"] = str(tmp_path / "nope.crl")
     code, out = run_check(tmp_path, settings)
     assert code == 1 and "unreadable" in out
+
+
+# ---------------------------------------------------------------------------
+# Notifications checks
+# ---------------------------------------------------------------------------
+
+def test_notifications_off_is_skipped(tmp_path):
+    code, out = run_check(tmp_path, {})
+    assert code == 0 and "SKIP" in out and "NOTIFICATIONS_ENABLED=false" in out
+
+
+def test_notifications_enabled_with_exchange_passes(tmp_path):
+    code, out = run_check(tmp_path, {
+        "NOTIFICATIONS_ENABLED": "true",
+        "NOTIFICATIONS_EXCHANGE": "flowfirst.notifications",
+    })
+    assert code == 0
+    assert "PASS" in out and "exchange=flowfirst.notifications" in out
+    assert "flows=all (1-7)" in out
+
+
+def test_notifications_enabled_with_flow_filter_passes(tmp_path):
+    code, out = run_check(tmp_path, {
+        "NOTIFICATIONS_ENABLED": "true",
+        "NOTIFICATIONS_EXCHANGE": "flowfirst.notifications",
+        "NOTIFICATIONS_FLOWS": "4,6,7",
+    })
+    assert code == 0
+    assert "PASS" in out and "flows=4,6,7" in out
+
+
+def test_notifications_enabled_blank_exchange_fails(tmp_path):
+    code, out = run_check(tmp_path, {
+        "NOTIFICATIONS_ENABLED": "true",
+        "NOTIFICATIONS_EXCHANGE": "",
+    })
+    assert code == 1 and "NOTIFICATIONS_EXCHANGE is blank" in out

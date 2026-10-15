@@ -115,6 +115,25 @@ def check_admin(env, cfg):
         say("PASS", "admin endpoint", "restricted to: " + ", ".join(x.strip() for x in allowed))
 
 
+def check_notifications(env, cfg):
+    if not cfg.NOTIFICATIONS_ENABLED:
+        say("SKIP", "notifications", "NOTIFICATIONS_ENABLED=false (opt-in; set true to activate)")
+        return
+    # Read the raw .env value so an explicit blank catches the misconfiguration even though
+    # _str_env() falls back to the default "flowfirst.notifications".
+    exchange = (env.get("NOTIFICATIONS_EXCHANGE") or "").strip()
+    if not exchange:
+        say("FAIL", "notifications", "NOTIFICATIONS_ENABLED=true but NOTIFICATIONS_EXCHANGE is blank")
+    else:
+        flows = (cfg.NOTIFICATIONS_FLOWS or "").strip()
+        detail = "exchange=%s" % exchange
+        if flows and flows != "*":
+            detail += ", flows=%s" % flows
+        else:
+            detail += ", flows=all (1-7)"
+        say("PASS", "notifications", detail)
+
+
 def check_metrics(env, cfg):
     if not cfg.METRICS_ENABLED:
         say("SKIP", "metrics", "METRICS_ENABLED=false: no /metrics listener, nothing for Prometheus to scrape")
@@ -240,6 +259,7 @@ def main():
         check_secrets(env, cfg)
         check_api(env, cfg)
         check_admin(env, cfg)
+        check_notifications(env, cfg)
         check_metrics(env, cfg)
         check_tls(env, cfg)
     check_rabbitmq()

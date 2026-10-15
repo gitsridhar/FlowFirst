@@ -36,12 +36,18 @@ _TLS_HANDSHAKE_TIMEOUT_S = 10.0
 # Counters each process can emit. They are created at 0 when metrics start: a counter that only comes into existence
 # on its first increment hides that first increment from Prometheus (increase() needs an earlier sample to compare).
 _FLOWS = ("1", "2", "3")
+_ALL_FLOWS = ("1", "2", "3", "4", "5", "6", "7")
 EXPECTED_COUNTERS: Dict[str, List[str]] = {
     "api_gateway": [f"flow{f}_published" for f in _FLOWS] + [f"http_{c}xx" for c in "2345"],
     "transformer": [f"flow{f}_{e}" for f in _FLOWS for e in ("processed", "failed")],
     "forwarder": ["flow1_forwarded", "flow1_failed", "flow2_reflected", "flow2_failed"],
-    "db_updater": ["dedup_reaped"] + [f"flow{f}_{e}" for f in _FLOWS
-                                    for e in ("persisted", "swift_stored", "dedup_skipped", "failed")],
+    "db_updater": (
+        ["dedup_reaped"]
+        + [f"flow{f}_{e}" for f in _FLOWS
+           for e in ("persisted", "swift_stored", "dedup_skipped", "failed")]
+        + [f"flow{f}_notified" for f in _ALL_FLOWS]
+        + ["flow6_remote_notified"]
+    ),
     "remote_worker": ["flow3_processed", "flow3_failed"],
 }
 

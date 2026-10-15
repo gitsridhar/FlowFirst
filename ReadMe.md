@@ -9063,6 +9063,159 @@ Check the rules without a cluster: `promtool check rules monitoring/*.rules.yml`
 
 ---
 
+## Notifications
+
+> **Status:** the module and all its wiring were implemented in `src/notifications/notifications.py`. Off by default (`NOTIFICATIONS_ENABLED=false`); enabling it requires a `.env` change and a DB Updater (Process 4) restart — no pipeline queue changes, no schema changes.
+
+### Overview
+
+When `NOTIFICATIONS_ENABLED=true`, DB Updater (Process 4) publishes a lightweight JSON **notification envelope** to a RabbitMQ fanout exchange (`flowfirst.notifications` by default) immediately after each pipeline message is successfully persisted **and** acked. External consumers bind their own durable queues to that exchange; FlowFirst only owns the exchange itself.
+
+**Key design properties:**
+- Notifications are emitted **after** `ch.basic_ack()` — the pipeline message is never put at risk for a notification.
+- `mandatory=False` on every notification publish — if no subscriber is bound, the envelope is silently discarded; it never bounces back or raises an exception in the pipeline.
+- All exceptions inside `notify()` are caught and logged as `WARNING`; the handler is never affected.
+- `history[]` is always stripped from the payload field — it is already in MariaDB and Swift.
+- `NOTIFICATIONS_FLOWS` lets you restrict emission to a subset of flows with no code change.
+
+### Configuration
+
+Add to `.env` (all nodes, identical values):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `NOTIFICATIONS_ENABLED` | `false` | Master switch. Set `true` to activate. |
+| `NOTIFICATIONS_EXCHANGE` | `flowfirst.notifications` | RabbitMQ fanout exchange name declared by FlowFirst. |
+| `NOTIFICATIONS_FLOWS` | *(blank)* | Comma-separated flow numbers to emit for (e.g. `4,6,7`). Blank or `*` = all flows 1–7. |
+| `NOTIFICATIONS_MAX_PAYLOAD_BYTES` | `8192` | The `payload` field is omitted (replaced by `payload_bytes`) when the serialised payload exceeds this. `0` = always include. |
+
+```bash
+# Enable in .env (every node), then restart DB Updater (Process 4):
+NOTIFICATIONS_ENABLED=true
+# Restart under Pacemaker:
+sudo pcs resource restart flowfirst-process4
+```
+
+### Notification Envelope Schema
+
+Every envelope is a compact JSON object published to the exchange with `content_type: application/json` and `delivery_mode: Persistent`:
+
+```json
+{
+  "notification_id": "3f7a9c12-...",
+  "event_type":      "device.created",
+  "flow":            4,
+  "entity_id":       "a8b2c3d4-...",
+  "entity_type":     "device",
+  "occurred_at":     "2025-07-14 11:30:00",
+  "node":            "node1",
+  "message_id":      "c1d2e3f4-...",
+  "payload": {
+    "device_name": "sensor-42",
+    "device_type": "temperature_sensor",
+    "location":    "facility/zone-1"
+  }
+}
+```
+
+When the serialised payload exceeds `NOTIFICATIONS_MAX_PAYLOAD_BYTES`, the `payload` key is replaced with:
+```json
+{ "payload_bytes": 14392 }
+```
+
+### Event Type Reference
+
+| Flow | Operation | `event_type` | `entity_type` |
+|------|-----------|-------------|---------------|
+| 1 | Telemetry processed | `telemetry.processed` | `message` |
+| 2 | Metric processed | `metric.processed` | `message` |
+| 3 | Remote telemetry processed | `telemetry.remote_processed` | `message` |
+| 4 | IoT device created | `device.created` | `device` |
+| 5 | IoT devices queried | `device.queried` | `device` |
+| 6 (direct path) | IoT device updated | `device.updated` | `device` |
+| 6 (remote edge-sync) | IoT device edge-synced | `device.edge_synced` | `device` |
+| 7 | IoT device decommissioned | `device.decommissioned` | `device` |
+
+### Subscriber Setup
+
+Subscribers are fully independent of FlowFirst. Each subscriber creates its own durable queue and binds it to the exchange **once** before consuming. FlowFirst never declares, consumes, or purges subscriber queues.
+
+**Python example (pika):**
+```python
+import pika
+
+conn = pika.BlockingConnection(pika.ConnectionParameters("localhost"))
+ch   = conn.channel()
+
+# Declare your own queue (durable so it survives a broker restart)
+ch.queue_declare(queue="my-svc.notifications", durable=True)
+
+# Bind it to the FlowFirst notifications exchange (fanout — no routing key needed)
+ch.queue_bind(queue="my-svc.notifications", exchange="flowfirst.notifications")
+
+def on_notification(ch, method, properties, body):
+    import json
+    env = json.loads(body)
+    print(env["event_type"], env["entity_id"])
+    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+ch.basic_qos(prefetch_count=1)
+ch.basic_consume(queue="my-svc.notifications", on_message_callback=on_notification)
+ch.start_consuming()
+```
+
+**rabbitmqctl one-liner (create queue and bind, run once on any broker node):**
+```bash
+rabbitmqctl eval '
+  {ok, C}  = amqp_connection:start(#amqp_params_network{}),
+  {ok, Ch} = amqp_channel:open(C),
+  amqp_channel:call(Ch, #'"'"'queue.declare'"'"'{queue = <<"my-svc.notifications">>, durable = true}),
+  amqp_channel:call(Ch, #'"'"'queue.bind'"'"'{queue    = <<"my-svc.notifications">>,
+                                              exchange = <<"flowfirst.notifications">>}).'
+```
+
+### Many Notifications per Flow
+
+A single pipeline message can produce more than one notification. Call `notify()` multiple times in the same handler (each call is one `basic_publish` on the already-open channel — no new connections):
+
+```python
+# Example: emit a "start" and "complete" notification within one flow (custom usage)
+_notif.notify(ch, "device.update.started",   data, flow=6)
+# ... additional work ...
+_notif.notify(ch, "device.update.completed", data, flow=6)
+```
+
+Because `NOTIFICATIONS_FLOWS` filters by flow number, both calls are subject to the same filter.
+
+### Ordering Guarantee and Delivery Semantics
+
+Notifications use **at-most-once** delivery:
+
+- They are emitted after `basic_ack` — a DB Updater (Process 4) crash between the ack and the notify means the pipeline message is safe (already committed) but the notification for it is not sent.
+- `mandatory=False` — a notification with no bound subscriber queue is silently dropped by RabbitMQ; it does not cause a publisher error.
+- There is no built-in retry, acknowledgement tracking, or subscriber authentication. For guaranteed delivery, reliable ordering, or per-subscriber access control, run a relay service that consumes from the fanout queue and re-publishes with the required semantics.
+
+### Metrics
+
+With `METRICS_ENABLED=true`, DB Updater (Process 4) exposes one counter per flow:
+
+| Series | Meaning |
+|---|---|
+| `flowfirst_messages_total{flow="N",event="notified"}` | Notification envelopes successfully published to the exchange (flows 1–7). |
+| `flowfirst_messages_total{flow="6",event="remote_notified"}` | Envelopes published for the Flow 6 remote edge-sync path specifically. |
+
+A counter at zero with `NOTIFICATIONS_ENABLED=true` and traffic flowing means `notify()` is raising internally and logging warnings — check the DB Updater (Process 4) log.
+
+### What This Facility Does Not Do
+
+- No delivery guarantee beyond RabbitMQ's own durable queue behaviour for bound subscribers.
+- No subscriber authentication — anyone with AMQP access to the broker can bind a queue.
+- No filtering beyond `NOTIFICATIONS_FLOWS` (by flow number). Event-type filtering is the subscriber's responsibility.
+- No dashboard, no dedicated alert rule. Use `flowfirst_messages_total{event="notified"}` in your own Prometheus query.
+- No ZooKeeper dedup — unlike pipeline messages, a failover re-delivery of a pipeline message will not produce a duplicate notification because the dedup barrier fires before the handler reaches `basic_ack`.
+
+---
+
 ## Production Rollout Run-Book
 
 > **Status: nothing in this run-book has been run on a real four-node cluster.** Every step below was written from the scripts and the tests that exist in the repository (containers on one workstation, unit tests, and the real API Gateway (Process 1) handler with the broker, ZooKeeper and Swift stubbed). Treat the first run as a rehearsal on a **test cluster**, record what differs, and correct this document. Commands that are not in a repository script (for example `ALTER USER`, `rabbitmqctl change_password`) are the standard tools' syntax and were not run here.

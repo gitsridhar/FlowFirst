@@ -22,6 +22,7 @@ from src.config.config import (
     GT_CONSUMERS_PER_QUEUE,
 )
 from src.db.db import init_database, insert_processed_message, upsert_device, soft_delete_device, query_devices
+from src.notifications import notifications as _notif
 from src.swift import swift_storage
 from src.metrics import metrics
 from src.zookeeper import zk as zklib
@@ -67,6 +68,8 @@ def handle_flow1_message(ch, method, properties, body):
         log.info(f"[Flow 1] Persisted to MariaDB (row_id={row_id}, "
                  f"counter={data.get('counter')}, steps={len(data.get('history', []))})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        _notif.notify(ch, "telemetry.processed", data, flow=1)
+        gt.metrics_counter["flow1_notified"] += 1
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 1] Error: {e}", exc_info=True)
@@ -114,6 +117,8 @@ def handle_flow2_message(ch, method, properties, body):
             desc = step.get("modification") or step.get("status") or step.get("database_action")
             log.debug(f"  [{step.get('stage')}] @ {step.get('timestamp')}: {desc}")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        _notif.notify(ch, "metric.processed", data, flow=2)
+        gt.metrics_counter["flow2_notified"] += 1
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 2] Error: {e}", exc_info=True)
@@ -157,6 +162,8 @@ def handle_flow3_message(ch, method, properties, body):
         log.info(f"[Flow 3] Persisted to MariaDB (row_id={row_id}, "
                  f"remote_val={data.get('remote_computed_value')}, steps={len(data.get('history', []))})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        _notif.notify(ch, "telemetry.remote_processed", data, flow=3)
+        gt.metrics_counter["flow3_notified"] += 1
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 3] Error: {e}", exc_info=True)
@@ -197,6 +204,8 @@ def handle_flow4_message(ch, method, properties, body):
 
         log.info(f"[Flow 4] Device '{data.get('device_name')}' persisted to MariaDB")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        _notif.notify(ch, "device.created", data, flow=4)
+        gt.metrics_counter["flow4_notified"] += 1
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 4] Error: {e}", exc_info=True)
@@ -243,6 +252,8 @@ def handle_flow5_message(ch, method, properties, body):
 
         log.info(f"[Flow 5] Query returned {len(results)} devices (msg_id={msg_id})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        _notif.notify(ch, "device.queried", data, flow=5)
+        gt.metrics_counter["flow5_notified"] += 1
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 5] Error: {e}", exc_info=True)
@@ -288,6 +299,8 @@ def handle_flow6_direct_message(ch, method, properties, body):
 
         log.info(f"[Flow 6 direct] Device {device_id} updated in MariaDB")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        _notif.notify(ch, "device.updated", data, flow=6)
+        gt.metrics_counter["flow6_notified"] += 1
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 6 direct] Error: {e}", exc_info=True)
@@ -336,6 +349,8 @@ def handle_flow6_remote_message(ch, method, properties, body):
 
         log.info(f"[Flow 6 remote] Device {device_id} remote-sync persisted (edge_token={data.get('edge_sync_token')})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        _notif.notify(ch, "device.edge_synced", data, flow=6, path_hint="remote")
+        gt.metrics_counter["flow6_remote_notified"] += 1
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 6 remote] Error: {e}", exc_info=True)
@@ -380,6 +395,8 @@ def handle_flow7_message(ch, method, properties, body):
 
         log.info(f"[Flow 7] Device {device_id} decommissioned (rows_affected={rows_affected})")
         ch.basic_ack(delivery_tag=method.delivery_tag)
+        _notif.notify(ch, "device.decommissioned", data, flow=7)
+        gt.metrics_counter["flow7_notified"] += 1
         gt.sleep(0)
     except Exception as e:
         log.error(f"[Flow 7] Error: {e}", exc_info=True)

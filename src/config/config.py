@@ -227,6 +227,22 @@ SWIFT_KEY = os.getenv("SWIFT_KEY", "")
 SWIFT_CONTAINER = os.getenv("SWIFT_CONTAINER", "flowfirst_messages")
 SWIFT_ENABLED = os.getenv("SWIFT_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on")
 
+# ---------------------------------------------------------------------------
+# Notifications (src/notifications/notifications.py). Off by default.
+# NOTIFICATIONS_ENABLED: set true to publish notification envelopes from DB Updater (Process 4)
+#   after each message is successfully persisted.
+# NOTIFICATIONS_EXCHANGE: durable fanout exchange declared by FlowFirst. Subscribers create their
+#   own queues and bind them to this exchange. Never listed in ALL_QUEUES.
+# NOTIFICATIONS_FLOWS: comma-separated flow numbers to emit for (e.g. "1,4,7").
+#   Blank or "*" = emit for all flows (1-7).
+# NOTIFICATIONS_MAX_PAYLOAD_BYTES: the 'payload' field in the envelope is omitted when the
+#   serialised pipeline payload exceeds this many bytes. 0 = always include. Default 8192.
+# ---------------------------------------------------------------------------
+NOTIFICATIONS_ENABLED           = _bool_env("NOTIFICATIONS_ENABLED")
+NOTIFICATIONS_EXCHANGE          = _str_env("NOTIFICATIONS_EXCHANGE", "flowfirst.notifications")
+NOTIFICATIONS_FLOWS             = os.getenv("NOTIFICATIONS_FLOWS", "").strip()
+NOTIFICATIONS_MAX_PAYLOAD_BYTES = max(0, _int_env("NOTIFICATIONS_MAX_PAYLOAD_BYTES", 8192))
+
 
 # ---------------------------------------------------------------------------
 # Secret hygiene - fail closed.
@@ -481,3 +497,6 @@ def setup_queues(channel):
             f"scripts/migrate_queue_type.py --to {RABBITMQ_QUEUE_TYPE}, or set RABBITMQ_QUEUE_TYPE back."
         ) from exc
     channel.queue_bind(queue=QUEUE_DEAD_LETTERS, exchange=DLX_EXCHANGE)
+    if NOTIFICATIONS_ENABLED:
+        from src.notifications import notifications as _notif
+        _notif.declare_exchange(channel)

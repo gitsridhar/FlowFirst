@@ -199,11 +199,23 @@ def _serve(process: str, port: int) -> None:
     httpd.server_close()
 
 
+# Map each role name to its port offset (METRICS_PORT_BASE + offset).
+# api_gateway=process1=9101 ... remote_worker=process5=9105
+_PORT_OFFSET = {
+    "api_gateway":   1,
+    "transformer":   2,
+    "forwarder":     3,
+    "db_updater":    4,
+    "remote_worker": 5,
+}
+
+
 def start(process: str) -> None:
-    """Start the listener for 'process1'..'process5' unless METRICS_ENABLED is false. Call once, from main()."""
+    """Start the listener for the named process unless METRICS_ENABLED is false. Call once, from main()."""
     if not METRICS_ENABLED:
         return
     for key in EXPECTED_COUNTERS.get(process, []):
         gt.metrics_counter[key] += 0
-    port = METRICS_PORT_BASE + int(process[-1])
+    offset = _PORT_OFFSET.get(process, int(process[-1]) if process[-1:].isdigit() else 0)
+    port = METRICS_PORT_BASE + offset
     eventlet.spawn(_serve, process, port)       # not a gt greenthread: it must never hold up gt.wait_all()

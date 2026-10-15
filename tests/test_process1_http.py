@@ -182,5 +182,8 @@ def test_ready_is_200_with_a_broker_connection_even_if_zookeeper_is_dead():
 
 def test_zk_health_includes_registered_workers(server):
     status, body = call(server, "GET", "/zk/health")
-    assert status == 200 and set(body["registered_workers"]) == {f"process{i}" for i in range(1, 6)}
+    assert status == 200
+    assert set(body["registered_workers"]) == {
+        "api_gateway", "transformer", "forwarder", "db_updater", "remote_worker"
+    }
     assert "pipeline_health" in body

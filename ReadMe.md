@@ -597,6 +597,7 @@ Then **edit `.env`** on each node. The rules are simple:
 | `MARIADB_HOST` | `${FLOWFIRST_VIP}` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
 | `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `src/config/config.py` builds `${NODE1_IP},${NODE2_IP},${NODE3_IP}` at runtime. |
 | `MARIADB_PORT` | `3306` | Literal integer |
+| `SWIFT_AUTH_URL` | `http://${FLOWFIRST_VIP}:8090/auth/v1.0` | **Set to the VIP IP.** HAProxy's Swift frontend (`SWIFT_LB_PORT=8090`) load-balances to the Swift proxy on `:8888`. Must be identical on all nodes including node4. Do **not** use a node-direct address (`:8888`) or the REST API port (`8080`). |
 
 #### Concrete `.env` for each node
 

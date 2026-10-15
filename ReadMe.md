@@ -8292,7 +8292,162 @@ TLS is **off by default** (every `TLS_*_ENABLED` is `false`), so an existing dep
 
 #### Certificate lifecycle and runtime usage
 
-The two diagrams below show how certificates are created on the admin host and how they are used at runtime across the cluster.
+The diagram below shows the complete SSL/TLS certificate lifecycle — how certificates are **created** on the admin host, **distributed** to each cluster node, **used at runtime** by every process and service, and **maintained** over time (CRL refresh and revocation).
+
+**SSL certificate creation, distribution and runtime usage**
+
+```mermaid
+flowchart TD
+    %% ── Stage 1: Creation ───────────────────────────────────────────
+    subgraph CREATE ["① Create — Admin / CA host (pki/ stays here, never on nodes)"]
+        direction TB
+        CA_INIT["<b>security/init_ca.sh</b>
+RSA-4096 root CA
+pki/ca/ca.key  (AES-256 encrypted)
+pki/ca/ca.crt  (public)
+pki/ca/ca.crl  (empty CRL)"]
+
+        ISSUE_VIP["<b>flowfirst-vip</b>  [server]
+Subject Alt Names: VIP IP, flowfirst.local
+Used by: HAProxy HTTPS/Swift/MariaDB-LB/RabbitMQ-LB frontend"]
+        ISSUE_API["<b>nodeN-api</b>  [server]  ×3
+Subject Alt Names: node IP, hostname
+Used by: Process 1 HTTPS listener on each node"]
+        ISSUE_RMQ["<b>nodeN-rabbitmq</b>  [peer]  ×3
+SANs: node IP + VIP IP/DNS
+Used by: RabbitMQ broker TLS + inter-node clustering"]
+        ISSUE_MDB["<b>nodeN-mariadb</b>  [peer]  ×3
+SANs: node IP + VIP IP/DNS
+Used by: MariaDB/Galera client TLS + replication"]
+        ISSUE_ZK["<b>nodeN-zookeeper</b>  [peer]  ×3
+SANs: node IP, hostname
+Used by: ZooKeeper TLS clients + quorum"]
+        ISSUE_SW["<b>nodeN-swift</b>  [server]  ×3
+SANs: node IP, hostname
+Used by: Swift proxy server"]
+        ISSUE_PIPE["<b>nodeN-pipeline</b>  [client]  ×3
+Used by: Processes 1–4 client identity on each node
+Also used by: HAProxy towards Process 1 backends"]
+        ISSUE_N4["<b>node4-pipeline</b>  [client]
+Used by: Process 5 client identity (remote node4)"]
+        ISSUE_ADM["<b>admin-client</b>  [client]
+Used by: operators / curl for mTLS REST API access"]
+
+        CA_INIT -->|"security/issue_all.sh"| ISSUE_VIP
+        CA_INIT -->|"security/issue_all.sh"| ISSUE_API
+        CA_INIT -->|"security/issue_all.sh"| ISSUE_RMQ
+        CA_INIT -->|"security/issue_all.sh"| ISSUE_MDB
+        CA_INIT -->|"security/issue_all.sh"| ISSUE_ZK
+        CA_INIT -->|"security/issue_all.sh"| ISSUE_SW
+        CA_INIT -->|"security/issue_all.sh"| ISSUE_PIPE
+        CA_INIT -->|"security/issue_all.sh"| ISSUE_N4
+        CA_INIT -->|"security/issue_all.sh"| ISSUE_ADM
+    end
+
+    %% ── Stage 2: Distribution ────────────────────────────────────────
+    subgraph DIST ["② Distribute — security/install_certs.sh (SSH+sudo → /etc/flowfirst/tls/)"]
+        direction LR
+        N1["<b>Node 1</b>
+ca.crt  ca.crl
+api/api.{crt,key}
+pipeline/pipeline.{crt,key}
+haproxy/vip.pem  backend.pem
+rabbitmq/rabbitmq.{crt,key}
+mariadb/mariadb.{crt,key}
+zookeeper/zookeeper.{crt,key}
+swift/swift.{crt,key}"]
+        N2["<b>Node 2</b>
+(same set, node2 leaf certs)"]
+        N3["<b>Node 3</b>
+(same set, node3 leaf certs)"]
+        N4["<b>Node 4</b>
+ca.crt  ca.crl
+pipeline/pipeline.{crt,key}"]
+    end
+
+    CREATE -->|"SSH + sudo copy"| DIST
+
+    %% ── Stage 3: Runtime usage ───────────────────────────────────────
+    subgraph RUNTIME ["③ Runtime — TLS connections in a live cluster"]
+        direction TB
+        subgraph EXT ["External access"]
+            CURL(["curl / API client
+admin-client.crt  →  HAProxy :8080
+← verifies flowfirst-vip"])
+        end
+        subgraph API_TIER ["API tier  (nodes 1–3)"]
+            HA(["HAProxy :8080
+presents vip.pem  (server)
+presents backend.pem  (client → P1)
+verifies ca.crt + ca.crl"])
+            P1(["Process 1 :8082
+presents nodeN-api.crt  (server)
+verifies pipeline client cert
+src/tls/tls.py → server_context()"])
+        end
+        subgraph PIPELINE ["Pipeline processes  (nodes 1–3)"]
+            P24(["Processes 2–4
+presents nodeN-pipeline.crt (client)
+tls.py → client_context()"])
+            P5(["Process 5  (node4)
+presents node4-pipeline.crt (client)
+tls.py → client_context()"])
+        end
+        subgraph INFRA ["Infrastructure  (nodes 1–3)"]
+            RMQ(["RabbitMQ :5671
+nodeN-rabbitmq.crt (server)
+peer certs for inter-node"])
+            MDB(["MariaDB :3306
+nodeN-mariadb.crt (server/peer)
+Galera wsrep replication"])
+            ZK(["ZooKeeper :2281
+nodeN-zookeeper.crt (server/peer)
+leader election + dedup"])
+            SW(["Swift :8888/8090
+nodeN-swift.crt (server)
+via HAProxy pass-through"])
+        end
+
+        CURL -- "mTLS :8080" --> HA
+        HA -- "mTLS :8082\nbackend.pem" --> P1
+        P1 -- "pipeline.crt" --> RMQ
+        P1 -- "pipeline.crt" --> MDB
+        P1 -- "pipeline.crt" --> ZK
+        P24 -- "pipeline.crt" --> RMQ
+        P24 -- "pipeline.crt" --> MDB
+        P24 -- "pipeline.crt" --> ZK
+        P24 -- "pipeline.crt" --> SW
+        P5 -- "pipeline.crt" --> RMQ
+        P5 -- "pipeline.crt" --> ZK
+    end
+
+    DIST --> RUNTIME
+
+    %% ── Stage 4: Maintenance ─────────────────────────────────────────
+    subgraph MAINT ["④ Maintain — ongoing certificate operations"]
+        direction TB
+        CRL_R["<b>security/refresh_crl.sh</b>  (weekly cron)
+Re-signs CRL before nextUpdate expires
+Run install_certs.sh --crl-only after"]
+        REVOKE["<b>security/revoke_cert.sh NAME</b>
+Marks cert revoked → regenerates CRL
+Run install_certs.sh --crl-only after"]
+        LIST["<b>security/list_certs.sh</b>
+Prints days-to-expiry for every issued cert
+Run from cron to alert before expiry"]
+        VERIFY["<b>security/verify_tls.sh</b>
+Probes every TLS endpoint
+Prints PASS / FAIL per component"]
+        PREFLIGHT["<b>scripts/preflight_check.py</b>
+Per-node check: CRL days left, cert paths,
+TLS switches, secret strength"]
+    end
+
+    RUNTIME -.->|"cert expired / revoked"| MAINT
+    MAINT -.->|"install_certs.sh re-pushes CRL"| DIST
+```
+
+The following two diagrams give the same information split into two focused views: the left-to-right PKI lifecycle on the admin host, and the runtime certificate map across all connections.
 
 **PKI lifecycle — creation, distribution and renewal**
 

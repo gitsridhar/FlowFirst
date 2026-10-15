@@ -713,7 +713,7 @@ CURRENT_NODE_IP=192.168.1.103
 
 ---
 
-### Phase 1: Setup MariaDB Galera Cluster on All 3 Nodes
+### Phase 1a: Setup MariaDB Galera Cluster on All 3 Nodes
 
 All scripts automatically read parameters from `/opt/flowfirst/.env`.
 
@@ -1048,7 +1048,7 @@ python -c "from src.gt import gt; gt.monkey_patch(); print('gt.py OK, pool size:
 
 ---
 
-### Phase 2: Install RabbitMQ on All 3 Nodes
+### Phase 2a: Install RabbitMQ on All 3 Nodes
 
 > **Prerequisite:** Phase 0b (chrony time sync) must be complete on all nodes before running this.
 > The install script checks `chronyd` status at startup and prints a 10-second warning
@@ -1091,7 +1091,7 @@ The script performs these steps automatically:
 
 ### Phase 2b: Install the Swift Object Store Cluster on Nodes 1–3
 
-> **Install after RabbitMQ (Phase 2) and before HAProxy (Phase 3).** Node 4 does **not** run a Swift server; it only needs `python-swiftclient` (already in `requirements.txt`) and `SWIFT_AUTH_URL` pointing at the VIP.
+> **Install after RabbitMQ (Phase 2a) and before HAProxy (Phase 3).** Node 4 does **not** run a Swift server; it only needs `python-swiftclient` (already in `requirements.txt`) and `SWIFT_AUTH_URL` pointing at the VIP.
 
 Swift is installed as a **native service** from RPM packages and managed by plain `systemd` on each node (like MariaDB, RabbitMQ and ZooKeeper), not by Pacemaker. RHEL 9 has no Swift server packages in its own repositories, so the script uses the **CentOS Cloud SIG OpenStack** repository (release set by `SWIFT_OPENSTACK_RELEASE`, default `epoxy` = Swift 2.35). The repo file is written with `enabled=0` and is only enabled for the Swift `dnf install`, so routine `dnf update` runs on the cluster never pull in OpenStack builds of base libraries.
 

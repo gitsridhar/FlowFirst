@@ -324,7 +324,7 @@ erDiagram
 | **2b** | Nodes 1–3 only | Swift object-store cluster (proxy + account/container/object servers, 3-replica rings, tempauth) | `swift/setup_swift.sh` |
 | **3** | Nodes 1–3 only | Identify cluster NIC, set `VIP_NIC` in `.env`, generate HAProxy config | `haproxy/setup_haproxy.sh` |
 | **4** | Nodes 1–3 | Install systemd units for Process 1–4 & target (Pacemaker managed) | `systemd/install_services.sh /opt/flowfirst` |
-| **4 (Remote)** | Node 4 only | Install & enable `flowfirst-process5.service` (runs Process 5 only) | `systemd/install_services.sh /opt/flowfirst --remote` |
+| **4 (Remote)** | Node 4 only | Phase 0a+0b on node4 first (chrony, repo clone, venv, copy `.env` from node1 and set `NODE_NAME=node4`/`CURRENT_NODE_IP`), then install & enable `flowfirst-process5.service` | `systemd/install_services.sh /opt/flowfirst --remote` |
 | **5a** | Nodes 1–3 only | Prepare cluster nodes for Pacemaker (packages, `pcsd`, firewall, `/etc/hosts`) | `pacemaker/setup_multinode_cluster.sh --prepare-node` |
 | **5b** | Node 1 only | Initialise cluster, authenticate nodes, deploy VIP + HAProxy + process clones | `pacemaker/setup_multinode_cluster.sh` → `pacemaker/configure_multinode_resources.sh` |
 | **5c** | Node 1 only | Verify HAProxy is running under Pacemaker after cluster start | `pcs status` → `ss -tlnp \| grep haproxy` |
@@ -1421,11 +1421,67 @@ sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 
 5. `RemoveIPC=true` and `PrivateTmp=true` mean files other processes leave in `/tmp` are not visible to FlowFirst. Nothing in the code uses `/tmp`.
 
 #### Step 4b — Remote Node 4 (`node4` only)
-On Remote Node 4, **only Process 5** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, Swift server, HAProxy, or Pacemaker) run on Node 4; Process 5 acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`):
+
+On Remote Node 4, **only Process 5** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, Swift server, HAProxy, or Pacemaker) run on Node 4; Process 5 acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`).
+
+Node 4 needs the same Phase 0 bootstrap as the cluster nodes. Run all of the following **on node4** before installing the service.
+
+##### Phase 0a — Time sync (node4)
+
+```bash
+sudo dnf install -y chrony
+sudo systemctl enable --now chronyd
+sudo chronyc makestep
+# Verify: chronyc tracking  →  System time offset < 0.1s, Leap status: Normal
+```
+
+##### Phase 0b — Clone repo & Python environment (node4)
+
+```bash
+sudo dnf install -y git python3 python3-pip
+sudo git clone <repo-url> /opt/flowfirst
+sudo chown -R $USER:$USER /opt/flowfirst
+cd /opt/flowfirst
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install --require-hashes -r requirements.txt
+```
+
+##### `.env` for node4
+
+Node 4 does **not** run `generate_secrets.sh`. Copy the `.env` that was generated on one of the cluster nodes — all shared values (passwords, IPs, Swift hash paths) must be identical across all four nodes:
+
+```bash
+# From node1 (or any cluster node), copy the .env to node4:
+scp /opt/flowfirst/.env <node4-ip>:/opt/flowfirst/.env
+```
+
+Then edit the two per-node variables directly on node4:
+
+```bash
+# On node4 — set these two values to node4's own identity:
+sed -i 's/^NODE_NAME=.*/NODE_NAME=node4/' /opt/flowfirst/.env
+sed -i 's/^CURRENT_NODE_IP=.*/CURRENT_NODE_IP=<node4-ip>/' /opt/flowfirst/.env
+```
+
+| Variable | node4 value | Notes |
+|---|---|---|
+| `NODE_NAME` | `node4` | Must be `node4` — Process 5 uses this for ZooKeeper registration and the `remote_node` field in Flow 6 |
+| `CURRENT_NODE_IP` | `<node4 IP>` | node4's own IP — used by ZooKeeper client binding |
+
+All other variables (`NODE1_IP`–`NODE4_IP`, `FLOWFIRST_VIP`, `RABBITMQ_*`, `MARIADB_*`, `SWIFT_*`, passwords) are **identical to the cluster nodes** — do not change them.
+
+> **Firewall on node4:** outbound connections from node4 to the cluster. Ensure node4 can reach:
+> - `NODE1_IP`–`NODE3_IP` on port `5672` (RabbitMQ AMQP) — or `5671` when `TLS_RABBITMQ_ENABLED=true`
+> - `NODE1_IP`–`NODE3_IP` on port `2181` (ZooKeeper) — or `2281` when `TLS_ZK_ENABLED=true`
+> - `FLOWFIRST_VIP` on port `8090` (Swift, if `SWIFT_ENABLED=true`)
+
+##### Install and start Process 5
 
 ```bash
 cd /opt/flowfirst
-# Install ONLY Process 5 service on the remote node
 sudo ./systemd/install_services.sh /opt/flowfirst --remote
 
 # Enable and start Process 5 on Remote Node 4

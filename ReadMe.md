@@ -1824,19 +1824,51 @@ ORDER BY id DESC LIMIT 1\G
 
 > **Runs on:** node1, node2 or node3 (each query targets a specific node IP with `-h`).
 
-Query **Node 1**, **Node 2**, and **Node 3** directly to confirm that writes from any node are immediately synchronized across all nodes:
+#### A. Ensure data exists before querying
+
+This scenario verifies that the **same rows appear on all three Galera nodes simultaneously**. It needs at least one row in `processed_messages` to be meaningful. The pipeline is asynchronous — a message published via the API reaches MariaDB only after travelling through Process 2, Process 3, and Process 4, which typically takes 1–3 seconds on a healthy cluster.
+
+If Scenarios 1 and 2 were run just before this one, wait a few seconds and confirm rows have arrived before querying all three nodes:
+
+```bash
+# Send a fresh message and wait for it to be persisted
+curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 301, "counter": 100}' | jq .
+
+# Wait for the pipeline to process it (P1 → RabbitMQ → P2 → P3 → P4 → MariaDB)
+sleep 5
+
+# Confirm at least one row exists via the VIP before querying individual nodes
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
+  -e "SELECT COUNT(*) AS row_count FROM processed_messages;"
+```
+
+If `row_count` is still `0` after 5 seconds, the pipeline has a problem — check Process 4 logs before continuing:
+
+```bash
+sudo journalctl -u flowfirst-process4 -n 50 --no-pager | grep -E "ERROR|Persisted|Failed"
+```
+
+#### B. Query all three nodes directly
+
+Once rows exist, query each node **by its own IP** (bypassing HAProxy) to prove Galera has synchronised the write to all members:
 
 ```bash
 # Check on Node 1:
-mariadb -h ${NODE1_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
+mariadb -h ${NODE1_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
+  -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 
 # Check on Node 2:
-mariadb -h ${NODE2_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
+mariadb -h ${NODE2_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
+  -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 
 # Check on Node 3:
-mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
+mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
+  -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 ```
-*All three databases return identical records in real time.*
+
+*All three nodes return identical rows — same `id` values, same `message_id`s, in the same order. This is Galera synchronous multi-master replication: the write was certified and committed on all three nodes before Process 4 received the acknowledgement.*
 
 ---
 

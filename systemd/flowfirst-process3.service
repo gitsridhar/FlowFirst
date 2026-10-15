@@ -18,8 +18,10 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=flowfirst-p3
 
-# Timeout settings for clean shutdown under systemd
-TimeoutStopSec=5s
+# Allow enough time for the ZooKeeper session to close cleanly on shutdown.
+# If the process is killed before the ZK session expires, stale election znodes
+# are left behind and the next startup hangs waiting to win the election.
+TimeoutStopSec=30s
 KillMode=mixed
 KillSignal=SIGTERM
 

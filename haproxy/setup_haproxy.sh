@@ -270,8 +270,11 @@ sudo sysctl --system | grep nonlocal_bind || true
 
 # Ensure chroot, log, and runtime state directories exist with correct permissions and SELinux contexts
 sudo mkdir -p /var/lib/haproxy /run/haproxy /var/log/haproxy
-sudo chown -R haproxy:haproxy /var/lib/haproxy /run/haproxy /var/log/haproxy 2>/dev/null || true
-sudo chmod 755 /var/lib/haproxy /run/haproxy /var/log/haproxy 2>/dev/null || true
+sudo chown haproxy:haproxy /var/lib/haproxy /run/haproxy /var/log/haproxy 2>/dev/null || true
+# /var/lib/haproxy must be writable by the haproxy user so the stats socket can be created inside it.
+# 770 keeps it private to the haproxy group while allowing socket creation; world-access is not needed.
+sudo chmod 770 /var/lib/haproxy
+sudo chmod 755 /run/haproxy /var/log/haproxy 2>/dev/null || true
 if command -v restorecon &>/dev/null; then
     sudo restorecon -Rv /var/lib/haproxy /run/haproxy /var/log/haproxy /etc/haproxy >/dev/null 2>&1 || true
 fi

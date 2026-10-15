@@ -9,7 +9,7 @@ global
     user        haproxy
     group       haproxy
     daemon
-    stats socket /var/lib/haproxy/stats mode 660 level admin expose-fd listeners
+    stats socket /var/lib/haproxy/stats mode 660 level admin expose-fd listeners user haproxy group haproxy
     # TLS policy for every 'ssl' bind/server below. Harmless when no bind/server uses ssl.
     ssl-default-bind-options     ssl-min-ver __TLS_MIN_VERSION__ no-tls-tickets
     ssl-default-bind-ciphers     __TLS_CIPHERS__

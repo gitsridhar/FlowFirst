@@ -1337,63 +1337,11 @@ sudo ./systemd/install_services.sh /opt/flowfirst
 sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4
 ```
 
-#### Step 4c — The service sandbox (installed automatically by 4a and 4b)
-
-`install_services.sh` also installs `systemd/flowfirst-hardening.conf` next to every unit as `/etc/systemd/system/flowfirst-process<N>.service.d/10-hardening.conf`, so there is one copy of the settings for all five processes. Compare the score before and after with `systemd-analyze security flowfirst-process1.service`.
-
-| Setting | Effect on a FlowFirst process |
-|---|---|
-| `ProtectSystem=strict`, `PrivateTmp`, `PrivateDevices`, `ProtectHome=true` | the whole file system is read-only except `/var/log/flowfirst` (`LogsDirectory=`) and a private `/tmp`; no devices; `/home` and `/root` invisible |
-| `ProtectProc=invisible`, `ProtectKernel*`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname` | other users' processes, kernel tunables, modules, logs, cgroups, the clock and the host name cannot be touched |
-| `NoNewPrivileges`, `CapabilityBoundingSet=` (empty), `RestrictSUIDSGID`, `RestrictRealtime`, `RestrictNamespaces`, `LockPersonality` | no privilege gain, no capability at all (port 8082 needs none), no new namespaces |
-| `MemoryDenyWriteExecute=true` | memory cannot be writable and executable at once |
-| `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` | no raw, packet or netlink sockets |
-| `SystemCallFilter=@system-service` minus `@privileged @resources` | only ordinary service system calls; others fail with `EPERM` |
-| `UMask=0027` | log files are `0640`, not readable by other users |
-
-**Tested** on Ubuntu 23.10 (systemd 253, aarch64) in a Colima VM, with the real units, a Python 3.11 venv built from the locked wheels, and real RabbitMQ 3, ZooKeeper 3.9 and MariaDB 10.11 containers: all five processes ran, flow 1 went through Processes 1 to 4 into the database, flow 3 went through Remote Worker (Process 5), the REST API answered, logging worked, and no sandbox denial appeared in the journal. `systemd-analyze security` scored each unit **1.2 OK**. Unsandboxed (previous units), API Gateway (Process 1) scored 8.6 EXPOSED and Remote Worker (Process 5) 9.2 UNSAFE. From inside the sandbox, a raw socket, a netlink socket, a packet socket, `setuid(0)`, `chown` and a write to `/etc` all failed; a TCP socket worked. A database outage under the sandbox behaved as the code does without the sandbox: DB Updater (Process 4) logged `Failed to connect to MariaDB`, rejected the message (`nack`, no requeue) and stayed up. In that test the dead-letter policy was **not** applied, so the rejected message was discarded (it never reached the database and `flowfirst_dead_letters` stayed empty); this is exactly why the policy in the Production Rollout Run-Book, R3, matters.
-
-**Things that need your action**
-* **`LOG_DIR` outside `/var/log/flowfirst`:** the process still starts but logs "file logging disabled" (read-only file system). Add a drop-in, `sudo systemctl edit flowfirst-process1` (or create `.../flowfirst-process1.service.d/99-local.conf`) containing `[Service]` and `ReadWritePaths=/your/dir`, then `daemon-reload` and restart. Tested.
-* **Application directory or TLS files under `/home` or `/root`:** `install_services.sh` switches `ProtectHome` to `read-only` when the install directory is there. It cannot know about `TLS_*` paths; keep them under `/etc/flowfirst/tls` (the default), or set `ProtectHome=read-only` in a `99-local.conf`. The `/home` branch was **not** exercised.
-* **Relaxing one setting:** put it in a `99-local.conf` drop-in (for example `MemoryDenyWriteExecute=false`); it sorts after `10-hardening.conf` and wins. `FLOWFIRST_NO_HARDENING=1 sudo ./systemd/install_services.sh ...` installs the units without the sandbox, for finding out whether the sandbox causes a problem.
-* **Upgrading an existing node:** re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload`, and restart **one node at a time** through Pacemaker standby as in the Production Rollout Run-Book. Pacemaker's `systemd:` resources pick up drop-ins; this was **not** run under Pacemaker.
-
-**Limits**
-1. Not run on RHEL 9 (systemd 252) or with SELinux enforcing. The directives used all exist in systemd 252, but an SELinux denial would be a separate problem. On RHEL 9 check `ausearch -m avc -ts recent` after the first start.
-2. `SystemCallFilter` was tested with what these code paths do on a quiet system: all five processes, the REST API, RabbitMQ, ZooKeeper and MariaDB connections, logging and a database outage. Not tested: TLS to every component, Swift (`SWIFT_ENABLED=false` in the test), a long run, a failover, a high-concurrency load. A blocked call shows up as `Operation not permitted` or a process killed by `SIGSYS`; look at `journalctl -u flowfirst-process1` first.
-3. The sandbox covers only the five FlowFirst units. MariaDB, RabbitMQ, ZooKeeper, HAProxy and Swift keep their packages' own units.
-4. Exposure 1.2 is the score for this unit; it is a rough guide, not a certificate. The remaining findings are things the process needs (network access, a user).
-5. `RemoveIPC=true` and `PrivateTmp=true` mean files other processes leave in `/tmp` are not visible to FlowFirst. Nothing in the code uses `/tmp`.
-
 #### Step 4b — Remote Node 4 (`node4` only)
 
 On Remote Node 4, **only Remote Worker (Process 5)** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, Swift server, HAProxy, or Pacemaker) run on Node 4; Remote Worker (Process 5) acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`).
 
-Node 4 needs the same Phase 0 bootstrap as the cluster nodes. Run all of the following **on node4** before installing the service.
-
-##### Phase 0a — Time sync (node4)
-
-```bash
-sudo dnf install -y chrony
-sudo systemctl enable --now chronyd
-sudo chronyc makestep
-# Verify: chronyc tracking  →  System time offset < 0.1s, Leap status: Normal
-```
-
-##### Phase 0b — Clone repo & Python environment (node4)
-
-```bash
-sudo dnf install -y git python3 python3-pip
-sudo git clone <repo-url> /opt/flowfirst
-sudo chown -R $USER:$USER /opt/flowfirst
-cd /opt/flowfirst
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install --require-hashes -r requirements.txt
-```
+Node 4 requires the same Phase 0 bootstrap as the cluster nodes — run **Phase 0 (pre-step)**, **Phase 0a** (time sync), and **Phase 0b** (clone repo & Python environment) on node4 before continuing here. Those steps are identical to what was done on nodes 1–3.
 
 ##### `.env` for node4
 
@@ -1434,6 +1382,35 @@ sudo ./systemd/install_services.sh /opt/flowfirst --remote
 sudo systemctl enable --now flowfirst-process5
 sudo systemctl status flowfirst-process5
 ```
+
+#### Step 4c — The service sandbox (installed automatically by 4a and 4b)
+
+`install_services.sh` also installs `systemd/flowfirst-hardening.conf` next to every unit as `/etc/systemd/system/flowfirst-process<N>.service.d/10-hardening.conf`, so there is one copy of the settings for all five processes. Compare the score before and after with `systemd-analyze security flowfirst-process1.service`.
+
+| Setting | Effect on a FlowFirst process |
+|---|---|
+| `ProtectSystem=strict`, `PrivateTmp`, `PrivateDevices`, `ProtectHome=true` | the whole file system is read-only except `/var/log/flowfirst` (`LogsDirectory=`) and a private `/tmp`; no devices; `/home` and `/root` invisible |
+| `ProtectProc=invisible`, `ProtectKernel*`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname` | other users' processes, kernel tunables, modules, logs, cgroups, the clock and the host name cannot be touched |
+| `NoNewPrivileges`, `CapabilityBoundingSet=` (empty), `RestrictSUIDSGID`, `RestrictRealtime`, `RestrictNamespaces`, `LockPersonality` | no privilege gain, no capability at all (port 8082 needs none), no new namespaces |
+| `MemoryDenyWriteExecute=true` | memory cannot be writable and executable at once |
+| `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` | no raw, packet or netlink sockets |
+| `SystemCallFilter=@system-service` minus `@privileged @resources` | only ordinary service system calls; others fail with `EPERM` |
+| `UMask=0027` | log files are `0640`, not readable by other users |
+
+**Tested** on Ubuntu 23.10 (systemd 253, aarch64) in a Colima VM, with the real units, a Python 3.11 venv built from the locked wheels, and real RabbitMQ 3, ZooKeeper 3.9 and MariaDB 10.11 containers: all five processes ran, flow 1 went through Processes 1 to 4 into the database, flow 3 went through Remote Worker (Process 5), the REST API answered, logging worked, and no sandbox denial appeared in the journal. `systemd-analyze security` scored each unit **1.2 OK**. Unsandboxed (previous units), API Gateway (Process 1) scored 8.6 EXPOSED and Remote Worker (Process 5) 9.2 UNSAFE. From inside the sandbox, a raw socket, a netlink socket, a packet socket, `setuid(0)`, `chown` and a write to `/etc` all failed; a TCP socket worked. A database outage under the sandbox behaved as the code does without the sandbox: DB Updater (Process 4) logged `Failed to connect to MariaDB`, rejected the message (`nack`, no requeue) and stayed up. In that test the dead-letter policy was **not** applied, so the rejected message was discarded (it never reached the database and `flowfirst_dead_letters` stayed empty); this is exactly why the policy in the Production Rollout Run-Book, R3, matters.
+
+**Things that need your action**
+* **`LOG_DIR` outside `/var/log/flowfirst`:** the process still starts but logs "file logging disabled" (read-only file system). Add a drop-in, `sudo systemctl edit flowfirst-process1` (or create `.../flowfirst-process1.service.d/99-local.conf`) containing `[Service]` and `ReadWritePaths=/your/dir`, then `daemon-reload` and restart. Tested.
+* **Application directory or TLS files under `/home` or `/root`:** `install_services.sh` switches `ProtectHome` to `read-only` when the install directory is there. It cannot know about `TLS_*` paths; keep them under `/etc/flowfirst/tls` (the default), or set `ProtectHome=read-only` in a `99-local.conf`. The `/home` branch was **not** exercised.
+* **Relaxing one setting:** put it in a `99-local.conf` drop-in (for example `MemoryDenyWriteExecute=false`); it sorts after `10-hardening.conf` and wins. `FLOWFIRST_NO_HARDENING=1 sudo ./systemd/install_services.sh ...` installs the units without the sandbox, for finding out whether the sandbox causes a problem.
+* **Upgrading an existing node:** re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload`, and restart **one node at a time** through Pacemaker standby as in the Production Rollout Run-Book. Pacemaker's `systemd:` resources pick up drop-ins; this was **not** run under Pacemaker.
+
+**Limits**
+1. Not run on RHEL 9 (systemd 252) or with SELinux enforcing. The directives used all exist in systemd 252, but an SELinux denial would be a separate problem. On RHEL 9 check `ausearch -m avc -ts recent` after the first start.
+2. `SystemCallFilter` was tested with what these code paths do on a quiet system: all five processes, the REST API, RabbitMQ, ZooKeeper and MariaDB connections, logging and a database outage. Not tested: TLS to every component, Swift (`SWIFT_ENABLED=false` in the test), a long run, a failover, a high-concurrency load. A blocked call shows up as `Operation not permitted` or a process killed by `SIGSYS`; look at `journalctl -u flowfirst-process1` first.
+3. The sandbox covers only the five FlowFirst units. MariaDB, RabbitMQ, ZooKeeper, HAProxy and Swift keep their packages' own units.
+4. Exposure 1.2 is the score for this unit; it is a rough guide, not a certificate. The remaining findings are things the process needs (network access, a user).
+5. `RemoveIPC=true` and `PrivateTmp=true` mean files other processes leave in `/tmp` are not visible to FlowFirst. Nothing in the code uses `/tmp`.
 
 ---
 

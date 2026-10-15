@@ -314,6 +314,7 @@ erDiagram
 
 | Phase | Runs on | Description | Key script / command |
 |---|---|---|---|
+| **0 (pre)** | All nodes (1–4) | Create `flowadmin` user, add to `wheel`, grant passwordless sudo, distribute SSH key — **all subsequent phases run as `flowadmin`** | `useradd flowadmin` → `usermod -aG wheel` → `/etc/sudoers.d/flowadmin` → `ssh-keygen` + `ssh-copy-id` |
 | **0a** | All nodes (1–4) | Time synchronisation — install & configure Chrony | `dnf install -y chrony` → `chronyc makestep` |
 | **0b** | All nodes (1–4) | Clone repo, create Python venv, copy `.env` | `git clone` → `python3 -m venv .venv` → `pip install --require-hashes -r requirements.txt` |
 | **1** | Nodes 1–3 only | MariaDB Galera cluster setup (server) | `mariadb-galera/setup_galera_node.sh` |
@@ -423,6 +424,83 @@ erDiagram
 > Time must be synchronised first: `git clone`, `pip install`, and every subsequent
 > script depend on a correct system clock. Chrony is installed without the repo
 > because `dnf install chrony` needs no local files.
+
+---
+
+#### Phase 0 (pre-step) — Create a dedicated admin user
+
+> **Run as root on every node (1–4) before anything else.**
+
+Do not perform the installation as `root`. Create a dedicated user (`flowadmin` is used throughout this guide), add it to the `wheel` group (RHEL's sudoers group), and set up passwordless SSH between the cluster nodes. All `sudo` commands in subsequent phases run as `flowadmin`.
+
+**Why a dedicated user, not root:**
+- Root login is typically disabled or audited separately; `flowadmin` actions are logged under their own identity in the journal and in `/var/log/secure`.
+- The `flowuser` system account that *runs the pipeline processes* is separate and has no login shell — `flowadmin` is your operator/installer identity, `flowuser` is the service identity.
+- Passwordless `sudo` is scoped to `flowadmin` only; other users on the nodes are unaffected.
+- `install_certs.sh` and `configure_multinode_resources.sh` SSH between nodes using the calling user's identity — a named account with a known key is easier to audit and rotate than root.
+
+```bash
+# Run on EVERY node (1–4) as root:
+
+# 1. Create the admin user (no login password — SSH key only)
+useradd -m -s /bin/bash -c "FlowFirst admin" flowadmin
+
+# 2. Add to wheel so 'sudo' works
+usermod -aG wheel flowadmin
+
+# 3. Grant passwordless sudo (avoids interactive password prompts in scripts)
+echo "flowadmin ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/flowadmin
+chmod 440 /etc/sudoers.d/flowadmin
+
+# 4. Create the .ssh directory
+mkdir -p /home/flowadmin/.ssh
+chmod 700 /home/flowadmin/.ssh
+chown flowadmin:flowadmin /home/flowadmin/.ssh
+```
+
+**Generate an SSH key pair once (on node1 or your admin workstation) and distribute it:**
+
+```bash
+# On node1 as flowadmin — generate the key pair (accept defaults, no passphrase for automation):
+sudo -u flowadmin ssh-keygen -t ed25519 -C "flowadmin@flowfirst" -N "" -f /home/flowadmin/.ssh/id_ed25519
+
+# Copy the public key to all four nodes (including node1 itself):
+for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
+    sudo -u flowadmin ssh-copy-id -i /home/flowadmin/.ssh/id_ed25519.pub flowadmin@${node}
+done
+```
+
+> **If `ssh-copy-id` requires a password** on first run, use a temporary root session or the cloud console to paste the public key into `/home/flowadmin/.ssh/authorized_keys` on each node (mode 600, owned by `flowadmin`).
+
+**Verify passwordless SSH works between all nodes:**
+
+```bash
+for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
+    echo -n "${node}: "
+    ssh -o BatchMode=yes -o ConnectTimeout=5 flowadmin@${node} "hostname" || echo "FAILED"
+done
+```
+
+**From this point on, log in as `flowadmin` and prefix install commands with `sudo`:**
+
+```bash
+ssh flowadmin@${NODE1_IP}
+# All subsequent phases are run as flowadmin with sudo
+```
+
+**Set `PKI_SSH_USER` in `.env`** so `security/install_certs.sh` uses `flowadmin` when pushing certificates to nodes over SSH (Phase 6 / Scenario 63):
+
+```ini
+PKI_SSH_USER=flowadmin
+```
+
+> **Disabling root SSH (optional but recommended after setup):**
+> Once `flowadmin` SSH is confirmed working on all nodes, disable direct root SSH login:
+> ```bash
+> sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+> sudo systemctl reload sshd
+> ```
+> All subsequent `sudo` operations still work through `flowadmin`. Re-enable only via the cloud console if locked out.
 
 ---
 

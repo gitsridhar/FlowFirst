@@ -1,4 +1,4 @@
-"""Test harness (not a test): serves the REAL Process 1 request handler with the broker, ZooKeeper and Swift stubbed.
+"""Test harness (not a test): serves the REAL API Gateway (Process 1) request handler with the broker, ZooKeeper and Swift stubbed.
 
 Run as a subprocess by test_process1_http.py, because importing process1 calls gt.monkey_patch(), which must not
 happen inside pytest. Prints 'PORT <n>' once listening. Env knobs come from the parent test.

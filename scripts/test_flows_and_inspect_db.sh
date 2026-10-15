@@ -78,7 +78,7 @@ print_header "[Step 1] Checking API Health"
 api "${BASE_URL}/health" | jq . || api "${BASE_URL}/health"
 echo ""
 
-# 2. Trigger Flow 1 (Process 1 -> Process 2 [+10] -> Process 3 -> Process 4 -> MariaDB)
+# 2. Trigger Flow 1 (API Gateway (Process 1) -> Transformer (Process 2) [+10] -> Forwarder (Process 3) -> DB Updater (Process 4) -> MariaDB)
 TEST_ITEM_F1=$(( (RANDOM % 900) + 100 ))
 print_header "[Step 2] Triggering Flow 1 with Item #${TEST_ITEM_F1} (Initial Counter: 500)"
 F1_RESP=$(api -X POST "${BASE_URL}/api/flow1" \
@@ -91,7 +91,7 @@ F1_RESP=$(api -X POST "${BASE_URL}/api/flow1" \
 echo "${F1_RESP}" | jq . || echo "${F1_RESP}"
 F1_MSG_ID=$(echo "${F1_RESP}" | jq -r '.payload.message_id // empty')
 
-# 3. Trigger Flow 2 (Process 1 -> Process 2 [x1.15] -> Process 3 [seal] -> Process 4 -> MariaDB)
+# 3. Trigger Flow 2 (API Gateway (Process 1) -> Transformer (Process 2) [x1.15] -> Forwarder (Process 3) [seal] -> DB Updater (Process 4) -> MariaDB)
 TEST_ITEM_F2=$(( (RANDOM % 900) + 100 ))
 print_header "[Step 3] Triggering Flow 2 with Item #${TEST_ITEM_F2} (Initial Value: 35.00)"
 F2_RESP=$(api -X POST "${BASE_URL}/api/flow2" \

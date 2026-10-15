@@ -114,7 +114,7 @@ def init_database():
 
 def insert_processed_message(data: dict) -> int:
     """
-    Insert a message payload received by Process 4 into MariaDB Galera cluster.
+    Insert a message payload received by DB Updater (Process 4) into MariaDB Galera cluster.
     Handles deadlocks/lock-wait errors gracefully with automatic retry (Galera WSREP certification).
     """
     max_retries = 3

@@ -1,4 +1,4 @@
-"""HTTP behaviour of the real Process 1 handler (request limits, generic errors, admin gate).
+"""HTTP behaviour of the real API Gateway (Process 1) handler (request limits, generic errors, admin gate).
 The broker, ZooKeeper and Swift are stubbed (tests/_p1_harness.py); this does NOT prove anything about RabbitMQ."""
 import http.client
 import json

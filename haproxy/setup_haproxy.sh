@@ -69,7 +69,7 @@ fi
 # ---------------------------------------------------------------------------
 # TLS (see security/ and ReadMe Scenario 63).  Every switch is OFF by default, in which case the
 # generated config is the same plain-text config as before.
-#   TLS_API_ENABLED     HTTPS on the VIP API frontend (+ stats page) and HTTPS to the Process 1 backends.
+#   TLS_API_ENABLED     HTTPS on the VIP API frontend (+ stats page) and HTTPS to the API Gateway (Process 1) backends.
 #                       TLS_API_CLIENT_AUTH: required = mutual TLS (default) | optional | none
 #   TLS_SWIFT_ENABLED   HTTPS + required client certificate on the Swift frontend, HTTPS to the swift-proxy nodes
 #   TLS_RABBITMQ_ENABLED  RabbitMQ is balanced in TCP mode (TLS end to end); only the backend port changes

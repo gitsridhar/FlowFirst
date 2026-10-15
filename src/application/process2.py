@@ -36,7 +36,7 @@ from src.zookeeper import zk as zklib
 _config_watcher = None
 
 
-log = logging.getLogger("flowfirst.p2")
+log = logging.getLogger("flowfirst.transformer")
 
 # ---------------------------------------------------------------------------
 # Per-queue message handlers (called inside each queue's own greenthread)
@@ -128,15 +128,15 @@ def handle_flow2_message(ch, method, properties, body):
 
 def handle_flow3_message(ch, method, properties, body):
     """
-    Flow 3 handler on Process 2 (Cluster Nodes 1-3).
-    Receives modified data back from Remote Node 4 / Process 5 via RabbitMQ pool,
-    evaluates and logs confirmation, and forwards directly to Process 4 on QUEUE_FLOW3_P2_TO_P4.
+    Flow 3 handler on Transformer (Process 2) (Cluster Nodes 1-3).
+    Receives modified data back from Remote Node 4 / Remote Worker (Process 5) via RabbitMQ pool,
+    evaluates and logs confirmation, and forwards directly to DB Updater (Process 4) on QUEUE_FLOW3_P2_TO_P4.
     """
     try:
         data = json.loads(body.decode("utf-8"))
         item_id = data.get("item_id")
         msg_id = data.get("message_id", "")
-        log.info(f"[Flow 3] Received reflected item #{item_id} from Process 5 on Remote Node (msg_id={msg_id})")
+        log.info(f"[Flow 3] Received reflected item #{item_id} from Remote Worker (Process 5) on Remote Node (msg_id={msg_id})")
 
         data["process2_verified_remote"] = True
         data["history"].append({
@@ -144,7 +144,7 @@ def handle_flow3_message(ch, method, properties, body):
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "processed_by": NODE_NAME,
             "status": "remote_flow3_verified",
-            "action": f"Received from {data.get('remote_node')} (computed_val={data.get('remote_computed_value')}) and forwarded to Process 4",
+            "action": f"Received from {data.get('remote_node')} (computed_val={data.get('remote_computed_value')}) and forwarded to DB Updater (Process 4)",
         })
 
         ch.basic_publish(
@@ -158,7 +158,7 @@ def handle_flow3_message(ch, method, properties, body):
             ),
         )
         gt.metrics_counter["flow3_processed"] += 1
-        log.info(f"[Flow 3] Forwarded to Process 4 via '{QUEUE_FLOW3_P2_TO_P4}'")
+        log.info(f"[Flow 3] Forwarded to DB Updater (Process 4) via '{QUEUE_FLOW3_P2_TO_P4}'")
         ch.basic_ack(delivery_tag=method.delivery_tag)
         gt.sleep(0)
     except Exception as e:
@@ -168,7 +168,7 @@ def handle_flow3_message(ch, method, properties, body):
 
 
 def handle_flow4_message(ch, method, properties, body):
-    """Flow 4 (create device) handler on Process 2. Enriches device payload with fingerprint."""
+    """Flow 4 (create device) handler on Transformer (Process 2). Enriches device payload with fingerprint."""
     import hashlib
     try:
         data = json.loads(body.decode("utf-8"))
@@ -205,7 +205,7 @@ def handle_flow4_message(ch, method, properties, body):
 
 
 def handle_flow5_message(ch, method, properties, body):
-    """Flow 5 (query devices) handler on Process 2. Normalizes filter values."""
+    """Flow 5 (query devices) handler on Transformer (Process 2). Normalizes filter values."""
     try:
         data = json.loads(body.decode("utf-8"))
         log.info(f"[Flow 5] Received device query (msg_id={data.get('message_id')})")
@@ -245,7 +245,7 @@ def handle_flow5_message(ch, method, properties, body):
 
 
 def handle_flow6_message(ch, method, properties, body):
-    """Flow 6 (update device) handler on Process 2. Adds update_sequence counter."""
+    """Flow 6 (update device) handler on Transformer (Process 2). Adds update_sequence counter."""
     try:
         data = json.loads(body.decode("utf-8"))
         log.info(f"[Flow 6] Received update for device_id={data.get('device_id')} (msg_id={data.get('message_id')})")
@@ -281,7 +281,7 @@ def handle_flow6_message(ch, method, properties, body):
 
 
 def handle_flow6_remote_return_message(ch, method, properties, body):
-    """Flow 6 remote return handler on Process 2. Forwards P5 result to P4."""
+    """Flow 6 remote return handler on Transformer (Process 2). Forwards P5 result to P4."""
     try:
         data = json.loads(body.decode("utf-8"))
         log.info(f"[Flow 6] Received remote-sync result for device_id={data.get('device_id')} "
@@ -316,7 +316,7 @@ def handle_flow6_remote_return_message(ch, method, properties, body):
 
 
 def handle_flow7_message(ch, method, properties, body):
-    """Flow 7 (soft-delete device) handler on Process 2. Marks deletion metadata."""
+    """Flow 7 (soft-delete device) handler on Transformer (Process 2). Marks deletion metadata."""
     try:
         data = json.loads(body.decode("utf-8"))
         log.info(f"[Flow 7] Received soft-delete for device_id={data.get('device_id')} "
@@ -505,14 +505,14 @@ def _gt_consume_flow7():
 def _gt_zk_health_reporter():
     while not gt.is_stopping():
         try:
-            zklib._update_health("process2", NODE_NAME, "leader")
+            zklib._update_health("transformer", NODE_NAME, "leader")
         except Exception:
             pass
         gt.sleep(30)
 
 
 def _consume():
-    """Leader callback: launch all greenthreads for Process 2."""
+    """Leader callback: launch all greenthreads for Transformer (Process 2)."""
     gt.register_signal_handlers()
 
     # Greenthread 1: Flow 1 consumer (own connection)
@@ -521,7 +521,7 @@ def _consume():
     # Greenthread 2: Flow 2 consumer (own connection)
     gt.spawn_consumers("p2_flow2_consumer", _gt_consume_flow2, GT_CONSUMERS_PER_QUEUE)
 
-    # Greenthread 3: Flow 3 consumer (from remote Process 5)
+    # Greenthread 3: Flow 3 consumer (from remote Remote Worker (Process 5))
     gt.spawn_consumers("p2_flow3_consumer", _gt_consume_flow3, GT_CONSUMERS_PER_QUEUE)
 
     # Flow 4 consumer (create device)
@@ -543,7 +543,7 @@ def _consume():
     gt.periodic("p2_zk_health", _gt_zk_health_reporter, 30)
 
     # Metrics reporter
-    gt.start_metrics_reporter("process2")
+    gt.start_metrics_reporter("transformer")
 
     log.info(f"All greenthreads started: {gt.list_greenthreads()}")
 
@@ -556,11 +556,11 @@ def main():
     global _config_watcher
 
     log.info(f"Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
-    metrics.start("process2")
+    metrics.start("transformer")
 
     # ZooKeeper: connect, register, config watch
     try:
-        zklib.register_service("process2", NODE_NAME)
+        zklib.register_service("transformer", NODE_NAME)
         _config_watcher = zklib.ConfigWatcher()
         log.info(f"ZK ready. Config: {_config_watcher.get_all()}")
     except Exception as e:
@@ -569,7 +569,7 @@ def main():
 
     # Leader election
     try:
-        election = zklib.LeaderElection("process2", NODE_NAME)
+        election = zklib.LeaderElection("transformer", NODE_NAME)
         election.run(_consume)
     except Exception as e:
         log.warning(f"ZK election failed ({e}) — single-node mode.")

@@ -1,5 +1,5 @@
 """
-tls.py - TLS contexts for every FlowFirst connection (client side and the Process 1 HTTPS listener).
+tls.py - TLS contexts for every FlowFirst connection (client side and the API Gateway (Process 1) HTTPS listener).
 
 The certificates come from security/ (a private root CA). Each component has a switch in .env
 (TLS_RABBITMQ_ENABLED, TLS_MARIADB_ENABLED, TLS_ZK_ENABLED, TLS_SWIFT_ENABLED, TLS_API_ENABLED), all off
@@ -77,7 +77,7 @@ def client_context(component: str = "") -> ssl.SSLContext:
 
 
 def server_context() -> ssl.SSLContext:
-    """Context for the Process 1 HTTPS listener (TLS_API_CLIENT_AUTH: required | optional | none)."""
+    """Context for the API Gateway (Process 1) HTTPS listener (TLS_API_CLIENT_AUTH: required | optional | none)."""
     mode = _cfg.TLS_API_CLIENT_AUTH
     if mode not in ("required", "optional", "none"):
         raise TLSConfigError(f"TLS_API_CLIENT_AUTH must be required, optional or none (got '{mode}')")

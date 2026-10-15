@@ -1,5 +1,5 @@
 [Unit]
-Description=FlowFirst Process 2 - Examiner & Reflector
+Description=FlowFirst Transformer (Process 2) - Examiner & Reflector
 After=network.target rabbitmq-server.service mariadb.service zookeeper.service
 Wants=rabbitmq-server.service zookeeper.service
 

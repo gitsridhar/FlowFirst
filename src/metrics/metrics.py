@@ -37,12 +37,12 @@ _TLS_HANDSHAKE_TIMEOUT_S = 10.0
 # on its first increment hides that first increment from Prometheus (increase() needs an earlier sample to compare).
 _FLOWS = ("1", "2", "3")
 EXPECTED_COUNTERS: Dict[str, List[str]] = {
-    "process1": [f"flow{f}_published" for f in _FLOWS] + [f"http_{c}xx" for c in "2345"],
-    "process2": [f"flow{f}_{e}" for f in _FLOWS for e in ("processed", "failed")],
-    "process3": ["flow1_forwarded", "flow1_failed", "flow2_reflected", "flow2_failed"],
-    "process4": ["dedup_reaped"] + [f"flow{f}_{e}" for f in _FLOWS
+    "api_gateway": [f"flow{f}_published" for f in _FLOWS] + [f"http_{c}xx" for c in "2345"],
+    "transformer": [f"flow{f}_{e}" for f in _FLOWS for e in ("processed", "failed")],
+    "forwarder": ["flow1_forwarded", "flow1_failed", "flow2_reflected", "flow2_failed"],
+    "db_updater": ["dedup_reaped"] + [f"flow{f}_{e}" for f in _FLOWS
                                     for e in ("persisted", "swift_stored", "dedup_skipped", "failed")],
-    "process5": ["flow3_processed", "flow3_failed"],
+    "remote_worker": ["flow3_processed", "flow3_failed"],
 }
 
 Sample = Union[float, int, List[Tuple[Dict[str, str], float]]]
@@ -92,7 +92,7 @@ def render(process: str) -> str:
            "Messages handled by this process since it started, by flow and event (published, processed, "
            "persisted, failed, ...).", messages)
     family("flowfirst_http_responses_total", "counter",
-           "HTTP responses sent by the REST API by status class (Process 1 only).", http)
+           "HTTP responses sent by the REST API by status class (API Gateway (Process 1) only).", http)
     family("flowfirst_events_total", "counter", "Other process events since start (e.g. dedup_reaped).", events)
     family("flowfirst_up", "gauge", "1 while the process is running and answering scrapes.", [({}, 1)])
     family("flowfirst_start_time_seconds", "gauge", "Unix time the process started.", [({}, int(_START_TIME))])

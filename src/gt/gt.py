@@ -100,7 +100,7 @@ def configure_logging():
       LOG_MAX_BYTES     rotate a file at this size       (default 52428800 = 50 MiB)
       LOG_BACKUP_COUNT  rotated files kept per process   (default 7)
 
-    The file is <LOG_DIR>/<process>.log (e.g. process1.log), one per process, so
+    The file is <LOG_DIR>/<process>.log (e.g. api_gateway.log), one per process, so
     processes never share a file. File lines carry a timestamp; the stdout format
     does not because journald adds its own. If the directory cannot be created or
     written, a warning goes to stderr and logging continues on stdout only.

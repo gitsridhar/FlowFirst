@@ -30,12 +30,12 @@ from src.metrics import metrics
 from src.zookeeper import zk as zklib
 
 
-log = logging.getLogger("flowfirst.p3")
+log = logging.getLogger("flowfirst.forwarder")
 
 def handle_flow1_message(ch, method, properties, body):
     """
     Flow 1 handler — runs inside the flow1 consumer greenthread.
-    Process 3 adds audit note and forwards to Process 4.
+    Forwarder (Process 3) adds audit note and forwards to DB Updater (Process 4).
     """
     try:
         data = json.loads(body.decode("utf-8"))
@@ -72,14 +72,14 @@ def handle_flow1_message(ch, method, properties, body):
 def handle_flow2_message(ch, method, properties, body):
     """
     Flow 2 handler — runs inside the flow2 consumer greenthread.
-    Process 3 verifies and reflects back to QUEUE_FLOW2_P3_REFLECTED for Process 4.
+    Forwarder (Process 3) verifies and reflects back to QUEUE_FLOW2_P3_REFLECTED for DB Updater (Process 4).
     """
     try:
         data = json.loads(body.decode("utf-8"))
         log.info(f"[Flow 2] Received item #{data.get('item_id')} "
                  f"(status={data.get('examined_status')}, value={data.get('value')})")
 
-        data["verified_by"] = "process3"
+        data["verified_by"] = "forwarder"
         data["completed"]   = True
         data["history"].append({
             "stage": "process3_reflected",
@@ -115,7 +115,7 @@ _ALLOWED_DEVICE_TYPES = frozenset({
 
 
 def handle_flow4_message(ch, method, properties, body):
-    """Flow 4 (create device) validation handler on Process 3."""
+    """Flow 4 (create device) validation handler on Forwarder (Process 3)."""
     try:
         data = json.loads(body.decode("utf-8"))
         device_name = (data.get("device_name") or "").strip()
@@ -163,7 +163,7 @@ def handle_flow4_message(ch, method, properties, body):
 
 
 def handle_flow5_message(ch, method, properties, body):
-    """Flow 5 (query devices) validation handler on Process 3."""
+    """Flow 5 (query devices) validation handler on Forwarder (Process 3)."""
     _recognized_filter_keys = {"device_type", "status", "owner_team", "location_contains"}
     try:
         data = json.loads(body.decode("utf-8"))
@@ -207,7 +207,7 @@ def handle_flow5_message(ch, method, properties, body):
 
 
 def handle_flow6_message(ch, method, properties, body):
-    """Flow 6 (update device) validation handler on Process 3. Dual-publishes to P4 and P5."""
+    """Flow 6 (update device) validation handler on Forwarder (Process 3). Dual-publishes to P4 and P5."""
     try:
         data = json.loads(body.decode("utf-8"))
         device_id = (data.get("device_id") or "").strip()
@@ -249,7 +249,7 @@ def handle_flow6_message(ch, method, properties, body):
 
 
 def handle_flow7_message(ch, method, properties, body):
-    """Flow 7 (soft-delete device) validation handler on Process 3."""
+    """Flow 7 (soft-delete device) validation handler on Forwarder (Process 3)."""
     try:
         data = json.loads(body.decode("utf-8"))
         device_id = (data.get("device_id") or "").strip()
@@ -394,14 +394,14 @@ def _gt_consume_flow7():
 def _gt_zk_health_reporter():
     while not gt.is_stopping():
         try:
-            zklib._update_health("process3", NODE_NAME, "leader")
+            zklib._update_health("forwarder", NODE_NAME, "leader")
         except Exception:
             pass
         gt.sleep(30)
 
 
 def _consume():
-    """Leader callback: launch all greenthreads for Process 3."""
+    """Leader callback: launch all greenthreads for Forwarder (Process 3)."""
     gt.register_signal_handlers()
 
     gt.spawn_consumers("p3_flow1_consumer", _gt_consume_flow1, GT_CONSUMERS_PER_QUEUE)
@@ -411,7 +411,7 @@ def _consume():
     gt.spawn_consumers("p3_flow6_consumer", _gt_consume_flow6, GT_CONSUMERS_PER_QUEUE)
     gt.spawn_consumers("p3_flow7_consumer", _gt_consume_flow7, GT_CONSUMERS_PER_QUEUE)
     gt.periodic("p3_zk_health",  _gt_zk_health_reporter, 30)
-    gt.start_metrics_reporter("process3")
+    gt.start_metrics_reporter("forwarder")
 
     log.info(f"All greenthreads started: {gt.list_greenthreads()}")
     log.info(f"Forwarding Flow 1 → '{QUEUE_FLOW1_P3_TO_P4}'")
@@ -424,16 +424,16 @@ def _consume():
 
 def main():
     log.info(f"Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
-    metrics.start("process3")
+    metrics.start("forwarder")
 
     try:
-        zklib.register_service("process3", NODE_NAME)
+        zklib.register_service("forwarder", NODE_NAME)
         log.info(f"ZK service registered.")
     except Exception as e:
         log.warning(f"ZK unavailable ({e}) — degraded mode.")
 
     try:
-        election = zklib.LeaderElection("process3", NODE_NAME)
+        election = zklib.LeaderElection("forwarder", NODE_NAME)
         election.run(_consume)
     except Exception as e:
         log.warning(f"ZK election failed ({e}) — single-node mode.")

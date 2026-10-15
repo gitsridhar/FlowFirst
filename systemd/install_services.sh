@@ -31,7 +31,7 @@ TARGET_MODE="${2:-cluster}"
 
 if [[ "${TARGET_MODE}" == "--remote" ]] || [[ "${TARGET_MODE}" == "remote" ]] || [[ "${TARGET_MODE}" == "node4" ]]; then
     UNITS=("flowfirst-process5.service")
-    echo "Installing Remote Node units (Process 5 only)..."
+    echo "Installing Remote Node units (Remote Worker (Process 5) only)..."
 else
     UNITS=("flowfirst-process1.service" "flowfirst-process2.service" "flowfirst-process3.service" "flowfirst-process4.service" "flowfirst.target")
     echo "Installing Cluster Node units (Processes 1-4 & target)..."
@@ -67,7 +67,7 @@ for unit in "${UNITS[@]}"; do
     echo "  Sandbox installed for ${unit}"
 done
 
-# 4. Open the Process 1 backend port in the firewall on every cluster node.
+# 4. Open the API Gateway (Process 1) backend port in the firewall on every cluster node.
 #    HAProxy's health checks and proxied requests reach each node on this port.
 #    This must be open on ALL three nodes — not just the one running HAProxy.
 if [[ "${TARGET_MODE}" != "--remote" && "${TARGET_MODE}" != "remote" && "${TARGET_MODE}" != "node4" ]]; then
@@ -81,7 +81,7 @@ if [[ "${TARGET_MODE}" != "--remote" && "${TARGET_MODE}" != "remote" && "${TARGE
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
         firewall-cmd --permanent --add-port="${API_BACKEND_PORT}/tcp"
         firewall-cmd --reload
-        echo "  Firewall: opened port ${API_BACKEND_PORT}/tcp (Process 1 backend)"
+        echo "  Firewall: opened port ${API_BACKEND_PORT}/tcp (API Gateway (Process 1) backend)"
     else
         echo "  Firewall: firewalld not active — ensure port ${API_BACKEND_PORT}/tcp is open on this node"
     fi

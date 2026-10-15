@@ -16,12 +16,12 @@ only be changed by creating a new queue. For each of the nine pipeline queues an
 Properties, headers (including x-death) and persistence are copied unchanged.
 
 STOP THE PIPELINE FIRST (Processes 1-5 on all nodes). The script refuses to run while any queue has a consumer, because a
-consumer that sees the queue disappear would fail, and Process 1 would publish into a queue that is being replaced. Run it
+consumer that sees the queue disappear would fail, and API Gateway (Process 1) would publish into a queue that is being replaced. Run it
 once, on any node. Afterwards set RABBITMQ_QUEUE_TYPE=<target> in .env on EVERY node BEFORE starting the processes; a process
 with the old value will refuse to start (RabbitMQ rejects the declaration and config.setup_queues() says why).
 
 Delivery is at-least-once: if the script is killed between "published to the new queue" and "acked from the old one", that
-message exists twice after a re-run. Process 4's ZooKeeper dedup barrier and the unique message_id key discard the second
+message exists twice after a re-run. DB Updater (Process 4)'s ZooKeeper dedup barrier and the unique message_id key discard the second
 copy at the database. The script is safe to re-run: every step checks the current state first.
 
 Needs the same .env as the pipeline (TLS included).

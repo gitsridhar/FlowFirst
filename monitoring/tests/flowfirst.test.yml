@@ -41,9 +41,9 @@ tests:
   - name: failed messages alert at once, successful ones do not
     interval: 1m
     input_series:
-      - series: 'flowfirst_messages_total{process="process2",flow="1",event="failed",instance="n1:9102"}'
+      - series: 'flowfirst_messages_total{process="transformer",flow="1",event="failed",instance="n1:9102"}'
         values: '0 0 0 2 2 2'
-      - series: 'flowfirst_messages_total{process="process2",flow="2",event="processed",instance="n1:9102"}'
+      - series: 'flowfirst_messages_total{process="transformer",flow="2",event="processed",instance="n1:9102"}'
         values: '0+100x5'
     alert_rule_test:
       - {eval_time: 2m, alertname: FlowFirstMessagesFailing, exp_alerts: []}
@@ -55,16 +55,16 @@ tests:
               summary: "process2 failed to handle flow 1 messages"
               description: "2 message(s) failed in 5 minutes. Each is nacked without requeue: it goes to the dead-letter queue when the flowfirst-dlx policy is applied (scripts/setup_rabbitmq_dlx.sh), otherwise it is DISCARDED. Read the process log for the exception."
 
-  - name: pipeline stall fires only when Process 1 publishes and Process 4 persists nothing
+  - name: pipeline stall fires only when API Gateway (Process 1) publishes and DB Updater (Process 4) persists nothing
     interval: 1m
     input_series:
-      - series: 'flowfirst_messages_total{process="process1",flow="1",event="published"}'
+      - series: 'flowfirst_messages_total{process="api_gateway",flow="1",event="published"}'
         values: '0+10x20'
-      - series: 'flowfirst_messages_total{process="process4",flow="1",event="persisted"}'
+      - series: 'flowfirst_messages_total{process="db_updater",flow="1",event="persisted"}'
         values: '0+10x5 50x15'
-      - series: 'flowfirst_messages_total{process="process1",flow="2",event="published"}'
+      - series: 'flowfirst_messages_total{process="api_gateway",flow="2",event="published"}'
         values: '0+10x20'
-      - series: 'flowfirst_messages_total{process="process4",flow="2",event="persisted"}'
+      - series: 'flowfirst_messages_total{process="db_updater",flow="2",event="persisted"}'
         values: '0+10x20'
     alert_rule_test:
       - {eval_time: 8m, alertname: FlowFirstPipelineStalled, exp_alerts: []}
@@ -74,7 +74,7 @@ tests:
           - exp_labels: {severity: critical, flow: "1"}
             exp_annotations:
               summary: "Flow 1: messages are accepted but none reach the database"
-              description: "Process 1 published to flow 1 for 10 minutes while Process 4 persisted nothing. Look for a stuck stage with the queue-depth alerts, a MariaDB outage, or an unavailable Process 4 leader. Needs Process 4 metrics to be scraped: if only Process 1 is, this fires falsely."
+              description: "API Gateway (Process 1) published to flow 1 for 10 minutes while DB Updater (Process 4) persisted nothing. Look for a stuck stage with the queue-depth alerts, a MariaDB outage, or an unavailable DB Updater (Process 4) leader. Needs DB Updater (Process 4) metrics to be scraped: if only API Gateway (Process 1) is, this fires falsely."
 
   - name: 5xx rate above 5 percent
     interval: 1m
@@ -90,7 +90,7 @@ tests:
           - exp_labels: {severity: warning}
             exp_annotations:
               summary: "More than 5% of API responses are 5xx"
-              description: "Usually the broker refused or could not route a publish (503/500). The response carries a request_id that matches a line in the Process 1 log."
+              description: "Usually the broker refused or could not route a publish (503/500). The response carries a request_id that matches a line in the API Gateway (Process 1) log."
 
   - name: certificate expiry warns at 30 days and is critical at 7 days
     interval: 1m

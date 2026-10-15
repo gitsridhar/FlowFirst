@@ -30,14 +30,14 @@ groups:
 
       - alert: FlowFirstPipelineStalled
         expr: |
-          sum by (flow) (increase(flowfirst_messages_total{process="process1",event="published"}[10m])) > 0
+          sum by (flow) (increase(flowfirst_messages_total{process="api_gateway",event="published"}[10m])) > 0
           and on (flow)
-          sum by (flow) (increase(flowfirst_messages_total{process="process4",event="persisted"}[10m])) == 0
+          sum by (flow) (increase(flowfirst_messages_total{process="db_updater",event="persisted"}[10m])) == 0
         for: 5m
         labels: {severity: critical}
         annotations:
           summary: "Flow {{ $labels.flow }}: messages are accepted but none reach the database"
-          description: "Process 1 published to flow {{ $labels.flow }} for 10 minutes while Process 4 persisted nothing. Look for a stuck stage with the queue-depth alerts, a MariaDB outage, or an unavailable Process 4 leader. Needs Process 4 metrics to be scraped: if only Process 1 is, this fires falsely."
+          description: "API Gateway (Process 1) published to flow {{ $labels.flow }} for 10 minutes while DB Updater (Process 4) persisted nothing. Look for a stuck stage with the queue-depth alerts, a MariaDB outage, or an unavailable DB Updater (Process 4) leader. Needs DB Updater (Process 4) metrics to be scraped: if only API Gateway (Process 1) is, this fires falsely."
 
       - alert: FlowFirstApi5xxRate
         expr: |
@@ -47,7 +47,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "More than 5% of API responses are 5xx"
-          description: "Usually the broker refused or could not route a publish (503/500). The response carries a request_id that matches a line in the Process 1 log."
+          description: "Usually the broker refused or could not route a publish (503/500). The response carries a request_id that matches a line in the API Gateway (Process 1) log."
 
       - alert: FlowFirstPublishConnectionsLow
         expr: flowfirst_publish_connections_open < flowfirst_publish_connections_configured

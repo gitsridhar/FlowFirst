@@ -1,4 +1,4 @@
-"""Who is calling? — identity resolution, admin gate, and pluggable API authentication for Process 1.
+"""Who is calling? — identity resolution, admin gate, and pluggable API authentication for API Gateway (Process 1).
 
 Pure functions (no sockets, no I/O, no globals) so they can be unit-tested.
 
@@ -17,7 +17,7 @@ Authentication modes (AUTH_MODE in .env):
             used for the admin gate but applied to every flow endpoint.
 
 Identity sources for the admin gate (unchanged, in order of trust):
-  1. The client certificate presented on the TLS connection to Process 1 (verified by the TLS layer).
+  1. The client certificate presented on the TLS connection to API Gateway (Process 1) (verified by the TLS layer).
      Its subject CN is the identity.
   2. The X-SSL-Client-CN header, ONLY when the connection was made by a trusted proxy CN from
      ADMIN_TRUSTED_PROXY_CNS (HAProxy's backend identity). HAProxy deletes any client-supplied copy.

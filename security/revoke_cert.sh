@@ -7,7 +7,7 @@
 #
 # After revoking, publish the new CRL: ./security/install_certs.sh --crl-only
 # A revoked certificate is only refused by components that load the CRL
-# (HAProxy 'crl-file', Process 1 and the Python clients when TLS_CRL_FILE is set).
+# (HAProxy 'crl-file', API Gateway (Process 1) and the Python clients when TLS_CRL_FILE is set).
 # Components without CRL support must instead get a new certificate and a restart.
 # ==============================================================================
 set -euo pipefail

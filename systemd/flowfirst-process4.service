@@ -1,5 +1,5 @@
 [Unit]
-Description=FlowFirst Process 4 - MariaDB Persister & Sink
+Description=FlowFirst DB Updater (Process 4) - MariaDB Persister & Sink
 After=network.target rabbitmq-server.service mariadb.service zookeeper.service
 Wants=rabbitmq-server.service mariadb.service zookeeper.service
 

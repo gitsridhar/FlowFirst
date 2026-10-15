@@ -1,7 +1,7 @@
 # Prometheus scrape configuration for FlowFirst (sample - copy, then replace the <...> placeholders).
 #
 # FlowFirst processes serve /metrics on METRICS_PORT_BASE + N (default 9101..9105) when METRICS_ENABLED=true.
-# They are NOT behind HAProxy: scrape every node. Process 5 exists on Node 4 only.
+# They are NOT behind HAProxy: scrape every node. Remote Worker (Process 5) exists on Node 4 only.
 # With TLS_API_ENABLED=true the listeners need a client certificate signed by the FlowFirst CA; issue one for
 # Prometheus (security/issue_cert.sh) and point tls_config at it. Check rules with: promtool check rules monitoring/*.rules.yml
 global:
@@ -49,7 +49,7 @@ scrape_configs:
       - targets: ["<node1-ip>:15692", "<node2-ip>:15692", "<node3-ip>:15692"]
 
   - job_name: mysqld                       # prometheus/mysqld_exporter on each Galera node. Its default port 9104 is
-    static_configs:                        # Process 4's metrics port, so run it with --web.listen-address=:9114
+    static_configs:                        # DB Updater (Process 4)'s metrics port, so run it with --web.listen-address=:9114
       - targets: ["<node1-ip>:9114", "<node2-ip>:9114", "<node3-ip>:9114"]
 
   - job_name: node                         # prometheus/node_exporter on every node

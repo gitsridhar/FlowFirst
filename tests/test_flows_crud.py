@@ -312,7 +312,7 @@ def _base_data(flow, extra=None):
 
 
 def test_p2_handle_flow4_message_enriches():
-    """Process 2 Flow 4 handler should add device_fingerprint and enriched_at."""
+    """Transformer (Process 2) Flow 4 handler should add device_fingerprint and enriched_at."""
     import src.application.process2 as p2
 
     ch = MagicMock()
@@ -352,7 +352,7 @@ def test_p2_handle_flow4_fingerprint_value():
 
 
 def test_p2_handle_flow5_message_normalizes_filters():
-    """Process 2 Flow 5 handler should lowercase device_type and status filters."""
+    """Transformer (Process 2) Flow 5 handler should lowercase device_type and status filters."""
     import src.application.process2 as p2
 
     ch = MagicMock()
@@ -370,7 +370,7 @@ def test_p2_handle_flow5_message_normalizes_filters():
 
 
 def test_p2_handle_flow6_message_adds_sequence():
-    """Process 2 Flow 6 handler should add update_sequence and previous_state_tracked."""
+    """Transformer (Process 2) Flow 6 handler should add update_sequence and previous_state_tracked."""
     import src.application.process2 as p2
 
     ch = MagicMock()
@@ -388,7 +388,7 @@ def test_p2_handle_flow6_message_adds_sequence():
 
 
 def test_p2_handle_flow7_message_marks_deletion():
-    """Process 2 Flow 7 handler should add deletion_requested_by and grace_period_s."""
+    """Transformer (Process 2) Flow 7 handler should add deletion_requested_by and grace_period_s."""
     import src.application.process2 as p2
 
     ch = MagicMock()
@@ -405,7 +405,7 @@ def test_p2_handle_flow7_message_marks_deletion():
 
 
 def test_p2_handle_flow6_remote_return_forwards_to_p4():
-    """Process 2 Flow 6 remote return handler should forward to flow6_p2_to_p4."""
+    """Transformer (Process 2) Flow 6 remote return handler should forward to flow6_p2_to_p4."""
     import src.application.process2 as p2
 
     ch = MagicMock()
@@ -440,7 +440,7 @@ def test_p2_flow4_handler_nacks_on_exception():
 # ---------------------------------------------------------------------------
 
 def test_p3_flow4_valid_device():
-    """Process 3 Flow 4 validates device_name and device_type and forwards."""
+    """Forwarder (Process 3) Flow 4 validates device_name and device_type and forwards."""
     import src.application.process3 as p3
 
     ch = MagicMock()
@@ -459,7 +459,7 @@ def test_p3_flow4_valid_device():
 
 
 def test_p3_flow4_rejects_empty_device_name():
-    """Process 3 Flow 4 should nack when device_name is empty."""
+    """Forwarder (Process 3) Flow 4 should nack when device_name is empty."""
     import src.application.process3 as p3
 
     ch = MagicMock()
@@ -474,7 +474,7 @@ def test_p3_flow4_rejects_empty_device_name():
 
 
 def test_p3_flow4_rejects_invalid_device_type():
-    """Process 3 Flow 4 should nack when device_type is not in the allowed set."""
+    """Forwarder (Process 3) Flow 4 should nack when device_type is not in the allowed set."""
     import src.application.process3 as p3
 
     ch = MagicMock()
@@ -504,7 +504,7 @@ def test_p3_flow4_all_allowed_device_types():
 
 
 def test_p3_flow5_valid_query():
-    """Process 3 Flow 5 should add query_validated and forward."""
+    """Forwarder (Process 3) Flow 5 should add query_validated and forward."""
     import src.application.process3 as p3
 
     ch = MagicMock()
@@ -533,7 +533,7 @@ def test_p3_flow5_empty_filters_still_valid():
 
 
 def test_p3_flow6_dual_publish():
-    """Process 3 Flow 6 should publish to BOTH flow6_p3_to_p4 and flow6_p3_to_p5."""
+    """Forwarder (Process 3) Flow 6 should publish to BOTH flow6_p3_to_p4 and flow6_p3_to_p5."""
     import src.application.process3 as p3
 
     ch = MagicMock()
@@ -552,7 +552,7 @@ def test_p3_flow6_dual_publish():
 
 
 def test_p3_flow6_rejects_short_device_id():
-    """Process 3 Flow 6 should nack when device_id is not 36 characters (not UUID)."""
+    """Forwarder (Process 3) Flow 6 should nack when device_id is not 36 characters (not UUID)."""
     import src.application.process3 as p3
 
     ch = MagicMock()
@@ -566,7 +566,7 @@ def test_p3_flow6_rejects_short_device_id():
 
 
 def test_p3_flow6_rejects_empty_device_id():
-    """Process 3 Flow 6 should nack when device_id is empty."""
+    """Forwarder (Process 3) Flow 6 should nack when device_id is empty."""
     import src.application.process3 as p3
 
     ch = MagicMock()
@@ -579,7 +579,7 @@ def test_p3_flow6_rejects_empty_device_id():
 
 
 def test_p3_flow7_valid_delete():
-    """Process 3 Flow 7 should add deletion_validated and forward."""
+    """Forwarder (Process 3) Flow 7 should add deletion_validated and forward."""
     import src.application.process3 as p3
 
     ch = MagicMock()
@@ -595,7 +595,7 @@ def test_p3_flow7_valid_delete():
 
 
 def test_p3_flow7_rejects_missing_device_id():
-    """Process 3 Flow 7 should nack when device_id is missing."""
+    """Forwarder (Process 3) Flow 7 should nack when device_id is missing."""
     import src.application.process3 as p3
 
     ch = MagicMock()
@@ -613,7 +613,7 @@ def test_p3_flow7_rejects_missing_device_id():
 # ---------------------------------------------------------------------------
 
 def test_p5_flow6_message_computes_edge_sync_token():
-    """Process 5 Flow 6 handler should compute edge_sync_token = sha256(device_id:seq)[:16]."""
+    """Remote Worker (Process 5) Flow 6 handler should compute edge_sync_token = sha256(device_id:seq)[:16]."""
     import src.application.process5 as p5
 
     ch = MagicMock()

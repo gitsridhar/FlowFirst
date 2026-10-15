@@ -9,7 +9,7 @@ set -euo pipefail
 #   - Leader election  (one active worker per process per cluster)
 #   - Distributed config store (live threshold / routing changes, no restart)
 #   - Service registry (ephemeral znodes — dead processes auto-unregister)
-#   - Message dedup barrier (Process 4 prevents double-inserts into Galera)
+#   - Message dedup barrier (DB Updater (Process 4) prevents double-inserts into Galera)
 #   - Pipeline health dashboard (znode tree reflects live pipeline state)
 #
 # Run this script on ALL THREE nodes.  Each node sets its own myid from

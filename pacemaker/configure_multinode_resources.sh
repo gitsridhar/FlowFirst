@@ -93,30 +93,30 @@ sudo pcs resource create haproxy-res systemd:haproxy \
 sudo pcs resource group add vip-haproxy-group flowfirst-vip haproxy-res
 
 # 4. Configure FlowFirst Processes (Cloned Active-Active across all 3 nodes)
-echo "[4/5] Creating cloned active-active resources for Process 1, 2, 3, and 4..."
+echo "[4/5] Creating cloned active-active resources for API Gateway (Process 1), Transformer (Process 2), Forwarder (Process 3), and DB Updater (Process 4)..."
 
-# Process 4: MariaDB persister
+# DB Updater (Process 4): MariaDB persister
 sudo pcs resource create flowfirst-p4-res systemd:flowfirst-process4 \
     op start   interval=0s  timeout=60s \
     op stop    interval=0s  timeout=30s \
     op monitor interval=30s timeout=30s
 sudo pcs resource clone flowfirst-p4-res clone-max=3 clone-node-max=1
 
-# Process 3: Reflector & Forwarder
+# Forwarder (Process 3): Reflector & Forwarder
 sudo pcs resource create flowfirst-p3-res systemd:flowfirst-process3 \
     op start   interval=0s  timeout=60s \
     op stop    interval=0s  timeout=30s \
     op monitor interval=30s timeout=30s
 sudo pcs resource clone flowfirst-p3-res clone-max=3 clone-node-max=1
 
-# Process 2: Examiner & Reflector
+# Transformer (Process 2): Examiner & Reflector
 sudo pcs resource create flowfirst-p2-res systemd:flowfirst-process2 \
     op start   interval=0s  timeout=60s \
     op stop    interval=0s  timeout=30s \
     op monitor interval=30s timeout=30s
 sudo pcs resource clone flowfirst-p2-res clone-max=3 clone-node-max=1
 
-# Process 1: REST API Producer (listening on :8080 on all 3 nodes)
+# API Gateway (Process 1): REST API Producer (listening on :8080 on all 3 nodes)
 sudo pcs resource create flowfirst-p1-res systemd:flowfirst-process1 \
     op start   interval=0s  timeout=60s \
     op stop    interval=0s  timeout=30s \

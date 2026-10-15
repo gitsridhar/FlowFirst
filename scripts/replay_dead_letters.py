@@ -10,7 +10,7 @@ A message lands here when a pipeline process rejected it (nack, requeue=False) A
 scripts/setup_rabbitmq_dlx.sh is active. Find out WHY first (the process log has the exception) - replaying a message
 that fails for a permanent reason just puts it back here.
 
-Replay is safe against duplicates at the database: Process 4 checks a ZooKeeper dedup barrier on message_id, and the
+Replay is safe against duplicates at the database: DB Updater (Process 4) checks a ZooKeeper dedup barrier on message_id, and the
 insert is keyed on it. Replay uses publisher confirms: a message is only removed from the dead-letter queue after the
 broker confirmed the republish, so a failure here leaves it in the queue.
 

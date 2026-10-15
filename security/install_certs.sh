@@ -11,7 +11,7 @@
 # Layout on each node (TLS_DIR, default /etc/flowfirst/tls):
 #   ca.crt  ca.crl                       root:root 644        public
 #   pipeline/pipeline.{crt,key}          flowuser             client identity of Processes 1-5
-#   api/api.{crt,key}                    flowuser             Process 1 HTTPS listener        (node1-3)
+#   api/api.{crt,key}                    flowuser             API Gateway (Process 1) HTTPS listener        (node1-3)
 #   haproxy/{vip,backend}.pem            haproxy              VIP server cert, backend client cert (node1-3)
 #   rabbitmq/rabbitmq.{crt,key}          rabbitmq             (node1-3)
 #   mariadb/mariadb.{crt,key}            mysql                (node1-3)

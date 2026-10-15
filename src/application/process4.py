@@ -27,7 +27,7 @@ from src.metrics import metrics
 from src.zookeeper import zk as zklib
 
 
-log = logging.getLogger("flowfirst.p4")
+log = logging.getLogger("flowfirst.db_updater")
 
 def handle_flow1_message(ch, method, properties, body):
     """
@@ -526,7 +526,7 @@ def _gt_consume_flow7():
 def _gt_zk_health_reporter():
     while not gt.is_stopping():
         try:
-            zklib._update_health("process4", NODE_NAME, "leader")
+            zklib._update_health("db_updater", NODE_NAME, "leader")
         except Exception:
             pass
         gt.sleep(30)
@@ -568,7 +568,7 @@ def _gt_dedup_reaper():
 
 
 def _consume():
-    """Leader callback: launch all greenthreads for Process 4."""
+    """Leader callback: launch all greenthreads for DB Updater (Process 4)."""
     gt.register_signal_handlers()
 
     # Greenthread 1: Flow 1 consumer (own connection)
@@ -577,7 +577,7 @@ def _consume():
     # Greenthread 2: Flow 2 consumer (own connection)
     gt.spawn_consumers("p4_flow2_consumer", _gt_consume_flow2, GT_CONSUMERS_PER_QUEUE)
 
-    # Greenthread 3: Flow 3 consumer (from Process 2 via Remote Node 4 pipeline)
+    # Greenthread 3: Flow 3 consumer (from Transformer (Process 2) via Remote Node 4 pipeline)
     gt.spawn_consumers("p4_flow3_consumer", _gt_consume_flow3, GT_CONSUMERS_PER_QUEUE)
 
     # Flow 4 consumer (create device)
@@ -602,7 +602,7 @@ def _consume():
     gt.spawn("p4_dedup_reaper", _gt_dedup_reaper, restart_on_error=True)
 
     # Metrics reporter
-    gt.start_metrics_reporter("process4")
+    gt.start_metrics_reporter("db_updater")
 
     log.info(f"All greenthreads started: {gt.list_greenthreads()}")
 
@@ -613,7 +613,7 @@ def _consume():
 
 def main():
     log.info(f"Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
-    metrics.start("process4")
+    metrics.start("db_updater")
 
     # MariaDB schema init
     try:
@@ -624,14 +624,14 @@ def main():
 
     # ZooKeeper
     try:
-        zklib.register_service("process4", NODE_NAME)
+        zklib.register_service("db_updater", NODE_NAME)
         log.info(f"ZK service registered.")
     except Exception as e:
         log.warning(f"ZK unavailable ({e}) — degraded mode.")
 
     # Leader election
     try:
-        election = zklib.LeaderElection("process4", NODE_NAME)
+        election = zklib.LeaderElection("db_updater", NODE_NAME)
         election.run(_consume)
     except Exception as e:
         log.warning(f"ZK election failed ({e}) — single-node mode.")

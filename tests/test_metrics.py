@@ -36,9 +36,9 @@ def test_counters_become_labelled_series():
     gt.metrics_counter["flow2_failed"] += 1
     gt.metrics_counter["http_5xx"] += 2
     gt.metrics_counter["dedup_reaped"] += 7
-    text = metrics.render("process1")
+    text = metrics.render("api_gateway")
     assert 'flowfirst_messages_total{node="' in text
-    assert re.search(r'flowfirst_messages_total\{[^}]*process="process1",flow="1",event="published"\} 3', text)
+    assert re.search(r'flowfirst_messages_total\{[^}]*process="api_gateway",flow="1",event="published"\} 3', text)
     assert re.search(r'flowfirst_messages_total\{[^}]*flow="2",event="failed"\} 1', text)
     assert re.search(r'flowfirst_http_responses_total\{[^}]*class="5xx"\} 2', text)
     assert re.search(r'flowfirst_events_total\{[^}]*event="dedup_reaped"\} 7', text)
@@ -47,7 +47,7 @@ def test_counters_become_labelled_series():
 
 
 def test_no_counters_means_no_empty_families():
-    text = metrics.render("process3")
+    text = metrics.render("forwarder")
     assert "flowfirst_messages_total" not in text
     assert "flowfirst_up" in text
 
@@ -55,10 +55,10 @@ def test_no_counters_means_no_empty_families():
 def test_every_sample_line_is_well_formed():
     gt.metrics_counter["flow1_published"] += 1
     metrics.register_gauge("flowfirst_x", "x", lambda: [({"cert": 'a"b'}, 1.5)])
-    for line in metrics.render("process1").splitlines():
+    for line in metrics.render("api_gateway").splitlines():
         if not line.startswith("#"):
             assert re.fullmatch(r'[a-z_]+\{[^{}]*\} -?[0-9.e+-]+', line), line
-    assert 'cert="a\\"b"' in metrics.render("process1")
+    assert 'cert="a\\"b"' in metrics.render("api_gateway")
 
 
 def test_a_failing_gauge_does_not_blank_the_scrape():
@@ -66,14 +66,14 @@ def test_a_failing_gauge_does_not_blank_the_scrape():
         raise RuntimeError("nope")
     metrics.register_gauge("flowfirst_bad", "bad", boom)
     metrics.register_gauge("flowfirst_good", "good", lambda: 4)
-    text = metrics.render("process1")
+    text = metrics.render("api_gateway")
     assert "flowfirst_bad" not in text
     assert re.search(r"flowfirst_good\{[^}]*\} 4", text)
 
 
 def test_no_message_content_in_output():
     gt.metrics_counter["flow1_published"] += 1
-    assert "payload" not in metrics.render("process1").lower()
+    assert "payload" not in metrics.render("api_gateway").lower()
 
 
 def _make_cert(path, days):
@@ -110,7 +110,7 @@ _CHILD = textwrap.dedent("""
     from src.metrics import metrics
     import eventlet
     gt.metrics_counter["flow4_persisted"] += 5
-    metrics.start("process4")
+    metrics.start("db_updater")
     print("READY", flush=True)
     eventlet.sleep(25)
 """)
@@ -162,7 +162,7 @@ def test_listener_plain_http():
     try:
         status, ctype, body = _wait_get(base + 4)
         assert status == 200 and ctype.startswith("text/plain; version=0.0.4")
-        assert re.search(r'flowfirst_messages_total\{[^}]*process="process4",flow="4",event="persisted"\} 5', body)
+        assert re.search(r'flowfirst_messages_total\{[^}]*process="db_updater",flow="4",event="persisted"\} 5', body)
         assert _wait_get(base + 4, path="/other")[0] == 404
     finally:
         p.kill()
@@ -231,8 +231,8 @@ def test_listener_tls_requires_client_certificate(tmp_path):
 def test_expected_counters_are_seeded_at_zero(monkeypatch):
     monkeypatch.setattr(metrics, "METRICS_ENABLED", True)
     monkeypatch.setattr(metrics.eventlet, "spawn", lambda *a, **k: None)      # do not open a port
-    metrics.start("process4")
-    text = metrics.render("process4")
+    metrics.start("db_updater")
+    text = metrics.render("db_updater")
     assert re.search(r'flow="1",event="persisted"\} 0', text)
     assert re.search(r'flow="3",event="failed"\} 0', text)
     assert re.search(r'event="dedup_reaped"\} 0', text)

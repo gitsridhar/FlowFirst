@@ -90,7 +90,7 @@ if [[ $DB -eq 1 ]]; then
             | "$CLIENT" --defaults-extra-file="$BK_DB_CNF"
         bk_log "loaded. Row count: $("$CLIENT" --defaults-extra-file="$BK_DB_CNF" -N -e "SELECT COUNT(*) FROM \`$INTO\`.processed_messages")"
     else
-        bk_warn "REPLACING database ${MARIADB_DB} from $FROM. Stop the pipeline writers (Process 4) first."
+        bk_warn "REPLACING database ${MARIADB_DB} from $FROM. Stop the pipeline writers (DB Updater (Process 4)) first."
         bk_decrypt "$PASSFILE" "$FROM/db.sql.gz.enc" /dev/stdout | gzip -dc | "$CLIENT" --defaults-extra-file="$BK_DB_CNF"
         bk_log "restored. Row count: $("$CLIENT" --defaults-extra-file="$BK_DB_CNF" -N -e "SELECT COUNT(*) FROM \`${MARIADB_DB}\`.processed_messages")"
     fi

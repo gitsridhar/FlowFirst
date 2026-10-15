@@ -52,7 +52,7 @@ from src.zookeeper import zk as zklib
 from src.swift import swift_storage
 from urllib.parse import parse_qs
 
-log = logging.getLogger("flowfirst.p1")
+log = logging.getLogger("flowfirst.api_gateway")
 
 # ---------------------------------------------------------------------------
 # Per-process state — each greenthread owns its OWN pika connection+channel.
@@ -114,7 +114,7 @@ def _publish(routing_key: str, body: str) -> None:
         )
 
 
-metrics.register_gauge("flowfirst_publish_connections_configured", "Publisher connections Process 1 is set to keep.",
+metrics.register_gauge("flowfirst_publish_connections_configured", "Publisher connections API Gateway (Process 1) is set to keep.",
                        lambda: len(_publish_slots))
 metrics.register_gauge("flowfirst_publish_connections_open", "Publisher connections currently open to RabbitMQ.",
                        lambda: sum(1 for s in _publish_slots if s.conn is not None and not s.conn.is_closed))
@@ -184,7 +184,7 @@ def publish_flow2_message(item_id: int = None, custom_data: str = None, value: f
 
 
 def publish_flow3_message(item_id: int = None, custom_data: str = None, remote_metric: float = None) -> dict:
-    """Prepare and publish a Flow 3 message targeted to Remote Node 4 / Process 5."""
+    """Prepare and publish a Flow 3 message targeted to Remote Node 4 / Remote Worker (Process 5)."""
     if item_id  is None: item_id  = int(time.time() * 1000) % 100000
     if remote_metric is None: remote_metric = round(45.0 + (item_id % 15) * 2.2, 2)
     if custom_data is None: custom_data = f"Flow-3 remote payload for item #{item_id}"
@@ -404,7 +404,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
             # outage would then take every healthy API node out of the pool. Dependency state: /ready, /zk/health.
             self._send_json(200, {
                 "status": "healthy",
-                "service": "Process 1 REST API Producer",
+                "service": "API Gateway (Process 1) REST API Producer",
                 "node": NODE_NAME,
                 "greenthreads": gt.list_greenthreads(),
                 "metrics": gt.metrics_snapshot(),
@@ -420,7 +420,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     "POST /zk/config":         "Update a runtime config value in ZK",
                     "POST /api/flow1":          "Publish message to Flow 1",
                     "POST /api/flow2":          "Publish message to Flow 2",
-                    "POST /api/flow3":          "Publish message to Flow 3 (Remote Node 4 / Process 5 pipeline)",
+                    "POST /api/flow3":          "Publish message to Flow 3 (Remote Node 4 / Remote Worker (Process 5) pipeline)",
                     "POST /api/batch":          "Publish batch to all flows",
                     "POST /api/devices":        "Create IoT device (Flow 4)",
                     "POST /api/devices/query":  "Query IoT devices (Flow 5)",
@@ -459,7 +459,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 "pipeline_health": zklib.get_pipeline_health(),
                 "registered_workers": {
                     p: zklib.list_registered(p)
-                    for p in ("process1", "process2", "process3", "process4", "process5")
+                    for p in ("api_gateway", "transformer", "forwarder", "db_updater", "remote_worker")
                 },
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
@@ -823,7 +823,7 @@ def _gt_zk_health_reporter():
     from src.zookeeper import zk as _zk
     while not gt.is_stopping():
         try:
-            _zk._update_health("process1", NODE_NAME, "leader")
+            _zk._update_health("api_gateway", NODE_NAME, "leader")
         except Exception:
             pass
         gt.sleep(30)
@@ -875,7 +875,7 @@ def _gt_http_server():
 
 
 def _run_api_server():
-    """Launch all greenthreads for Process 1."""
+    """Launch all greenthreads for API Gateway (Process 1)."""
     gt.register_signal_handlers()
 
     # Greenthread 1: HTTP server (handles requests concurrently)
@@ -888,7 +888,7 @@ def _run_api_server():
     gt.periodic("p1_zk_health", _gt_zk_health_reporter, 30)
 
     # Greenthread 4: Metrics reporter
-    gt.start_metrics_reporter("process1")
+    gt.start_metrics_reporter("api_gateway")
 
     log.info(f"All greenthreads started: {gt.list_greenthreads()}")
     log.info(f"ZK config endpoints live: GET /zk/health  GET /zk/config  POST /zk/config")
@@ -909,18 +909,18 @@ def main():
     global _config_watcher
 
     log.info(f"Starting (node={NODE_NAME}, pool={gt.GT_POOL_SIZE}) ...")
-    metrics.start("process1")
+    metrics.start("api_gateway")
 
     # ZooKeeper: connect, register, config watch
     try:
-        zklib.register_service("process1", NODE_NAME)
+        zklib.register_service("api_gateway", NODE_NAME)
         _config_watcher = zklib.ConfigWatcher()
         log.info(f"ZK ready. Config: {_config_watcher.get_all()}")
     except Exception as e:
         log.warning(f"ZK unavailable ({e}) — degraded mode.")
         _config_watcher = None
 
-    # Process 1 runs on all three nodes simultaneously (cloned resource) — no leader election.
+    # API Gateway (Process 1) runs on all three nodes simultaneously (cloned resource) — no leader election.
     # Every node serves the REST API independently; HAProxy round-robins across all three.
     try:
         _run_api_server()

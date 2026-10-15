@@ -24,7 +24,7 @@ Provides four capabilities used by all four pipeline processes:
    ZK session.  Ops tooling (or other processes) can list live workers.
 
 4. DedupBarrier
-   Process 4 checks /flowfirst/dedup/<message_id> before inserting into
+   DB Updater (Process 4) checks /flowfirst/dedup/<message_id> before inserting into
    MariaDB.  If the znode already exists the message was already persisted
    (e.g. after a Pacemaker failover re-delivery) and is skipped.
    Znodes are created with a TTL of DEDUP_TTL_MS milliseconds (default 5 min).
@@ -149,7 +149,7 @@ class LeaderElection:
     Wraps kazoo's Election recipe.
 
     Usage:
-        election = LeaderElection("process2", node_name="node1")
+        election = LeaderElection("transformer", node_name="node1")
         # This blocks until this node wins, then calls on_elected():
         election.run(on_elected_callback)
     """
@@ -295,7 +295,7 @@ def list_registered(process_name: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# 4. Dedup Barrier (Process 4)
+# 4. Dedup Barrier (DB Updater (Process 4))
 # ---------------------------------------------------------------------------
 
 def check_and_mark_processed(message_id: str) -> bool:
@@ -307,7 +307,7 @@ def check_and_mark_processed(message_id: str) -> bool:
     Returns False if the message was already processed
                   (the caller should skip / ack-without-insert).
 
-    The dedup znode is persistent so it survives a Process 4 leader crash and
+    The dedup znode is persistent so it survives a DB Updater (Process 4) leader crash and
     blocks re-insertion of the redelivered message by the new leader. Old
     znodes are removed by the p4_dedup_reaper greenthread in process4.py once
     they are older than ZK_DEDUP_TTL_MS (default 5 minutes).

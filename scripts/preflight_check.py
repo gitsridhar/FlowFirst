@@ -98,9 +98,9 @@ def check_api(env, cfg):
     say("FAIL" if cfg.API_EXPOSE_ERROR_DETAILS else "PASS", "API_EXPOSE_ERROR_DETAILS", "true leaks exception text to clients" if cfg.API_EXPOSE_ERROR_DETAILS else "false")
     say("PASS", "API_PUBLISH_CONNECTIONS", "%d (range 1..32; see ReadMe K000 before changing)" % cfg.API_PUBLISH_CONNECTIONS)
     if cfg.API_PORT == cfg.API_BACKEND_PORT:
-        say("FAIL", "ports", "API_PORT and API_BACKEND_PORT are both %d; HAProxy fronts 8080, Process 1 binds 8082" % cfg.API_PORT)
+        say("FAIL", "ports", "API_PORT and API_BACKEND_PORT are both %d; HAProxy fronts 8080, API Gateway (Process 1) binds 8082" % cfg.API_PORT)
     else:
-        say("PASS", "ports", "HAProxy %d -> Process 1 %d" % (cfg.API_PORT, cfg.API_BACKEND_PORT))
+        say("PASS", "ports", "HAProxy %d -> API Gateway (Process 1) %d" % (cfg.API_PORT, cfg.API_BACKEND_PORT))
 
 
 def check_admin(env, cfg):
@@ -147,7 +147,7 @@ def check_crl(cfg):
     """A CRL past its nextUpdate makes every certificate unverifiable: the components that load it refuse all clients."""
     path = cfg.TLS_CRL_FILE
     if not path:
-        say("WARN", "revocation list", "TLS_CRL_FILE is blank: revoked certificates are still accepted by Process 1 and the clients")
+        say("WARN", "revocation list", "TLS_CRL_FILE is blank: revoked certificates are still accepted by API Gateway (Process 1) and the clients")
         return
     try:
         from cryptography import x509

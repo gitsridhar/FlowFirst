@@ -1,5 +1,11 @@
-# LOCAL DEVELOPMENT ONLY. The passwords below are the well-known sample values that FlowFirst refuses in production
-# (they only work with ALLOW_DEFAULT_SECRETS=true). Never use this file on a cluster node or expose its ports.
+# LOCAL DEVELOPMENT ONLY. Credentials are read from environment variables — copy .env.example to .env,
+# run ./scripts/generate_secrets.sh --write to fill them, then set ALLOW_DEFAULT_SECRETS=true for this
+# throw-away dev setup. Never use this file on a cluster node or expose its ports.
+#
+# Usage:
+#   cp src/config/.env.example .env   # fill RABBITMQ_PASSWORD, MARIADB_PASSWORD, MARIADB_ROOT_PASSWORD
+#   set -a && source .env && set +a
+#   docker compose -f src/docker/docker-compose.yml up -d
 services:
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
@@ -8,9 +14,9 @@ services:
       - "5672:5672"    # AMQP protocol port
       - "15672:15672"  # Management UI port
     environment:
-      # Credentials match RABBITMQ_USER / RABBITMQ_PASSWORD in .env / src/config/config.py
-      RABBITMQ_DEFAULT_USER: flowuser
-      RABBITMQ_DEFAULT_PASS: flowpassword
+      # Credentials sourced from the shell environment (set RABBITMQ_USER / RABBITMQ_PASSWORD in .env)
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-flowuser}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD must be set in .env}
       RABBITMQ_DEFAULT_VHOST: /
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
@@ -25,10 +31,10 @@ services:
     ports:
       - "3306:3306"
     environment:
-      MARIADB_ROOT_PASSWORD: rootpassword
-      MARIADB_DATABASE: flowfirst_db
-      MARIADB_USER: flowuser
-      MARIADB_PASSWORD: flowpassword
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?MARIADB_ROOT_PASSWORD must be set in .env}
+      MARIADB_DATABASE: ${MARIADB_DB:-flowfirst_db}
+      MARIADB_USER: ${MARIADB_USER:-flowuser}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?MARIADB_PASSWORD must be set in .env}
     volumes:
       - mariadb_data:/var/lib/mysql
       - ../sql/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
@@ -47,7 +53,7 @@ services:
       - "2888:2888"   # Peer port (unused in single-node dev mode)
       - "3888:3888"   # Leader election port (unused in single-node dev mode)
       # ZK admin server runs on container port 8080; mapped to host 8081 to
-      # avoid collision with Process 1's REST API which binds to host port 8080.
+      # avoid collision with API Gateway (Process 1)'s REST API which binds to host port 8080.
       - "8081:8080"   # ZK admin server → http://localhost:8081
     environment:
       ZOO_MY_ID: 1

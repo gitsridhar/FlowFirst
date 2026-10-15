@@ -24,11 +24,11 @@ from src.zookeeper import zk as zklib
 _config_watcher = None
 
 
-log = logging.getLogger("flowfirst.p5")
+log = logging.getLogger("flowfirst.remote_worker")
 
 def handle_flow3_message(ch, method, properties, body):
     """
-    Flow 3 handler on Remote Node 4 / Process 5.
+    Flow 3 handler on Remote Node 4 / Remote Worker (Process 5).
     Consumes from flow3_p1_to_p5, modifies/transforms the data,
     appends execution history, and reflects back to RabbitMQ pool on flow3_p5_to_p2.
     """
@@ -74,7 +74,7 @@ def handle_flow3_message(ch, method, properties, body):
 
 
 def handle_flow6_message(ch, method, properties, body):
-    """Flow 6 remote handler on Process 5 (Remote Node 4). Applies edge-sync step."""
+    """Flow 6 remote handler on Remote Worker (Process 5) (Remote Node 4). Applies edge-sync step."""
     try:
         data = json.loads(body.decode("utf-8"))
         device_id = data.get("device_id", "")
@@ -153,14 +153,14 @@ def _gt_consume_flow3():
 def _gt_zk_health_reporter():
     while not gt.is_stopping():
         try:
-            zklib._update_health("process5", NODE_NAME, "active")
+            zklib._update_health("remote_worker", NODE_NAME, "active")
         except Exception:
             pass
         gt.sleep(30)
 
 
 def _consume():
-    """Start all greenthreads for Process 5."""
+    """Start all greenthreads for Remote Worker (Process 5)."""
     gt.register_signal_handlers()
 
     # Flow 3 Consumer
@@ -173,7 +173,7 @@ def _consume():
     gt.periodic("p5_zk_health", _gt_zk_health_reporter, 30)
 
     # Metrics Reporter
-    gt.start_metrics_reporter("process5")
+    gt.start_metrics_reporter("remote_worker")
 
     log.info(f"[Remote Node] All greenthreads started: {gt.list_greenthreads()}")
     gt.stop_event.wait()
@@ -183,11 +183,11 @@ def _consume():
 
 def main():
     global _config_watcher
-    log.info(f"[Remote Node] Starting Process 5 on {NODE_NAME} (pool={gt.GT_POOL_SIZE}) ...")
-    metrics.start("process5")
+    log.info(f"[Remote Node] Starting Remote Worker (Process 5) on {NODE_NAME} (pool={gt.GT_POOL_SIZE}) ...")
+    metrics.start("remote_worker")
 
     try:
-        zklib.register_service("process5", NODE_NAME)
+        zklib.register_service("remote_worker", NODE_NAME)
         _config_watcher = zklib.ConfigWatcher()
         log.info(f"ZK service registered.")
     except Exception as e:

@@ -1,5 +1,5 @@
 [Unit]
-Description=FlowFirst Process 5 - Remote Worker Node 4
+Description=FlowFirst Remote Worker (Process 5) - Remote Worker Node 4
 After=network.target
 Wants=network.target
 

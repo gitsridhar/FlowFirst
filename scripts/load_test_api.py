@@ -248,7 +248,7 @@ async def http_request(conn, args, method, path, body, keep):
         raise ConnectionResetError("connection closed before a response")
     parts = line.split(None, 2)
     status = int(parts[1])
-    http10 = parts[0].strip().upper() == b"HTTP/1.0"      # Process 1 itself answers HTTP/1.0 (no keep-alive)
+    http10 = parts[0].strip().upper() == b"HTTP/1.0"      # API Gateway (Process 1) itself answers HTTP/1.0 (no keep-alive)
     clen, chunked, close = None, False, http10
     while True:
         h = await conn.r.readline()

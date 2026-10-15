@@ -4,7 +4,7 @@
 #
 #   ./security/refresh_crl.sh [--days N]       new ca.crl valid for N days (default PKI_CRL_DAYS, 30)
 #
-# Why: a CRL has a nextUpdate date. Once it passes, every component that loads the CRL (Process 1 and the
+# Why: a CRL has a nextUpdate date. Once it passes, every component that loads the CRL (API Gateway (Process 1) and the
 # Python clients with TLS_CRL_FILE set, HAProxy crl-file, MariaDB ssl_crl) treats ALL certificates as
 # unverifiable and refuses them - an outage, not a warning. Refresh it well before that, from cron:
 #   0 3 * * 1  PKI_CA_PASSPHRASE_FILE=/root/.ca-pass /opt/flowfirst/security/refresh_crl.sh && \

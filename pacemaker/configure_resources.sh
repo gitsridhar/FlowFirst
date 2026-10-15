@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # FlowFirst - Pacemaker Resource Configuration Script
-# Configures Process 1, 2, 3, 4 as Pacemaker cluster resources with ordering,
+# Configures API Gateway (Process 1), Transformer (Process 2), Forwarder (Process 3), DB Updater (Process 4) as Pacemaker cluster resources with ordering,
 # colocation, and resource grouping.
 # ==============================================================================
 
@@ -23,25 +23,25 @@ done
 # 2. Create systemd-based Pacemaker resources with monitoring intervals
 echo "[2/4] Creating Pacemaker resources for all 4 processes..."
 
-# Process 4: MariaDB persister (downstream sink)
+# DB Updater (Process 4): MariaDB persister (downstream sink)
 sudo pcs resource create flowfirst-p4-res systemd:flowfirst-process4 \
     op monitor interval=15s timeout=20s \
     op start timeout=30s \
     op stop timeout=30s
 
-# Process 3: Reflector & Forwarder
+# Forwarder (Process 3): Reflector & Forwarder
 sudo pcs resource create flowfirst-p3-res systemd:flowfirst-process3 \
     op monitor interval=15s timeout=20s \
     op start timeout=30s \
     op stop timeout=30s
 
-# Process 2: Examiner & Reflector
+# Transformer (Process 2): Examiner & Reflector
 sudo pcs resource create flowfirst-p2-res systemd:flowfirst-process2 \
     op monitor interval=15s timeout=20s \
     op start timeout=30s \
     op stop timeout=30s
 
-# Process 1: REST API Producer
+# API Gateway (Process 1): REST API Producer
 sudo pcs resource create flowfirst-p1-res systemd:flowfirst-process1 \
     op monitor interval=15s timeout=20s \
     op start timeout=30s \

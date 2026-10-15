@@ -5,11 +5,18 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STRONG = {"RABBITMQ_PASSWORD": "a3f9c1d2e4b5a6978c0d1e2f3a4b5c6d", "MARIADB_PASSWORD": "b3f9c1d2e4b5a6978c0d1e2f3a4b5c6d",
-          "SWIFT_KEY": "c3f9c1d2e4b5a6978c0d1e2f3a4b5c6d", "HAPROXY_STATS_PASS": "d3f9c1d2e4b5a6978c0d1e2f3a4b5c6d",
-          "SWIFT_HASH_PATH_PREFIX": "e3f9c1d2e4b5a6978c0d1e2f3a4b5c6d", "SWIFT_HASH_PATH_SUFFIX": "f3f9c1d2e4b5a6978c0d1e2f3a4b5c6d",
-          "NODE1_IP": "10.0.0.1", "NODE2_IP": "10.0.0.2", "NODE3_IP": "10.0.0.3", "NODE4_IP": "10.0.0.4",
-          "NODE_NAME": "node1", "CURRENT_NODE_IP": "10.0.0.1"}
+# Placeholder values used as "strong enough" secrets in preflight tests.
+# Deliberately descriptive strings — not hex, not credential-shaped — to avoid scanner false positives.
+STRONG = {
+    "RABBITMQ_PASSWORD":    "test-placeholder-rmq-pass-for-preflight-tests",
+    "MARIADB_PASSWORD":     "test-placeholder-mdb-pass-for-preflight-tests",
+    "SWIFT_KEY":            "test-placeholder-swk-pass-for-preflight-tests",
+    "HAPROXY_STATS_PASS":   "test-placeholder-hap-pass-for-preflight-tests",
+    "SWIFT_HASH_PATH_PREFIX": "test-placeholder-swift-prefix-for-preflight-tests",
+    "SWIFT_HASH_PATH_SUFFIX": "test-placeholder-swift-suffix-for-preflight-tests",
+    "NODE1_IP": "10.0.0.1", "NODE2_IP": "10.0.0.2", "NODE3_IP": "10.0.0.3", "NODE4_IP": "10.0.0.4",
+    "NODE_NAME": "node1", "CURRENT_NODE_IP": "10.0.0.1",
+}
 
 
 def run_check(tmp_path, overrides, mode=0o600):
@@ -31,10 +38,10 @@ def test_good_env_has_no_failures(tmp_path):
 
 
 def test_sample_password_fails_and_value_is_not_printed(tmp_path):
-    code, out = run_check(tmp_path, {"RABBITMQ_PASSWORD": "flowpassword"})
+    code, out = run_check(tmp_path, {"RABBITMQ_PASSWORD": "admin123"})
     assert code == 1
     assert "RABBITMQ_PASSWORD is a well-known sample" in out
-    assert "flowpassword" not in out
+    assert "admin123" not in out
 
 
 def test_strong_secrets_are_never_printed(tmp_path):

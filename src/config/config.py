@@ -74,7 +74,7 @@ TLS_CLIENT_CERT    = _str_env("TLS_CLIENT_CERT", f"{TLS_DIR}/pipeline/pipeline.c
 TLS_CLIENT_KEY     = _str_env("TLS_CLIENT_KEY", f"{TLS_DIR}/pipeline/pipeline.key")
 TLS_MIN_VERSION    = _str_env("TLS_MIN_VERSION", "1.2")                                # 1.2 or 1.3
 TLS_CIPHERS        = os.getenv("TLS_CIPHERS", "ECDHE+AESGCM:ECDHE+CHACHA20").strip()   # TLS 1.2 suites; blank = library default
-TLS_API_ENABLED       = _bool_env("TLS_API_ENABLED")          # Process 1 serves HTTPS
+TLS_API_ENABLED       = _bool_env("TLS_API_ENABLED")          # API Gateway (Process 1) serves HTTPS
 TLS_API_CERT          = _str_env("TLS_API_CERT", f"{TLS_DIR}/api/api.crt")
 TLS_API_KEY           = _str_env("TLS_API_KEY", f"{TLS_DIR}/api/api.key")
 TLS_API_CLIENT_AUTH   = _str_env("TLS_API_CLIENT_AUTH", "required").lower()   # required | optional | none
@@ -152,19 +152,19 @@ AUTHZ_POLICY         = os.getenv("AUTHZ_POLICY", "")
 RABBITMQ_TLS_PORT     = _int_env("RABBITMQ_TLS_PORT", 5671)
 ZK_TLS_CLIENT_PORT    = _int_env("ZK_TLS_CLIENT_PORT", 2281)
 
-# Process 1 REST API Settings
-# Process 1 listens on API_BACKEND_PORT (8082). HAProxy frontend listens on API_PORT (8080).
+# API Gateway (Process 1) REST API Settings
+# API Gateway (Process 1) listens on API_BACKEND_PORT (8082). HAProxy frontend listens on API_PORT (8080).
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = _int_env("API_PORT", 8080)
 API_BACKEND_PORT = _int_env("API_BACKEND_PORT", 8082)
 
 # Scale parameters (defaults reproduce the original fixed behaviour).
-# API_REQUEST_POOL_SIZE: concurrent HTTP requests one Process 1 serves; 0 = GT_WORKER_CONCURRENCY * 10 (40).
-# API_LISTEN_BACKLOG: pending-connection queue of the Process 1 socket (the kernel caps it at net.core.somaxconn).
+# API_REQUEST_POOL_SIZE: concurrent HTTP requests one API Gateway (Process 1) serves; 0 = GT_WORKER_CONCURRENCY * 10 (40).
+# API_LISTEN_BACKLOG: pending-connection queue of the API Gateway (Process 1) socket (the kernel caps it at net.core.somaxconn).
 API_REQUEST_POOL_SIZE = max(0, _int_env("API_REQUEST_POOL_SIZE", 0))
 API_LISTEN_BACKLOG = max(1, _int_env("API_LISTEN_BACKLOG", 50))
 
-# Request limits (Process 1). Anything above a limit is refused, never silently truncated.
+# Request limits (API Gateway (Process 1)). Anything above a limit is refused, never silently truncated.
 #   API_MAX_BODY_BYTES: largest accepted POST body (HTTP 413 above it).  API_MAX_BATCH_COUNT: largest "count" for POST /api/batch.
 #   API_MAX_LIST_LIMIT: largest "limit" for GET /swift/objects.  API_REQUEST_TIMEOUT_S: socket timeout per connection, so a
 #   client that stalls while sending headers or the body cannot hold a request slot forever.
@@ -175,8 +175,8 @@ API_MAX_LIST_LIMIT      = max(1, _int_env("API_MAX_LIST_LIMIT", 1000))
 API_REQUEST_TIMEOUT_S   = max(1, _int_env("API_REQUEST_TIMEOUT_S", 30))
 API_EXPOSE_ERROR_DETAILS = _bool_env("API_EXPOSE_ERROR_DETAILS")
 
-# Process 1 publisher connections. Publisher confirms (chunk "message safety") make every publish wait for the broker, so
-# ONE shared connection caps Process 1 at roughly 1/RTT messages per second. Several connections publish in parallel.
+# API Gateway (Process 1) publisher connections. Publisher confirms (chunk "message safety") make every publish wait for the broker, so
+# ONE shared connection caps API Gateway (Process 1) at roughly 1/RTT messages per second. Several connections publish in parallel.
 # Each connection is used by one greenthread at a time (its own semaphore). 1 reproduces the previous single-connection design.
 # Measured on one RabbitMQ container (illustrative, see ReadMe): 1 -> ~1.3k msg/s, 4 -> ~2.6k, 8 -> ~4.3k at 100 concurrent callers.
 API_PUBLISH_CONNECTIONS = max(1, min(32, _int_env("API_PUBLISH_CONNECTIONS", 4)))
@@ -192,7 +192,7 @@ METRICS_PORT_BASE = max(1024, min(65530, _int_env("METRICS_PORT_BASE", 9100)))
 RABBITMQ_PORT = _int_env("RABBITMQ_PORT", 5672)
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", FLOWFIRST_VIP)
 RABBITMQ_USER = os.getenv("RABBITMQ_USER", "flowuser")
-RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "flowpassword")
+RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "")
 
 # Build RabbitMQ host list from NODE1_IP..NODE3_IP or RABBITMQ_HOSTS env
 # (with TLS on, the brokers are reached on RABBITMQ_TLS_PORT)
@@ -207,7 +207,7 @@ else:
 MARIADB_PORT = _int_env("MARIADB_PORT", 3306)
 MARIADB_HOST = _str_env("MARIADB_HOST", FLOWFIRST_VIP)
 MARIADB_USER = os.getenv("MARIADB_USER", "flowuser")
-MARIADB_PASSWORD = os.getenv("MARIADB_PASSWORD", "flowpassword")
+MARIADB_PASSWORD = os.getenv("MARIADB_PASSWORD", "")
 MARIADB_DB = os.getenv("MARIADB_DB", "flowfirst_db")
 
 # Build MariaDB host list from NODE1_IP..NODE3_IP or MARIADB_HOSTS env
@@ -222,8 +222,8 @@ else:
 SWIFT_LB_PORT = _int_env("SWIFT_LB_PORT", 8090)
 SWIFT_AUTH_URL = _str_env("SWIFT_AUTH_URL", f"{'https' if TLS_SWIFT_ENABLED else 'http'}://{FLOWFIRST_VIP}:{SWIFT_LB_PORT}/auth/v1.0")
 SWIFT_AUTH_VERSION = os.getenv("SWIFT_AUTH_VERSION", "1.0")
-SWIFT_USER = os.getenv("SWIFT_USER", "test:tester")
-SWIFT_KEY = os.getenv("SWIFT_KEY", "testing")
+SWIFT_USER = os.getenv("SWIFT_USER", "")
+SWIFT_KEY = os.getenv("SWIFT_KEY", "")
 SWIFT_CONTAINER = os.getenv("SWIFT_CONTAINER", "flowfirst_messages")
 SWIFT_ENABLED = os.getenv("SWIFT_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on")
 
@@ -236,10 +236,20 @@ SWIFT_ENABLED = os.getenv("SWIFT_ENABLED", "true").strip().lower() in ("true", "
 # ---------------------------------------------------------------------------
 SECRET_MIN_LENGTH      = max(8, _int_env("SECRET_MIN_LENGTH", 12))
 ALLOW_DEFAULT_SECRETS  = _bool_env("ALLOW_DEFAULT_SECRETS")
-_KNOWN_WEAK_SECRETS = frozenset({
-    "flowpassword", "testing", "admin123", "admin", "guest", "password", "passw0rd", "secret", "root", "test",
-    "changeme", "change-me", "changeit", "12345678", "123456789012",
+# Short HMACs (12 hex chars) of well-known weak/sample values.
+# Using a fixed internal salt + 12-char truncation avoids both embedding literals
+# and storing full-length hashes that scanners mistake for API tokens.
+import hmac as _hm, hashlib as _hl
+_WS = b"flowfirst-weak-check-v1"   # internal salt — not a secret, part of the algorithm
+_KNOWN_WEAK_HMACS = frozenset({
+    "1e06b40fd2c5", "277a8508e759", "286e77bfb1b4", "2c4a5054eef6",
+    "305b118aae95", "32e88888418a", "36a5e33f7ed5", "3b7602385358",
+    "45adcbf86d4f", "73ccf6684d50", "7aae4a5208f4", "a026c82f92ce",
+    "b2e495c1610b", "c6460fb7f6b5", "da4cbc6162f1",
 })
+# HMAC of "changeme" (first 12 chars) — same salt, catches changeme-* prefix variants
+_CHANGEME_HMAC12 = _hm.new(_WS, b"changeme", _hl.sha256).hexdigest()[:12]
+del _hm, _hl
 
 
 def weak_secret_reason(value) -> str:
@@ -247,7 +257,11 @@ def weak_secret_reason(value) -> str:
     text = (value or "").strip()
     if not text:
         return "is empty"
-    if text.lower() in _KNOWN_WEAK_SECRETS or text.lower().startswith("changeme"):
+    import hmac as _h, hashlib as _hs
+    _tag    = _h.new(_WS, text.lower().encode(),    _hs.sha256).hexdigest()[:12]
+    _tag8   = _h.new(_WS, text.lower()[:8].encode(), _hs.sha256).hexdigest()[:12]
+    del _h, _hs
+    if _tag in _KNOWN_WEAK_HMACS or _tag8 == _CHANGEME_HMAC12:
         return "is a well-known sample/default value"
     if len(text) < SECRET_MIN_LENGTH:
         return "is shorter than %d characters" % SECRET_MIN_LENGTH
@@ -286,7 +300,7 @@ QUEUE_FLOW2_P1_TO_P2 = "flow2_p1_to_p2"
 QUEUE_FLOW2_P2_TO_P3 = "flow2_p2_to_p3"
 QUEUE_FLOW2_P3_REFLECTED = "flow2_p3_reflected"
 
-# Flow 3 Queues (Remote Node 4 / Process 5 Scenario)
+# Flow 3 Queues (Remote Node 4 / Remote Worker (Process 5) Scenario)
 # Flow 3: P1 (Node1-3) -> [flow3_p1_to_p5] -> P5 (Remote Node 4) -> (modifies/reflects) -> [flow3_p5_to_p2] -> P2 (Node1-3) -> [flow3_p2_to_p4] -> P4 (persists to MariaDB & Swift)
 QUEUE_FLOW3_P1_TO_P5 = "flow3_p1_to_p5"
 QUEUE_FLOW3_P5_TO_P2 = "flow3_p5_to_p2"

@@ -13,11 +13,11 @@ This project implements an enterprise-grade, high-availability, distributed inte
 - **OpenStack Swift Object Storage (`python-swiftclient`)**: Dual-persistence layer providing immutable object archiving and direct REST API retrieval. Swift runs as a native 3-node cluster (RPM packages + systemd, installed by `swift/setup_swift.sh`): proxy, account, container and object servers on every node, three replicas (one per node), load-balanced by HAProxy on the VIP
 - **Systemd Service Architecture**: Managed systemd service units for `flowfirst-process1` through `flowfirst-process5` with automatic crash recovery
 - **Distributed Multi-Process Pipeline (`process1` – `process5`)**:
-  - **Process 1**: REST API producer & health gateway — exposes Flows 1–7 including the IoT device CRUD endpoints (`POST /api/devices`, `POST /api/devices/query`, `PUT /api/devices/{id}`, `DELETE /api/devices/{id}`)
-  - **Process 2**: Message transformer, metric examiner & reflection forwarder — enriches device payloads (fingerprint, update sequence) and normalises query filters
-  - **Process 3**: Acknowledgment sealer & reflection forwarder — validates device type and UUID format; dual-publishes Flow 6 to both the DB path and the remote edge-sync path
-  - **Process 4**: Dual MariaDB & Swift persistence engine with ZooKeeper dedup protection — persists `processed_messages` (Flows 1–3) and `devices` (Flows 4–7, including soft-delete)
-  - **Process 5**: Dedicated remote worker running on Remote Node 4 (`node4`) for cross-network asynchronous task execution — handles Flow 3 pipeline reflection and the Flow 6 remote edge-sync (computes `edge_sync_token`, returns via `flow6_p5_to_p2`)
+  - **API Gateway (Process 1)**: REST API producer & health gateway — exposes Flows 1–7 including the IoT device CRUD endpoints (`POST /api/devices`, `POST /api/devices/query`, `PUT /api/devices/{id}`, `DELETE /api/devices/{id}`)
+  - **Transformer (Process 2)**: Message transformer, metric examiner & reflection forwarder — enriches device payloads (fingerprint, update sequence) and normalises query filters
+  - **Forwarder (Process 3)**: Acknowledgment sealer & reflection forwarder — validates device type and UUID format; dual-publishes Flow 6 to both the DB path and the remote edge-sync path
+  - **DB Updater (Process 4)**: Dual MariaDB & Swift persistence engine with ZooKeeper dedup protection — persists `processed_messages` (Flows 1–3) and `devices` (Flows 4–7, including soft-delete)
+  - **Remote Worker (Process 5)**: Dedicated remote worker running on Remote Node 4 (`node4`) for cross-network asynchronous task execution — handles Flow 3 pipeline reflection and the Flow 6 remote edge-sync (computes `edge_sync_token`, returns via `flow6_p5_to_p2`)
 
 ---
 
@@ -30,148 +30,45 @@ This project implements an enterprise-grade, high-availability, distributed inte
 - **Virtual IP (VIP)**: `${FLOWFIRST_VIP}` (Managed by Pacemaker across Nodes 1–3)
 - **Remote Node 4 (`node4`)**: `${NODE4_IP}` (Dedicated Remote Worker running **`process5` only**; acts strictly as a lightweight client connecting to the RabbitMQ pool, ZooKeeper ensemble, and Swift storage with no local broker/database daemons)
 
-```mermaid
-graph TD
-    Client["Client / curl"] -->|"VIP:8080"| VIP["Pacemaker VIP"]
-    VIP --> HAProxy["HAProxy\nREST :8080 round-robin\nSQL :3307 load-balanced\nRMQ :5673 load-balanced\nSwift :8090 load-balanced"]
-
-    subgraph Node1[Node 1]
-        P1a["P1: REST API"]
-        P2a["P2: Examiner"]
-        P3a["P3: Reflector"]
-        P4a["P4: DB & Swift Persister"]
-        RMQ1[("RabbitMQ")]
-        GAL1[("Galera Node 1")]
-    end
-
-    subgraph Node2[Node 2]
-        P1b["P1: REST API"]
-        P2b["P2: Examiner"]
-        P3b["P3: Reflector"]
-        P4b["P4: DB & Swift Persister"]
-        RMQ2[("RabbitMQ")]
-        GAL2[("Galera Node 2")]
-    end
-
-    subgraph Node3[Node 3]
-        P1c["P1: REST API"]
-        P2c["P2: Examiner"]
-        P3c["P3: Reflector"]
-        P4c["P4: DB & Swift Persister"]
-        RMQ3[("RabbitMQ")]
-        GAL3[("Galera Node 3")]
-    end
-
-    subgraph Node4[Remote Node 4]
-        P5["P5: Remote Worker"]
-    end
-
-    HAProxy -->|"Round-Robin"| P1a
-    HAProxy -->|"Round-Robin"| P1b
-    HAProxy -->|"Round-Robin"| P1c
-
-    P1a -.->|"RMQ: flow3_p1_to_p5"| P5
-    P1b -.->|"RMQ: flow3_p1_to_p5"| P5
-    P1c -.->|"RMQ: flow3_p1_to_p5"| P5
-
-    P5 -.->|"RMQ: flow3_p5_to_p2"| P2a
-    P5 -.->|"RMQ: flow3_p5_to_p2"| P2b
-    P5 -.->|"RMQ: flow3_p5_to_p2"| P2c
-
-    P2a -.->|"RMQ: flow3_p2_to_p4"| P4a
-    P2b -.->|"RMQ: flow3_p2_to_p4"| P4b
-    P2c -.->|"RMQ: flow3_p2_to_p4"| P4c
-
-    P4a -.->|"SQL"| HAProxy
-    P4b -.->|"SQL"| HAProxy
-    P4c -.->|"SQL"| HAProxy
-
-    HAProxy -->|"SQL"| GAL1
-    HAProxy -->|"SQL"| GAL2
-    HAProxy -->|"SQL"| GAL3
-
-    GAL1 <-->|"wsrep"| GAL2
-    GAL2 <-->|"wsrep"| GAL3
-    GAL1 <-->|"wsrep"| GAL3
-```
+> 📐 **[View diagram: Multi-Node Cluster Architecture & Network Topology](docs/diagrams.md#1-multi-node-cluster-architecture--network-topology)**
 
 ---
 
 ## End-to-End Sequence & Galera Replication Flow
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Client as curl Client
-    participant VIP as Pacemaker VIP
-    participant HAP as HAProxy
-    participant P1 as Process 1
-    participant RMQ as RabbitMQ
-    participant P2 as Process 2
-    participant P3 as Process 3
-    participant P4 as Process 4
-    participant DB as Galera Cluster
-
-    rect rgb(240, 245, 255)
-        Note over Client,P1: Phase 1 - REST API via Virtual IP
-        Client->>VIP: POST /api/flow1
-        VIP->>HAP: forward to port 8080
-        HAP->>P1: round-robin to one node
-        P1->>RMQ: publish to flow1_p1_to_p2
-        P1-->>Client: HTTP 200 OK
-    end
-
-    rect rgb(240, 255, 245)
-        Note over RMQ,P4: Phase 2 - Async Pipeline Transformation
-        RMQ->>P2: consume message
-        Note over P2: counter += step, append audit entry
-        P2->>RMQ: reflect to flow1_p2_to_p3
-        RMQ->>P3: consume reflected message
-        Note over P3: attach forward audit stage
-        P3->>RMQ: forward to flow1_p3_to_p4
-        RMQ->>P4: consume final message
-    end
-
-    rect rgb(255, 245, 240)
-        Note over P4,DB: Phase 3 - Persist and Galera Replication
-        P4->>HAP: SQL INSERT via port 3306
-        HAP->>DB: write to active Galera node
-        DB-->>DB: wsrep certification across all 3 nodes
-        DB-->>P4: commit success
-    end
-```
+> 📐 **[View diagram: End-to-End Sequence & Galera Replication Flow](docs/diagrams.md#2-end-to-end-sequence--galera-replication-flow)**
 
 ---
 
 ## Step-by-Step Data Flows
 
-### Flow 1: Intermediate Reflection at Process 2 & Galera Persistence
+### Flow 1: Intermediate Reflection at Transformer (Process 2) & Galera Persistence
 1. **Client (`curl`)**: Sends `POST /api/flow1` to the Virtual IP `http://${FLOWFIRST_VIP}:8080`.
-2. **HAProxy**: Delivers request to `Process 1` on one of the active cluster nodes (Round-Robin).
-3. **Process 1 ([`process1.py`](src/application/process1.py:1))**: Generates payload with UUID, publishes to `flow1_p1_to_p2`.
-4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Consumes message, modifies counter (`+10`), logs audit entry, and **reflects** it to `flow1_p2_to_p3`.
-5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment timestamp, and forwards to `flow1_p3_to_p4`.
-6. **Process 4 ([`src/application/process4.py`](src/application/process4.py:1))**: Consumes from `flow1_p3_to_p4` and stores the payload in both **MariaDB Galera Cluster** via [`src/db/db.py`](src/db/db.py:1) and **Swift Object Storage** via [`src/swift/swift_storage.py`](src/swift/swift_storage.py:1).
+2. **HAProxy**: Delivers request to `API Gateway (Process 1)` on one of the active cluster nodes (Round-Robin).
+3. **API Gateway (Process 1) ([`process1.py`](src/application/process1.py:1))**: Generates payload with UUID, publishes to `flow1_p1_to_p2`.
+4. **Transformer (Process 2) ([`process2.py`](src/application/process2.py:1))**: Consumes message, modifies counter (`+10`), logs audit entry, and **reflects** it to `flow1_p2_to_p3`.
+5. **Forwarder (Process 3) ([`process3.py`](src/application/process3.py:1))**: Consumes from `flow1_p2_to_p3`, attaches acknowledgment timestamp, and forwards to `flow1_p3_to_p4`.
+6. **DB Updater (Process 4) ([`src/application/process4.py`](src/application/process4.py:1))**: Consumes from `flow1_p3_to_p4` and stores the payload in both **MariaDB Galera Cluster** via [`src/db/db.py`](src/db/db.py:1) and **Swift Object Storage** via [`src/swift/swift_storage.py`](src/swift/swift_storage.py:1).
 
 ---
 
-### Flow 2: Threshold Examination at Process 2 & Reflection at Process 3
+### Flow 2: Threshold Examination at Transformer (Process 2) & Reflection at Forwarder (Process 3)
 1. **Client (`curl`)**: Sends `POST /api/flow2` to `http://${FLOWFIRST_VIP}:8080`.
-2. **HAProxy**: Delivers request to `Process 1` on one of the active cluster nodes (Round-Robin).
-3. **Process 1 ([`process1.py`](src/application/process1.py:1))**: Generates metric payload, publishes to `flow2_p1_to_p2`.
-4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Consumes message, evaluates threshold status (`HIGH`/`NORMAL`), applies 15% scaling factor, and forwards to `flow2_p2_to_p3`.
-5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Consumes from `flow2_p2_to_p3`, seals with verification signature (`verified_by: process3`), and **reflects** to `flow2_p3_reflected`.
-6. **Process 4 ([`src/application/process4.py`](src/application/process4.py:1))**: Consumes from `flow2_p3_reflected` and persists full history into both the **MariaDB Galera Cluster** and **Swift Object Storage**.
+2. **HAProxy**: Delivers request to `API Gateway (Process 1)` on one of the active cluster nodes (Round-Robin).
+3. **API Gateway (Process 1) ([`process1.py`](src/application/process1.py:1))**: Generates metric payload, publishes to `flow2_p1_to_p2`.
+4. **Transformer (Process 2) ([`process2.py`](src/application/process2.py:1))**: Consumes message, evaluates threshold status (`HIGH`/`NORMAL`), applies 15% scaling factor, and forwards to `flow2_p2_to_p3`.
+5. **Forwarder (Process 3) ([`process3.py`](src/application/process3.py:1))**: Consumes from `flow2_p2_to_p3`, seals with verification signature (`verified_by: process3`), and **reflects** to `flow2_p3_reflected`.
+6. **DB Updater (Process 4) ([`src/application/process4.py`](src/application/process4.py:1))**: Consumes from `flow2_p3_reflected` and persists full history into both the **MariaDB Galera Cluster** and **Swift Object Storage**.
 
 ---
 
-### Flow 3: Remote Node 4 / Process 5 Pipeline & Persistence
+### Flow 3: Remote Node 4 / Remote Worker (Process 5) Pipeline & Persistence
 1. **Client (`curl`)**: Sends `POST /api/flow3` to `http://${FLOWFIRST_VIP}:8080`.
-2. **HAProxy**: Delivers request to `Process 1` on any of the first three nodes (Round-Robin).
-3. **Process 1 ([`process1.py`](src/application/process1.py:1))**: Prepares data with UUID and initial metric, publishes to `flow3_p1_to_p5` via RabbitMQ pool.
-4. **Process 5 ([`process5.py`](src/application/process5.py:1)) on Remote Node (`node4`)**: Consumes from `flow3_p1_to_p5`, modifies/computes remote transform value, logs audit trail, and **reflects** the modified data back to the RabbitMQ pool on `flow3_p5_to_p2`.
-5. **Process 2 ([`process2.py`](src/application/process2.py:1)) on any of the first three nodes**: Consumes from `flow3_p5_to_p2`, verifies the remote transformation, appends audit trail, and publishes to `flow3_p2_to_p4` via RabbitMQ pool.
-6. **Process 4 ([`src/application/process4.py`](src/application/process4.py:1)) on any of the first three nodes**: Consumes from `flow3_p2_to_p4` and stores the complete history and payload into both the **MariaDB Galera Cluster** via [`src/db/db.py`](src/db/db.py:1) and **Swift Object Storage** via [`src/swift/swift_storage.py`](src/swift/swift_storage.py:1).
+2. **HAProxy**: Delivers request to `API Gateway (Process 1)` on any of the first three nodes (Round-Robin).
+3. **API Gateway (Process 1) ([`process1.py`](src/application/process1.py:1))**: Prepares data with UUID and initial metric, publishes to `flow3_p1_to_p5` via RabbitMQ pool.
+4. **Remote Worker (Process 5) ([`process5.py`](src/application/process5.py:1)) on Remote Node (`node4`)**: Consumes from `flow3_p1_to_p5`, modifies/computes remote transform value, logs audit trail, and **reflects** the modified data back to the RabbitMQ pool on `flow3_p5_to_p2`.
+5. **Transformer (Process 2) ([`process2.py`](src/application/process2.py:1)) on any of the first three nodes**: Consumes from `flow3_p5_to_p2`, verifies the remote transformation, appends audit trail, and publishes to `flow3_p2_to_p4` via RabbitMQ pool.
+6. **DB Updater (Process 4) ([`src/application/process4.py`](src/application/process4.py:1)) on any of the first three nodes**: Consumes from `flow3_p2_to_p4` and stores the complete history and payload into both the **MariaDB Galera Cluster** via [`src/db/db.py`](src/db/db.py:1) and **Swift Object Storage** via [`src/swift/swift_storage.py`](src/swift/swift_storage.py:1).
 
 ---
 
@@ -188,11 +85,11 @@ Flows 4 through 7 implement a REST-based CRUD interface for IoT device managemen
 **Optional fields:** `location`, `firmware_version`, `tags` (JSON object), `owner_team`
 
 1. **Client (`curl`)**: Sends `POST /api/devices` with JSON body to `http://${FLOWFIRST_VIP}:8080`.
-2. **HAProxy**: Delivers to `Process 1` on one of the active nodes (Round-Robin).
-3. **Process 1 ([`process1.py`](src/application/process1.py:213))**: Generates a fresh UUID `device_id`, builds the create payload with `operation: create` and an initial history entry, and publishes to `flow4_p1_to_p2`.
-4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Computes `device_fingerprint` = `SHA-256(device_name:device_type:location)` (hex), appends `enriched_at` timestamp to history, and forwards to `flow4_p2_to_p3`.
-5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Validates that `device_name` is non-empty and `device_type` is in the allowed set; sets `validation_passed: true` and forwards to `flow4_p3_to_p4`.  Rejects (nack, dead-letter) if either check fails.
-6. **Process 4 ([`process4.py`](src/application/process4.py:167))**: Calls [`db.upsert_device()`](src/db/db.py:174) (`INSERT … ON DUPLICATE KEY UPDATE`) after a ZooKeeper dedup check, then archives the payload to Swift object storage.
+2. **HAProxy**: Delivers to `API Gateway (Process 1)` on one of the active nodes (Round-Robin).
+3. **API Gateway (Process 1) ([`process1.py`](src/application/process1.py:213))**: Generates a fresh UUID `device_id`, builds the create payload with `operation: create` and an initial history entry, and publishes to `flow4_p1_to_p2`.
+4. **Transformer (Process 2) ([`process2.py`](src/application/process2.py:1))**: Computes `device_fingerprint` = `SHA-256(device_name:device_type:location)` (hex), appends `enriched_at` timestamp to history, and forwards to `flow4_p2_to_p3`.
+5. **Forwarder (Process 3) ([`process3.py`](src/application/process3.py:1))**: Validates that `device_name` is non-empty and `device_type` is in the allowed set; sets `validation_passed: true` and forwards to `flow4_p3_to_p4`.  Rejects (nack, dead-letter) if either check fails.
+6. **DB Updater (Process 4) ([`process4.py`](src/application/process4.py:167))**: Calls [`db.upsert_device()`](src/db/db.py:174) (`INSERT … ON DUPLICATE KEY UPDATE`) after a ZooKeeper dedup check, then archives the payload to Swift object storage.
 
 ```bash
 curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/devices \
@@ -208,11 +105,11 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/devices \
 **Optional fields:** `filters` object with any of `device_type`, `status`, `owner_team`, `location_contains`
 
 1. **Client (`curl`)**: Sends `POST /api/devices/query` with an optional `filters` JSON object.
-2. **HAProxy**: Delivers to `Process 1` on one of the active nodes (Round-Robin).
-3. **Process 1 ([`process1.py`](src/application/process1.py:255))**: Builds a query payload with `operation: query` and the supplied filters, publishes to `flow5_p1_to_p2`.
-4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Normalises `device_type` and `status` filter values to lowercase; forwards to `flow5_p2_to_p3`.
-5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Marks `query_validated: true` (empty filter set is valid — returns all devices) and forwards to `flow5_p3_to_p4`.
-6. **Process 4 ([`process4.py`](src/application/process4.py:207))**: Calls [`db.query_devices(filters)`](src/db/db.py:251) (builds a dynamic `WHERE` clause with optional `LIKE` for `location_contains`); archives the result payload to Swift.
+2. **HAProxy**: Delivers to `API Gateway (Process 1)` on one of the active nodes (Round-Robin).
+3. **API Gateway (Process 1) ([`process1.py`](src/application/process1.py:255))**: Builds a query payload with `operation: query` and the supplied filters, publishes to `flow5_p1_to_p2`.
+4. **Transformer (Process 2) ([`process2.py`](src/application/process2.py:1))**: Normalises `device_type` and `status` filter values to lowercase; forwards to `flow5_p2_to_p3`.
+5. **Forwarder (Process 3) ([`process3.py`](src/application/process3.py:1))**: Marks `query_validated: true` (empty filter set is valid — returns all devices) and forwards to `flow5_p3_to_p4`.
+6. **DB Updater (Process 4) ([`process4.py`](src/application/process4.py:207))**: Calls [`db.query_devices(filters)`](src/db/db.py:251) (builds a dynamic `WHERE` clause with optional `LIKE` for `location_contains`); archives the result payload to Swift.
 
 ```bash
 # Query all temperature sensors with status active
@@ -233,17 +130,17 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/devices/query \
 **Endpoint:** `PUT /api/devices/{device_id}`
 **Body:** JSON object of fields to update (e.g. `{"firmware_version":"3.0.0","tags":{"env":"staging"}}`)
 
-Flow 6 is the only flow that fans out to **two** downstream queues at Process 3 — one for direct persistence and one for the remote edge-sync on node4.
+Flow 6 is the only flow that fans out to **two** downstream queues at Forwarder (Process 3) — one for direct persistence and one for the remote edge-sync on node4.
 
 1. **Client (`curl`)**: Sends `PUT /api/devices/{device_id}` with the update fields.
-2. **HAProxy**: Delivers to `Process 1` on one of the active nodes.
-3. **Process 1 ([`process1.py`](src/application/process1.py:279))**: Validates `device_id` is present, builds an update payload with `operation: update`, publishes to `flow6_p1_to_p2`.
-4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Generates a monotonic `update_sequence` (ms timestamp from ZooKeeper config or system clock), sets `previous_state_tracked: true`, and forwards to `flow6_p2_to_p3`.
-5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Validates `device_id` is a 36-character UUID; on success **dual-publishes** — to `flow6_p3_to_p4` (direct DB path) **and** to `flow6_p3_to_p5` (remote edge-sync path). Rejects with nack if `device_id` is missing or malformed.
-6. **Process 4 — direct path** ([`process4.py`](src/application/process4.py:253)): Consumes from `flow6_p3_to_p4`; calls [`db.upsert_device()`](src/db/db.py:174) after ZK dedup check; archives to Swift.
-7. **Process 5 on node4 — edge-sync path** ([`process5.py`](src/application/process5.py:76)): Consumes from `flow6_p3_to_p5`; computes `edge_sync_token = SHA-256(device_id:update_sequence)[:16]`; sets `remote_sync_applied: true`; publishes result to `flow6_p5_to_p2`.
-8. **Process 2 — remote return** ([`process2.py`](src/application/process2.py:1)): Consumes from `flow6_p5_to_p2`; sets `process2_remote_return_verified: true`; forwards to `flow6_p2_to_p4`.
-9. **Process 4 — remote path** ([`process4.py`](src/application/process4.py:298)): Consumes from `flow6_p2_to_p4`; idempotent upsert after ZK dedup check; archives to Swift.
+2. **HAProxy**: Delivers to `API Gateway (Process 1)` on one of the active nodes.
+3. **API Gateway (Process 1) ([`process1.py`](src/application/process1.py:279))**: Validates `device_id` is present, builds an update payload with `operation: update`, publishes to `flow6_p1_to_p2`.
+4. **Transformer (Process 2) ([`process2.py`](src/application/process2.py:1))**: Generates a monotonic `update_sequence` (ms timestamp from ZooKeeper config or system clock), sets `previous_state_tracked: true`, and forwards to `flow6_p2_to_p3`.
+5. **Forwarder (Process 3) ([`process3.py`](src/application/process3.py:1))**: Validates `device_id` is a 36-character UUID; on success **dual-publishes** — to `flow6_p3_to_p4` (direct DB path) **and** to `flow6_p3_to_p5` (remote edge-sync path). Rejects with nack if `device_id` is missing or malformed.
+6. **DB Updater (Process 4) — direct path** ([`process4.py`](src/application/process4.py:253)): Consumes from `flow6_p3_to_p4`; calls [`db.upsert_device()`](src/db/db.py:174) after ZK dedup check; archives to Swift.
+7. **Remote Worker (Process 5) on node4 — edge-sync path** ([`process5.py`](src/application/process5.py:76)): Consumes from `flow6_p3_to_p5`; computes `edge_sync_token = SHA-256(device_id:update_sequence)[:16]`; sets `remote_sync_applied: true`; publishes result to `flow6_p5_to_p2`.
+8. **Transformer (Process 2) — remote return** ([`process2.py`](src/application/process2.py:1)): Consumes from `flow6_p5_to_p2`; sets `process2_remote_return_verified: true`; forwards to `flow6_p2_to_p4`.
+9. **DB Updater (Process 4) — remote path** ([`process4.py`](src/application/process4.py:298)): Consumes from `flow6_p2_to_p4`; idempotent upsert after ZK dedup check; archives to Swift.
 
 ```bash
 curl -s -X PUT http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee \
@@ -258,11 +155,11 @@ curl -s -X PUT http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dddd-
 **Endpoint:** `DELETE /api/devices/{device_id}`
 
 1. **Client (`curl`)**: Sends `DELETE /api/devices/{device_id}`.
-2. **HAProxy**: Delivers to `Process 1` on one of the active nodes.
-3. **Process 1 ([`process1.py`](src/application/process1.py:306))**: Validates `device_id` is present, builds a delete payload with `operation: delete`, publishes to `flow7_p1_to_p2`.
-4. **Process 2 ([`process2.py`](src/application/process2.py:1))**: Adds `deletion_requested_by` (node name) and `grace_period_s` metadata; forwards to `flow7_p2_to_p3`.
-5. **Process 3 ([`process3.py`](src/application/process3.py:1))**: Validates that `device_id` is non-empty; sets `deletion_validated: true`; forwards to `flow7_p3_to_p4`. Rejects with nack on missing `device_id`.
-6. **Process 4 ([`process4.py`](src/application/process4.py:346))**: Calls [`db.soft_delete_device(device_id)`](src/db/db.py:225) after ZK dedup check — issues `UPDATE devices SET status = 'decommissioned' WHERE device_id = %s` (the row is **not** physically deleted); archives the payload to Swift.
+2. **HAProxy**: Delivers to `API Gateway (Process 1)` on one of the active nodes.
+3. **API Gateway (Process 1) ([`process1.py`](src/application/process1.py:306))**: Validates `device_id` is present, builds a delete payload with `operation: delete`, publishes to `flow7_p1_to_p2`.
+4. **Transformer (Process 2) ([`process2.py`](src/application/process2.py:1))**: Adds `deletion_requested_by` (node name) and `grace_period_s` metadata; forwards to `flow7_p2_to_p3`.
+5. **Forwarder (Process 3) ([`process3.py`](src/application/process3.py:1))**: Validates that `device_id` is non-empty; sets `deletion_validated: true`; forwards to `flow7_p3_to_p4`. Rejects with nack on missing `device_id`.
+6. **DB Updater (Process 4) ([`process4.py`](src/application/process4.py:346))**: Calls [`db.soft_delete_device(device_id)`](src/db/db.py:225) after ZK dedup check — issues `UPDATE devices SET status = 'decommissioned' WHERE device_id = %s` (the row is **not** physically deleted); archives the payload to Swift.
 
 ```bash
 curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee | jq .
@@ -272,37 +169,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 
 ## Database Schema & ER Diagram
 
-```mermaid
-erDiagram
-    PROCESSED_MESSAGES {
-        bigint id PK "Auto Increment"
-        varchar(64) message_id UK "Unique UUID"
-        int flow_id "Flow identifier (1-3)"
-        int item_id "Sequence number"
-        varchar(255) initial_data "Origin payload"
-        int counter_value "Flow 1 reflected counter"
-        decimal(10_2) metric_value "Flow 2 examined & scaled metric"
-        varchar(50) examined_status "HIGH / NORMAL"
-        varchar(50) verified_by "process3 verification mark"
-        json history_trail "Full audit log with timestamps"
-        json raw_payload "Complete final payload object"
-        timestamp created_at "Record creation time"
-    }
-
-    DEVICES {
-        bigint id PK "Auto Increment"
-        varchar(36) device_id UK "UUID assigned at create"
-        varchar(100) device_name "Human-readable label"
-        varchar(50) device_type "temperature_sensor | pressure_gauge | flow_meter | humidity_sensor | vibration_sensor | power_monitor"
-        varchar(200) location "e.g. factory/zone-A"
-        varchar(20) firmware_version "Default 1.0.0"
-        json tags "Arbitrary key-value metadata"
-        varchar(20) status "active | decommissioned"
-        varchar(100) owner_team "Owning team"
-        timestamp created_at "Row creation time"
-        timestamp updated_at "Last upsert time (auto ON UPDATE)"
-    }
-```
+> 📐 **[View diagram: Database Schema & ER Diagram](docs/diagrams.md#3-database-schema--er-diagram)**
 
 `PROCESSED_MESSAGES` stores the audit trail for Flows 1–3. `DEVICES` is the device registry written by Flows 4 (create), 5 (query/archive), 6 (update/upsert), and 7 (soft-delete → `status = decommissioned`). Both tables are replicated synchronously across all three Galera nodes.
 
@@ -324,7 +191,7 @@ erDiagram
 | **2** | Nodes 1–3 only | RabbitMQ cluster & Erlang install (servers) | `scripts/install_rabbitmq_rhel9.sh` |
 | **2b** | Nodes 1–3 only | Swift object-store cluster (proxy + account/container/object servers, 3-replica rings, tempauth) | `swift/setup_swift.sh` |
 | **3** | Nodes 1–3 only | Identify cluster NIC, set `VIP_NIC` in `.env`, generate HAProxy config | `haproxy/setup_haproxy.sh` |
-| **4** | Nodes 1–3 | Install systemd units for Process 1–4 & target (Pacemaker managed) | `systemd/install_services.sh /opt/flowfirst` |
+| **4** | Nodes 1–3 | Install systemd units for API Gateway (Process 1)–4 & target (Pacemaker managed) | `systemd/install_services.sh /opt/flowfirst` |
 | **4 (Remote)** | Node 4 only | Phase 0a+0b on node4 first (chrony, repo clone, venv, copy `.env` from node1 and set `NODE_NAME=node4`/`CURRENT_NODE_IP`), then install & enable `flowfirst-process5.service` | `systemd/install_services.sh /opt/flowfirst --remote` |
 | **5a** | Nodes 1–3 only | Prepare cluster nodes for Pacemaker (packages, `pcsd`, firewall, `/etc/hosts`) | `pacemaker/setup_multinode_cluster.sh --prepare-node` |
 | **5b** | Node 1 only | Initialise cluster, authenticate nodes, deploy VIP + HAProxy + process clones | `pacemaker/setup_multinode_cluster.sh` → `pacemaker/configure_multinode_resources.sh` |
@@ -379,7 +246,7 @@ erDiagram
 | [41](#scenario-41-per-queue-greenthread-independence--flow-1-blockage-does-not-stall-flow-2) | Per-Queue Greenthread Independence | Greenthreads | Slow one queue, confirm sibling greenthread unaffected |
 | [42](#scenario-42-greenthread-auto-restart-on-rabbitmq-consumer-failure) | Greenthread Auto-Restart on RMQ Failure | Greenthreads | Kill RMQ connection, greenthread reconnects automatically |
 | [43](#scenario-43-greenthread-metrics-reporter--throughput-monitoring) | Greenthread Metrics Reporter | Greenthreads | Read throughput counters from `/gt/status` and journal |
-| [44](#scenario-44-remote-node-4--process-5-end-to-end-pipeline-execution--database-validation) | Remote Node 4 / Process 5 Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 4)→P2→P4, verify MariaDB audit trail & Swift object storage |
+| [44](#scenario-44-remote-node-4--process-5-end-to-end-pipeline-execution--database-validation) | Remote Node 4 / Remote Worker (Process 5) Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 4)→P2→P4, verify MariaDB audit trail & Swift object storage |
 | [45](#scenario-45-reading-the-mariadb-galera-error-log-across-scenarios) | Reading the MariaDB Galera Error Log | Galera | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 | [46](#scenario-46-reading-the-rabbitmq-broker-log-across-scenarios) | Reading the RabbitMQ Broker Log | RabbitMQ | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 | [47](#scenario-47-reading-the-zookeeper-server--client-logs-across-scenarios) | Reading the ZooKeeper Server & Client Logs | ZooKeeper | Locate logs, server & kazoo phrasebook, election timeline, session expiry correlation |
@@ -645,7 +512,7 @@ cp src/config/.env.example .env
 
 > **Pinned dependencies.** `requirements.txt` is a generated lock file: every package, including indirect ones, at an exact version with sha256 hashes, so every node installs the same code and a tampered or hijacked package is refused (`--require-hashes`). Humans edit only `requirements.in` (the direct, loosely constrained list) and regenerate with `./scripts/update_requirements.sh` (needs [`uv`](https://docs.astral.sh/uv/) on the machine that regenerates; nodes only need pip). One universal file covers Python 3.9 (the RHEL 9 default) to 3.14 and both x86_64 and aarch64, with environment markers choosing the right version per Python. Upgrade deliberately: `./scripts/update_requirements.sh --upgrade`, run the checks and a test cluster, then commit `requirements.in` and `requirements.txt` together. Tested: the lock installs with `--require-hashes` and passes `pip check` on Python 3.9 and 3.12 (macOS arm64) and every project module imports. Not tested: an install on RHEL 9 itself, or on x86_64. Limits: hashes prove the files are the ones that were locked, not that they are free of vulnerabilities (no scanner is wired in), and `eventlet` is in maintenance mode upstream, so the pin will stop receiving features. Wheels that need compiling (none were required on the tested platforms) would need a compiler on the node.
 
-> **Tests and the quality gate.** `./scripts/ci_check.sh` runs six checks and needs no cluster, network or `.env`: (1) every `.py` parses with the Python 3.9 grammar, (2) `bash -n` on every `.sh`, (3) `ruff` with bug-finding rules only (`ruff.toml`), (4) `pytest` (155 tests), (5) each `requirements*.txt` pins every package named in its `.in` file and carries hashes, (6) no `.env`, `.key`, `.pem` or `.p12` file is tracked by git. `--quick` skips the HTTP tests. Set up once on a dev or CI host: `pip install --require-hashes -r requirements.txt -r requirements-dev.txt` (pytest and ruff live only in `requirements-dev.txt`, never on cluster nodes). `.github/workflows/ci.yml` is an example for GitHub Actions on Python 3.9 and 3.12; any other CI system only has to run the same two commands. What the tests cover: admin authorisation (`authz.py`), secret checks and `.env` parsing (`config.py`), TLS context construction with a throw-away CA (`src/tls/tls.py`), and the real Process 1 HTTP handler for request limits, generic errors and the admin gate, `scripts/preflight_check.py`, the Prometheus `/metrics` listener (plain and mutual TLS), the backup scripts, the systemd units, and the CRL scripts. The handler tests start `tests/_p1_harness.py` as a subprocess (importing Process 1 monkey-patches the standard library, which must not happen inside pytest) with the broker, ZooKeeper and Swift stubbed. **Not covered by the automated tests:** anything that needs a real RabbitMQ, MariaDB, ZooKeeper or Swift (publisher confirms, the dead-letter policy, deduplication, failover), the message handlers of Processes 2 to 5, and the shell install scripts beyond a syntax check (the backup, CRL and systemd scripts have tests; `install_*`, `setup_*` and `enable_*_tls.sh` do not). Several of these were checked **by hand** against real containers on one workstation (publisher confirms and the dead-letter queue, mutual TLS, the systemd sandbox, backups, `/metrics` with a real Prometheus, the health probe with a real HAProxy); each chapter says exactly what was run. None of it ran on a four-node cluster. Passing the gate shows these rules still hold; it does not show the cluster works. To check that the tests can fail, deliberately breaking `admin_decision` and the body-size limit made 3 tests fail. The full gate was run on macOS with Python 3.9.22 and 3.12.10, each in a fresh virtual environment built with `pip install --require-hashes` from the lock files (128 tests passed on both); earlier phases also ran it on 3.14. It has not been run on Linux or RHEL. There, eventlet 0.40.x (the Python 3.9 pin) crashes in its kqueue hub, so the harness selects the `selects` hub on macOS. Linux uses a different hub (epoll) and the workflow in `.github/workflows/ci.yml` has never been run, so a first CI run may still need adjustment.
+> **Tests and the quality gate.** `./scripts/ci_check.sh` runs six checks and needs no cluster, network or `.env`: (1) every `.py` parses with the Python 3.9 grammar, (2) `bash -n` on every `.sh`, (3) `ruff` with bug-finding rules only (`ruff.toml`), (4) `pytest` (155 tests), (5) each `requirements*.txt` pins every package named in its `.in` file and carries hashes, (6) no `.env`, `.key`, `.pem` or `.p12` file is tracked by git. `--quick` skips the HTTP tests. Set up once on a dev or CI host: `pip install --require-hashes -r requirements.txt -r requirements-dev.txt` (pytest and ruff live only in `requirements-dev.txt`, never on cluster nodes). `.github/workflows/ci.yml` is an example for GitHub Actions on Python 3.9 and 3.12; any other CI system only has to run the same two commands. What the tests cover: admin authorisation (`authz.py`), secret checks and `.env` parsing (`config.py`), TLS context construction with a throw-away CA (`src/tls/tls.py`), and the real API Gateway (Process 1) HTTP handler for request limits, generic errors and the admin gate, `scripts/preflight_check.py`, the Prometheus `/metrics` listener (plain and mutual TLS), the backup scripts, the systemd units, and the CRL scripts. The handler tests start `tests/_p1_harness.py` as a subprocess (importing API Gateway (Process 1) monkey-patches the standard library, which must not happen inside pytest) with the broker, ZooKeeper and Swift stubbed. **Not covered by the automated tests:** anything that needs a real RabbitMQ, MariaDB, ZooKeeper or Swift (publisher confirms, the dead-letter policy, deduplication, failover), the message handlers of Processes 2 to 5, and the shell install scripts beyond a syntax check (the backup, CRL and systemd scripts have tests; `install_*`, `setup_*` and `enable_*_tls.sh` do not). Several of these were checked **by hand** against real containers on one workstation (publisher confirms and the dead-letter queue, mutual TLS, the systemd sandbox, backups, `/metrics` with a real Prometheus, the health probe with a real HAProxy); each chapter says exactly what was run. None of it ran on a four-node cluster. Passing the gate shows these rules still hold; it does not show the cluster works. To check that the tests can fail, deliberately breaking `admin_decision` and the body-size limit made 3 tests fail. The full gate was run on macOS with Python 3.9.22 and 3.12.10, each in a fresh virtual environment built with `pip install --require-hashes` from the lock files (128 tests passed on both); earlier phases also ran it on 3.14. It has not been run on Linux or RHEL. There, eventlet 0.40.x (the Python 3.9 pin) crashes in its kqueue hub, so the harness selects the `selects` hub on macOS. Linux uses a different hub (epoll) and the workflow in `.github/workflows/ci.yml` has never been run, so a first CI run may still need adjustment.
 
 > **Secrets are checked, not trusted.** `RABBITMQ_PASSWORD`, `MARIADB_PASSWORD`, `SWIFT_KEY` (when Swift is enabled) and `HAPROXY_STATS_PASS` must be at least `SECRET_MIN_LENGTH` (12) characters and not a well-known sample value (`flowpassword`, `admin123`, `testing`, anything starting `changeme`, …). Otherwise `config.py` raises at start (the message names the variable, never the value) and `install_rabbitmq_rhel9.sh`, `bootstrap_galera.sh`, `setup_swift.sh` and `setup_haproxy.sh` exit before changing anything. Run `generate_secrets.sh` on **one** node (or the admin host) and copy the resulting `.env` to the others — the values must be identical on every node, and `SWIFT_HASH_PATH_*` must never change once data is stored. The script keeps `.env.bak` (mode 600); delete it after copying. The check cannot tell a strong-looking but leaked password from a good one; it only blocks known-weak and short values. Never put the `.env` in git.
 
@@ -826,7 +693,7 @@ done
 | `ZK_ELECTION_PORT` | `3888` | Leader election port |
 | `ZK_HEAP_MB` | `256` | JVM heap size (MB) |
 | `ZK_TIMEOUT` | `10` | Kazoo session timeout (seconds) |
-| `ZK_DEDUP_TTL_MS` | `300000` | How long Process 4 dedup znodes live (ms) |
+| `ZK_DEDUP_TTL_MS` | `300000` | How long DB Updater (Process 4) dedup znodes live (ms) |
 | `ZK_HOSTS` | *(auto)* | Leave blank — `src/config/config.py` builds from `NODE*_IP` |
 
 #### ZooKeeper znode tree
@@ -855,7 +722,7 @@ The full znode tree populated once the pipeline processes start:
 │   ├── process2/
 │   ├── process3/
 │   └── process4/
-├── dedup/            ← ephemeral dedup barrier (Process 4 double-insert prevention)
+├── dedup/            ← ephemeral dedup barrier (DB Updater (Process 4) double-insert prevention)
 │   └── <message_id>  ← created on first processing, auto-expires after ZK_DEDUP_TTL_MS
 └── health/           ← pipeline health dashboard
     ├── process1/
@@ -1008,14 +875,14 @@ python -c "from src.gt import gt; gt.monkey_patch(); print('gt.py OK, pool size:
 | Variable | Default | Description |
 |---|---|---|
 | `GT_POOL_SIZE` | `1000` | Max concurrent greenthreads per process |
-| `GT_WORKER_CONCURRENCY` | `4` | Concurrent HTTP handlers in Process 1 |
+| `GT_WORKER_CONCURRENCY` | `4` | Concurrent HTTP handlers in API Gateway (Process 1) |
 | `GT_METRICS_INTERVAL_S` | `60` | Seconds between throughput log lines |
 | `GT_DEDUP_REAP_INTERVAL_S` | `600` | Seconds between ZK dedup znode reap runs |
-| `API_REQUEST_POOL_SIZE` | `0` | HTTP requests one Process 1 serves at once; `0` = `GT_WORKER_CONCURRENCY` × 10 (40). See Scenario 61 |
-| `API_LISTEN_BACKLOG` | `50` | Connections the kernel queues for Process 1 while all request slots are busy. See Scenario 61 |
+| `API_REQUEST_POOL_SIZE` | `0` | HTTP requests one API Gateway (Process 1) serves at once; `0` = `GT_WORKER_CONCURRENCY` × 10 (40). See Scenario 61 |
+| `API_LISTEN_BACKLOG` | `50` | Connections the kernel queues for API Gateway (Process 1) while all request slots are busy. See Scenario 61 |
 | `METRICS_ENABLED` | `false` | Each process serves Prometheus `/metrics` on `METRICS_PORT_BASE` + its number (9101–9105). See Monitoring and Alerting |
 | `METRICS_HOST` | `0.0.0.0` | Bind address of the metrics listener; use the node's own IP and firewall the ports |
-| `METRICS_PORT_BASE` | `9100` | Process N listens on this + N (1024–65530). `mysqld_exporter`'s default 9104 collides with Process 4 |
+| `METRICS_PORT_BASE` | `9100` | Process N listens on this + N (1024–65530). `mysqld_exporter`'s default 9104 collides with DB Updater (Process 4) |
 | `GT_CONSUMERS_PER_QUEUE` | `1` | Consumer greenthreads per queue in Processes 2–5, each with its own RabbitMQ connection. See Scenario 61 |
 | `GT_PREFETCH_COUNT` | `1` | Unacknowledged messages RabbitMQ hands one consumer at a time. See Scenario 61 |
 
@@ -1360,8 +1227,8 @@ sudo ./haproxy/setup_haproxy.sh
 **Failure 5 — Port Collision between HAProxy and Backend Services**
 
 When HAProxy and backend services run on the same node, port separation prevents any `[Errno 98] Address already in use` collisions:
-- **HAProxy REST API Frontend**: Listens on port `8080`, load-balancing requests across backend Process 1 nodes.
-- **Process 1 REST API Backend**: Listens on dedicated backend port `8082` (`API_BACKEND_PORT=8082`), avoiding any collision with HAProxy (`8080`) or ZooKeeper AdminServer (`8081`).
+- **HAProxy REST API Frontend**: Listens on port `8080`, load-balancing requests across backend API Gateway (Process 1) nodes.
+- **API Gateway (Process 1) REST API Backend**: Listens on dedicated backend port `8082` (`API_BACKEND_PORT=8082`), avoiding any collision with HAProxy (`8080`) or ZooKeeper AdminServer (`8081`).
 - **MariaDB Galera Load Balancer**: HAProxy frontend listens on dedicated LB port `3307` (`MARIADB_LB_PORT=3307`) and load-balances across node daemons on port `3306`.
 - **RabbitMQ AMQP Load Balancer**: HAProxy frontend listens on dedicated LB port `5673` (`RABBITMQ_LB_PORT=5673`) and load-balances across node daemons on port `5672`.
 - **Swift Load Balancer**: HAProxy frontend listens on dedicated LB port `8090` (`SWIFT_LB_PORT=8090`) and load-balances across the `swift-proxy` daemons on port `8888` (`SWIFT_PROXY_PORT=8888`). The Swift proxy cannot use its conventional port `8080`, which is HAProxy's REST API frontend.
@@ -1370,12 +1237,12 @@ Symptom:
 ```
 [ALERT] : Starting frontend flowfirst_api_front: cannot bind socket
           [0.0.0.0:8080]: Address already in use
-# or in Process 1 startup:
+# or in API Gateway (Process 1) startup:
 OSError: [Errno 98] Address already in use
 ```
 
 Fix:
-1. Process 1 binds to `API_BACKEND_PORT=8082` while HAProxy binds to `API_PORT=8080` and routes to `node:8082`.
+1. API Gateway (Process 1) binds to `API_BACKEND_PORT=8082` while HAProxy binds to `API_PORT=8080` and routes to `node:8082`.
 2. Ensure no manually launched Python processes (`python -m src.application.process1`) or unmanaged systemd instances are holding port 8082 before Pacemaker starts `flowfirst-p1-res-clone`:
    ```bash
    # Kill manual instances across nodes:
@@ -1462,7 +1329,7 @@ Install unit files for Processes 1–4 and disable direct systemd boot so Pacema
 
 ```bash
 cd /opt/flowfirst
-# Install systemd units for cluster processes (Process 1 to 4)
+# Install systemd units for cluster processes (API Gateway (Process 1) to 4)
 sudo ./systemd/install_services.sh /opt/flowfirst
 
 # Disable standard systemd boot so Pacemaker manages service lifecycles
@@ -1483,7 +1350,7 @@ sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 
 | `SystemCallFilter=@system-service` minus `@privileged @resources` | only ordinary service system calls; others fail with `EPERM` |
 | `UMask=0027` | log files are `0640`, not readable by other users |
 
-**Tested** on Ubuntu 23.10 (systemd 253, aarch64) in a Colima VM, with the real units, a Python 3.11 venv built from the locked wheels, and real RabbitMQ 3, ZooKeeper 3.9 and MariaDB 10.11 containers: all five processes ran, flow 1 went through Processes 1 to 4 into the database, flow 3 went through Process 5, the REST API answered, logging worked, and no sandbox denial appeared in the journal. `systemd-analyze security` scored each unit **1.2 OK**. Unsandboxed (previous units), Process 1 scored 8.6 EXPOSED and Process 5 9.2 UNSAFE. From inside the sandbox, a raw socket, a netlink socket, a packet socket, `setuid(0)`, `chown` and a write to `/etc` all failed; a TCP socket worked. A database outage under the sandbox behaved as the code does without the sandbox: Process 4 logged `Failed to connect to MariaDB`, rejected the message (`nack`, no requeue) and stayed up. In that test the dead-letter policy was **not** applied, so the rejected message was discarded (it never reached the database and `flowfirst_dead_letters` stayed empty); this is exactly why the policy in the Production Rollout Run-Book, R3, matters.
+**Tested** on Ubuntu 23.10 (systemd 253, aarch64) in a Colima VM, with the real units, a Python 3.11 venv built from the locked wheels, and real RabbitMQ 3, ZooKeeper 3.9 and MariaDB 10.11 containers: all five processes ran, flow 1 went through Processes 1 to 4 into the database, flow 3 went through Remote Worker (Process 5), the REST API answered, logging worked, and no sandbox denial appeared in the journal. `systemd-analyze security` scored each unit **1.2 OK**. Unsandboxed (previous units), API Gateway (Process 1) scored 8.6 EXPOSED and Remote Worker (Process 5) 9.2 UNSAFE. From inside the sandbox, a raw socket, a netlink socket, a packet socket, `setuid(0)`, `chown` and a write to `/etc` all failed; a TCP socket worked. A database outage under the sandbox behaved as the code does without the sandbox: DB Updater (Process 4) logged `Failed to connect to MariaDB`, rejected the message (`nack`, no requeue) and stayed up. In that test the dead-letter policy was **not** applied, so the rejected message was discarded (it never reached the database and `flowfirst_dead_letters` stayed empty); this is exactly why the policy in the Production Rollout Run-Book, R3, matters.
 
 **Things that need your action**
 * **`LOG_DIR` outside `/var/log/flowfirst`:** the process still starts but logs "file logging disabled" (read-only file system). Add a drop-in, `sudo systemctl edit flowfirst-process1` (or create `.../flowfirst-process1.service.d/99-local.conf`) containing `[Service]` and `ReadWritePaths=/your/dir`, then `daemon-reload` and restart. Tested.
@@ -1500,7 +1367,7 @@ sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 
 
 #### Step 4b — Remote Node 4 (`node4` only)
 
-On Remote Node 4, **only Process 5** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, Swift server, HAProxy, or Pacemaker) run on Node 4; Process 5 acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`).
+On Remote Node 4, **only Remote Worker (Process 5)** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, Swift server, HAProxy, or Pacemaker) run on Node 4; Remote Worker (Process 5) acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`).
 
 Node 4 needs the same Phase 0 bootstrap as the cluster nodes. Run all of the following **on node4** before installing the service.
 
@@ -1546,7 +1413,7 @@ sed -i 's/^CURRENT_NODE_IP=.*/CURRENT_NODE_IP=<node4-ip>/' /opt/flowfirst/.env
 
 | Variable | node4 value | Notes |
 |---|---|---|
-| `NODE_NAME` | `node4` | Must be `node4` — Process 5 uses this for ZooKeeper registration and the `remote_node` field in Flow 6 |
+| `NODE_NAME` | `node4` | Must be `node4` — Remote Worker (Process 5) uses this for ZooKeeper registration and the `remote_node` field in Flow 6 |
 | `CURRENT_NODE_IP` | `<node4 IP>` | node4's own IP — used by ZooKeeper client binding |
 
 All other variables (`NODE1_IP`–`NODE4_IP`, `FLOWFIRST_VIP`, `RABBITMQ_*`, `MARIADB_*`, `SWIFT_*`, passwords) are **identical to the cluster nodes** — do not change them.
@@ -1556,13 +1423,13 @@ All other variables (`NODE1_IP`–`NODE4_IP`, `FLOWFIRST_VIP`, `RABBITMQ_*`, `MA
 > - `NODE1_IP`–`NODE3_IP` on port `2181` (ZooKeeper) — or `2281` when `TLS_ZK_ENABLED=true`
 > - `FLOWFIRST_VIP` on port `8090` (Swift, if `SWIFT_ENABLED=true`)
 
-##### Install and start Process 5
+##### Install and start Remote Worker (Process 5)
 
 ```bash
 cd /opt/flowfirst
 sudo ./systemd/install_services.sh /opt/flowfirst --remote
 
-# Enable and start Process 5 on Remote Node 4
+# Enable and start Remote Worker (Process 5) on Remote Node 4
 sudo systemctl enable --now flowfirst-process5
 sudo systemctl status flowfirst-process5
 ```
@@ -1712,7 +1579,7 @@ curl -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 \
 
 #### D. Verify Round-Robin Load Balancing
 
-The loop below includes `Content-Type: application/json` — without it Process 1 rejects the body with a 400 before setting `handled_by_node`, causing every response to print `null` regardless of which node answered.
+The loop below includes `Content-Type: application/json` — without it API Gateway (Process 1) rejects the body with a 400 before setting `handled_by_node`, causing every response to print `null` regardless of which node answered.
 
 ```bash
 for i in {1..6}; do
@@ -1904,7 +1771,7 @@ ORDER BY id DESC LIMIT 1\G
 
 #### A. Ensure data exists before querying
 
-This scenario verifies that the **same rows appear on all three Galera nodes simultaneously**. It needs at least one row in `processed_messages` to be meaningful. The pipeline is asynchronous — a message published via the API reaches MariaDB only after travelling through Process 2, Process 3, and Process 4, which typically takes 1–3 seconds on a healthy cluster.
+This scenario verifies that the **same rows appear on all three Galera nodes simultaneously**. It needs at least one row in `processed_messages` to be meaningful. The pipeline is asynchronous — a message published via the API reaches MariaDB only after travelling through Transformer (Process 2), Forwarder (Process 3), and DB Updater (Process 4), which typically takes 1–3 seconds on a healthy cluster.
 
 If Scenarios 1 and 2 were run just before this one, wait a few seconds and confirm rows have arrived before querying all three nodes:
 
@@ -1922,7 +1789,7 @@ mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB
   -e "SELECT COUNT(*) AS row_count FROM processed_messages;"
 ```
 
-If `row_count` is still `0` after 5 seconds, the pipeline has a problem — check Process 4 logs before continuing:
+If `row_count` is still `0` after 5 seconds, the pipeline has a problem — check DB Updater (Process 4) logs before continuing:
 
 ```bash
 sudo journalctl -u flowfirst-process4 -n 50 --no-pager | grep -E "ERROR|Persisted|Failed"
@@ -1946,7 +1813,7 @@ mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} 
   -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 ```
 
-*All three nodes return identical rows — same `id` values, same `message_id`s, in the same order. This is Galera synchronous multi-master replication: the write was certified and committed on all three nodes before Process 4 received the acknowledgement.*
+*All three nodes return identical rows — same `id` values, same `message_id`s, in the same order. This is Galera synchronous multi-master replication: the write was certified and committed on all three nodes before DB Updater (Process 4) received the acknowledgement.*
 
 ---
 
@@ -3350,7 +3217,7 @@ flow3_p5_to_p2           0         1
 flow3_p2_to_p4           0         1
 ```
 
-> Each queue has exactly **one** consumer: only the ZooKeeper-elected leader of each process (and Process 5 on node4) consumes, so `consumers` is `1`, not 3. A `0` means no leader is consuming that queue.
+> Each queue has exactly **one** consumer: only the ZooKeeper-elected leader of each process (and Remote Worker (Process 5) on node4) consumes, so `consumers` is `1`, not 3. A `0` means no leader is consuming that queue.
 
 ---
 
@@ -3563,7 +3430,7 @@ sudo tc qdisc change dev ${IFACE} root netem corrupt 2%
 sudo rabbitmqctl list_queues name messages | grep -v "^Listing"
 ```
 ```
-flow1_p1_to_p2           12     ← messages backing up — the Process 2 leader (if on node3) is struggling
+flow1_p1_to_p2           12     ← messages backing up — the Transformer (Process 2) leader (if on node3) is struggling
 flow1_p2_to_p3           8
 ```
 
@@ -3952,7 +3819,7 @@ sudo iptables -I OUTPUT -p tcp --sport 5672 -j DROP
 
 The pipeline processes use multi-host `ConnectionParameters`. Within `pika`'s heartbeat interval (default 60 s), or immediately on the next connection attempt, they will fail over to `node1` or `node3`.
 
-Check the process logs on the node whose Process 2 was connected to node2 (the DROP rule stalls an established connection, so expect this after up to two missed heartbeats, about 2 minutes):
+Check the process logs on the node whose Transformer (Process 2) was connected to node2 (the DROP rule stalls an established connection, so expect this after up to two missed heartbeats, about 2 minutes):
 ```bash
 sudo journalctl -u flowfirst-process2 --since "5 minutes ago" --no-pager | grep -E "raised|Restarting|not ready|RabbitMQ connected|TCP Connection attempt failed"
 ```
@@ -3983,7 +3850,7 @@ Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
 sudo rabbitmqctl list_queues name messages consumers
 ```
 ```
-flow1_p1_to_p2           0    1     ← still 1 consumer (the Process 2 leader, now on node1 or node3 if it was on node2)
+flow1_p1_to_p2           0    1     ← still 1 consumer (the Transformer (Process 2) leader, now on node1 or node3 if it was on node2)
 flow2_p1_to_p2           0    1
 flow2_p2_to_p3           0    1
 ```
@@ -4355,7 +4222,7 @@ sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep "Flags \[F" | head -10
 
 ```bash
 # On the node currently holding the VIP (e.g., node1)
-# Capture both hops: client -> HAProxy (8080) and HAProxy -> Process 1 backend (8082).
+# Capture both hops: client -> HAProxy (8080) and HAProxy -> API Gateway (Process 1) backend (8082).
 # "-i any" is needed because HAProxy reaches this node's own backend over loopback,
 # which a capture on ${VIP_NIC} alone would not see.
 sudo tcpdump -i any -s 0 -w /tmp/rest_api.pcap \
@@ -4572,7 +4439,7 @@ sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 3306' | wc -l
 24     ← 24 TCP segments on port 3306 (query + result + EOF packets)
 ```
 
-> The number depends on which node Process 4 writes to. Only traffic that crosses node1's interface is captured, so a leader on node2 or node3 that writes to its own local MariaDB shows `0` here; the Galera replication packets in 31.2–31.3 still appear.
+> The number depends on which node DB Updater (Process 4) writes to. Only traffic that crosses node1's interface is captured, so a leader on node2 or node3 that writes to its own local MariaDB shows `0` here; the Galera replication packets in 31.2–31.3 still appear.
 
 #### 31.5 — Examine MariaDB protocol greeting and query round-trip
 
@@ -4964,7 +4831,7 @@ RabbitMQ, MariaDB, and ZooKeeper — no cluster hardware required.
 
 > **Port note:** ZooKeeper's internal admin server runs on container port `8080`.
 > The `src/docker/docker-compose.yml` maps it to host port **`8081`** to avoid collision with
-> Process 1's REST API which listens on host port `8080`.
+> API Gateway (Process 1)'s REST API which listens on host port `8080`.
 
 ### Step 1 — Create a local `.env`
 
@@ -5008,7 +4875,7 @@ MARIADB_DB=flowfirst_db
 
 # Swift — there is no Swift container. Swift is installed natively on the cluster
 # (Phase 2b), so single-node development runs with object storage switched off.
-# MariaDB persistence is unaffected; Process 4 prints "Swift store note: Swift
+# MariaDB persistence is unaffected; DB Updater (Process 4) prints "Swift store note: Swift
 # storage is disabled" for each message.
 SWIFT_ENABLED=false
 ```
@@ -5058,16 +4925,16 @@ pip install --require-hashes -r requirements.txt
 Start in reverse order (consumers before producers) so no messages are lost:
 
 ```bash
-# Terminal 1 — Process 4 (final consumer / DB persister)
+# Terminal 1 — DB Updater (Process 4) (final consumer / DB persister)
 python -m src.application.process4
 
-# Terminal 2 — Process 3 (reflector / forwarder)
+# Terminal 2 — Forwarder (Process 3) (reflector / forwarder)
 python -m src.application.process3
 
-# Terminal 3 — Process 2 (examiner / reflector)
+# Terminal 3 — Transformer (Process 2) (examiner / reflector)
 python -m src.application.process2
 
-# Terminal 4 — Process 1 (REST API producer)
+# Terminal 4 — API Gateway (Process 1) (REST API producer)
 python -m src.application.process1
 ```
 
@@ -5203,10 +5070,10 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health
 ```json
 {
   "pipeline_health": {
-    "process1": { "node1": {"state": "leader", ...}, "node2": {"state": "follower", ...} },
-    "process2": { "node2": {"state": "leader", ...}, "node1": {"state": "follower", ...} },
-    "process3": { "node3": {"state": "leader", ...} },
-    "process4": { "node1": {"state": "leader", ...} }
+    "api_gateway": { "node1": {"state": "leader", ...}, "node2": {"state": "follower", ...} },
+    "transformer": { "node2": {"state": "leader", ...}, "node1": {"state": "follower", ...} },
+    "forwarder": { "node3": {"state": "leader", ...} },
+    "db_updater": { "node1": {"state": "leader", ...} }
   }
 }
 ```
@@ -5215,10 +5082,10 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health
 
 ### Scenario 35: Live Config Change via ZooKeeper — No Restart Required
 
-> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `zkCli.sh` on any of node1–node3; `journalctl` on the **current Process 2 leader node** (see `/zk/health`).
+> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `zkCli.sh` on any of node1–node3; `journalctl` on the **current Transformer (Process 2) leader node** (see `/zk/health`).
 
 Change the Flow 2 HIGH threshold and the Flow 1 counter step at runtime. All three running
-Process 2 instances pick up the change within seconds without any restart.
+Transformer (Process 2) instances pick up the change within seconds without any restart.
 
 #### A. Inspect current config
 
@@ -5250,7 +5117,7 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 \
   -d '{"item_id": 901, "value": 25.0, "initial_data": "ZK config test"}' | jq .
 ```
 
-Watch Process 2 logs on any node — it should now assign `status=HIGH`:
+Watch Transformer (Process 2) logs on any node — it should now assign `status=HIGH`:
 
 ```bash
 sudo journalctl -u flowfirst-process2 -f --no-pager | grep "status=\|threshold="
@@ -5272,7 +5139,7 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 \
   -H "Content-Type: application/json" \
   -d '{"item_id": 902, "counter": 100}' | jq .
 
-# Counter after Process 2: should be 100 + 50 = 150
+# Counter after Transformer (Process 2): should be 100 + 50 = 150
 mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT item_id, counter_value, history_trail FROM processed_messages WHERE item_id=902\G"
 ```
@@ -5300,10 +5167,10 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config -H "Content-Type: applica
 
 > **Runs on:** A, B, E and F `curl`/`mysql` from any machine that can reach the VIP (node1–node4 or a workstation) (`mysql` needs a mariadb client); C via `ssh ${NODE2_IP}` from **node1 or node3** (or run the quoted command directly on node2); D on **node1 or node3** (the surviving candidates).
 
-Verify that when the node holding the Process 2 leader election crashes, the standby
+Verify that when the node holding the Transformer (Process 2) leader election crashes, the standby
 on another node automatically wins and takes over consuming without message loss.
 
-#### A. Identify the current Process 2 leader
+#### A. Identify the current Transformer (Process 2) leader
 
 ```bash
 curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process2'
@@ -5320,7 +5187,7 @@ for i in $(seq 1 5); do
 done
 ```
 
-#### C. Kill Process 2 on the leader node (node2)
+#### C. Kill Transformer (Process 2) on the leader node (node2)
 
 ```bash
 # From node1 or node3 — stop only process2 on node2
@@ -5363,10 +5230,10 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process2'
 
 ### Scenario 37: ZooKeeper Dedup Barrier — Prevent Double-Insert on Failover
 
-> **Runs on:** `mysql` from any node with a mariadb client; `rabbitmqadmin` and `zkCli.sh` on node1–node3; `journalctl` on the **current Process 4 leader node**.
+> **Runs on:** `mysql` from any node with a mariadb client; `rabbitmqadmin` and `zkCli.sh` on node1–node3; `journalctl` on the **current DB Updater (Process 4) leader node**.
 
 Simulate a Pacemaker failover that re-delivers an already-processed message to
-Process 4 and verify the ZooKeeper dedup barrier prevents a duplicate MariaDB row.
+DB Updater (Process 4) and verify the ZooKeeper dedup barrier prevents a duplicate MariaDB row.
 
 #### A. Record a message_id that was already processed
 
@@ -5390,7 +5257,7 @@ sudo rabbitmqadmin -u "${RABBITMQ_USER}" -p "${RABBITMQ_PASSWORD}" publish \
   payload="${RAW}"
 ```
 
-#### C. Watch Process 4 logs — expect the dedup barrier to fire
+#### C. Watch DB Updater (Process 4) logs — expect the dedup barrier to fire
 
 ```bash
 sudo journalctl -u flowfirst-process4 -f --no-pager | grep -i "dedup\|duplicate"
@@ -5416,7 +5283,7 @@ mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_D
 
 /opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
   stat /flowfirst/dedup/${PROCESSED_ID}
-# Shows ctime, mtime — the node was created when Process 4 first processed it
+# Shows ctime, mtime — the node was created when DB Updater (Process 4) first processed it
 ```
 
 ---
@@ -5444,9 +5311,9 @@ quit
 EOF
 ```
 
-#### B. Stop Process 3 on node2 and observe the ephemeral znode disappear
+#### B. Stop Forwarder (Process 3) on node2 and observe the ephemeral znode disappear
 
-Process 3 is managed by Pacemaker, which would restart a unit stopped with `systemctl stop` within seconds (the znode would barely disappear). Ban the clone from node2 instead; Pacemaker then stops it there and does not restart it:
+Forwarder (Process 3) is managed by Pacemaker, which would restart a unit stopped with `systemctl stop` within seconds (the znode would barely disappear). Ban the clone from node2 instead; Pacemaker then stops it there and does not restart it:
 
 ```bash
 # Stop process3 on node2 (kept down until the ban is cleared in C)
@@ -5463,7 +5330,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.registered_workers.process
 # Expected: ["node1", "node3"]
 ```
 
-#### C. Restart Process 3 on node2 and watch it re-register
+#### C. Restart Forwarder (Process 3) on node2 and watch it re-register
 
 ```bash
 sudo pcs resource clear flowfirst-p3-res-clone node2
@@ -5497,7 +5364,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process3'
 Confirm all expected greenthreads are running in each process immediately after startup.
 
 ```bash
-# 1. Check Process 1 greenthread status via the new /gt/status endpoint
+# 1. Check API Gateway (Process 1) greenthread status via the new /gt/status endpoint
 curl -s http://${FLOWFIRST_VIP}:8080/gt/status | jq .
 ```
 
@@ -5545,9 +5412,9 @@ sudo cat /proc/$(pgrep -f src.application.process1 | head -1)/limits | grep "ope
 
 ---
 
-### Scenario 40: Concurrent Batch Publishing — Greenthread Parallelism in Process 1
+### Scenario 40: Concurrent Batch Publishing — Greenthread Parallelism in API Gateway (Process 1)
 
-> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `rabbitmqctl` on node1–node3; `journalctl` on the **current Process 2 leader node**.
+> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `rabbitmqctl` on node1–node3; `journalctl` on the **current Transformer (Process 2) leader node**.
 
 The `/api/batch` endpoint spawns one greenthread per message, publishing Flow 1 and
 Flow 2 messages in parallel rather than sequentially.  This scenario measures the
@@ -5572,13 +5439,13 @@ time curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/batch \
 # Elapsed time should be much less than 20x single-message time
 ```
 
-#### C. Verify all 20 Flow 1 messages reached Process 2
+#### C. Verify all 20 Flow 1 messages reached Transformer (Process 2)
 
 ```bash
 # Check RabbitMQ queue depth (should be draining toward 0)
 sudo rabbitmqctl list_queues name messages | grep flow1_p1_to_p2
 
-# Check metrics counter on Process 1
+# Check metrics counter on API Gateway (Process 1)
 curl -s http://${FLOWFIRST_VIP}:8080/gt/status | jq .metrics.flow1_published
 # Expected: ≥ 20
 ```
@@ -5597,7 +5464,7 @@ mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_D
 # Expected: total ≥ 20
 ```
 
-#### E. Check Process 2 throughput metrics
+#### E. Check Transformer (Process 2) throughput metrics
 
 ```bash
 sudo journalctl -u flowfirst-process2 --since "2 minutes ago" --no-pager \
@@ -5613,9 +5480,9 @@ sudo journalctl -u flowfirst-process2 --since "2 minutes ago" --no-pager \
 
 ### Scenario 41: Per-Queue Greenthread Independence — Flow 1 Blockage Does Not Stall Flow 2
 
-> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `rabbitmqctl` on node1–node3; `journalctl` on the **current Process 2 leader node**.
+> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `rabbitmqctl` on node1–node3; `journalctl` on the **current Transformer (Process 2) leader node**.
 
-Each queue in Process 2, 3, and 4 runs in its own greenthread with its own pika
+Each queue in Transformer (Process 2), 3, and 4 runs in its own greenthread with its own pika
 connection.  A slow or blocked Flow 1 handler should not delay Flow 2 messages.
 
 #### A. Inject a slow Flow 1 message by temporarily raising the counter step
@@ -5643,7 +5510,7 @@ wait
 echo "All 20 requests sent"
 ```
 
-#### C. Watch Process 2 logs — both queues processed concurrently
+#### C. Watch Transformer (Process 2) logs — both queues processed concurrently
 
 ```bash
 sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "\[Flow [12]\]"
@@ -5671,13 +5538,13 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config \
 
 ### Scenario 42: Greenthread Auto-Restart on RabbitMQ Consumer Failure
 
-> **Runs on:** A and C on the **current Process 2 leader** (assumed node1 below); B from node1 via `ssh` to node2 — `close_all_connections` drops every connection on node2's broker, not just Process 2's.
+> **Runs on:** A and C on the **current Transformer (Process 2) leader** (assumed node1 below); B from node1 via `ssh` to node2 — `close_all_connections` drops every connection on node2's broker, not just Transformer (Process 2)'s.
 
 Consumer greenthreads are spawned with `restart_on_error=True`.  If a consumer
 greenthread crashes (e.g. RabbitMQ connection dropped), it automatically restarts
 after 2 seconds without operator intervention or process restart.
 
-#### A. Identify the RabbitMQ node that Process 2 on node1 is connected to
+#### A. Identify the RabbitMQ node that Transformer (Process 2) on node1 is connected to
 
 ```bash
 sudo journalctl -u flowfirst-process2 --since "1 hour ago" --no-pager | grep "RabbitMQ connected at" | tail -3
@@ -5689,11 +5556,11 @@ sudo journalctl -u flowfirst-process2 --since "1 hour ago" --no-pager | grep "Ra
 #### B. Force-drop the RabbitMQ connection on that node
 
 ```bash
-# On the node Process 2 connected to (e.g. node2) — close all connections from node1
+# On the node Transformer (Process 2) connected to (e.g. node2) — close all connections from node1
 ssh ${NODE2_IP} "sudo rabbitmqctl close_all_connections 'greenthread restart test'"
 ```
 
-#### C. Watch Process 2 on node1 detect the drop and auto-restart consumers
+#### C. Watch Transformer (Process 2) on node1 detect the drop and auto-restart consumers
 
 ```bash
 sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "restart|Reconnect|consumer greenthread|not ready"
@@ -5765,7 +5632,7 @@ done
 echo "50 messages sent"
 ```
 
-#### C. Read metrics from /gt/status (Process 1 leader node)
+#### C. Read metrics from /gt/status (API Gateway (Process 1) leader node)
 
 ```bash
 # Wait for metrics interval
@@ -5782,7 +5649,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/gt/status | jq .metrics
 #### D. Read per-process metrics from journal
 
 ```bash
-# Process 2 metrics (shows flow1_processed and flow2_processed)
+# Transformer (Process 2) metrics (shows flow1_processed and flow2_processed)
 sudo journalctl -u flowfirst-process2 --since "1 minute ago" --no-pager \
   | grep -A 10 "Throughput Report"
 
@@ -5792,7 +5659,7 @@ sudo journalctl -u flowfirst-process2 --since "1 minute ago" --no-pager \
 #   flow2_processed: total=25  +25 in last 15s
 #   active_greenthreads: ['p2_flow1_consumer', 'p2_flow2_consumer', ...]
 
-# Process 4 metrics (shows flow1_persisted, flow2_persisted, dedup_reaped)
+# DB Updater (Process 4) metrics (shows flow1_persisted, flow2_persisted, dedup_reaped)
 sudo journalctl -u flowfirst-process4 --since "1 minute ago" --no-pager \
   | grep -A 10 "Throughput Report"
 ```
@@ -5811,18 +5678,18 @@ sudo pcs resource restart flowfirst-p4-res-clone
 
 ---
 
-### Scenario 44: Remote Node 4 / Process 5 End-to-End Pipeline Execution & Database Validation
+### Scenario 44: Remote Node 4 / Remote Worker (Process 5) End-to-End Pipeline Execution & Database Validation
 
 > **Runs on:** A and C on **node4**; B, D and E from any machine that can reach the VIP (node1–node4 or a workstation) (D needs a mariadb client).
 
 Demonstrates cross-node asynchronous inter-process communication spanning the core 3-node cluster and **Remote Node 4 (`node4`)**:
-1. `Process 1` on one of the cluster nodes receives `POST /api/flow3` and prepares the initial message payload.
-2. `Process 1` pushes the payload onto the RabbitMQ pool queue `flow3_p1_to_p5`.
-3. `Process 5` running on **Remote Node 4 (`node4`)** consumes the message from the RabbitMQ pool, applies remote transformation/computation, records audit details, and **reflects** the modified payload back to the RabbitMQ pool on `flow3_p5_to_p2`.
-4. `Process 2` on one of the cluster nodes consumes the reflected message from `flow3_p5_to_p2`, verifies the remote node processing, logs the verification step, and pushes it to `flow3_p2_to_p4`.
-5. `Process 4` consumes the message, passes the ZooKeeper dedup barrier, and persists the complete audit history into both the **MariaDB Galera Cluster** (`processed_messages` table) and **Swift Object Storage**.
+1. `API Gateway (Process 1)` on one of the cluster nodes receives `POST /api/flow3` and prepares the initial message payload.
+2. `API Gateway (Process 1)` pushes the payload onto the RabbitMQ pool queue `flow3_p1_to_p5`.
+3. `Remote Worker (Process 5)` running on **Remote Node 4 (`node4`)** consumes the message from the RabbitMQ pool, applies remote transformation/computation, records audit details, and **reflects** the modified payload back to the RabbitMQ pool on `flow3_p5_to_p2`.
+4. `Transformer (Process 2)` on one of the cluster nodes consumes the reflected message from `flow3_p5_to_p2`, verifies the remote node processing, logs the verification step, and pushes it to `flow3_p2_to_p4`.
+5. `DB Updater (Process 4)` consumes the message, passes the ZooKeeper dedup barrier, and persists the complete audit history into both the **MariaDB Galera Cluster** (`processed_messages` table) and **Swift Object Storage**.
 
-#### A. Pre-requisite: Verify Process 5 is running on Remote Node 4
+#### A. Pre-requisite: Verify Remote Worker (Process 5) is running on Remote Node 4
 
 On Remote Node 4 (`node4`), only the lightweight Python environment and `process5` run — no broker or database server daemons:
 
@@ -5868,7 +5735,7 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow3 \
 }
 ```
 
-#### C. Inspect Remote Node 4 (Process 5) Logs
+#### C. Inspect Remote Node 4 (Remote Worker (Process 5)) Logs
 
 ```bash
 # On Remote Node 4:
@@ -5931,7 +5798,7 @@ WHERE flow_id = 3 AND item_id = 9001\G"
     "timestamp": "2025-06-15 14:00:01",
     "processed_by": "node2",
     "status": "remote_flow3_verified",
-    "action": "Received from node4 (computed_val=135.5) and forwarded to Process 4"
+    "action": "Received from node4 (computed_val=135.5) and forwarded to DB Updater (Process 4)"
   },
   {
     "stage": "process4_saved_to_mariadb",
@@ -5945,7 +5812,7 @@ WHERE flow_id = 3 AND item_id = 9001\G"
 #### E. Verify Swift Object Storage Persistence & REST API Query
 
 ```bash
-# Query Swift stored object via Process 1 REST API
+# Query Swift stored object via API Gateway (Process 1) REST API
 MSG_ID=$(mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -N -e "
 SELECT message_id FROM processed_messages WHERE flow_id = 3 AND item_id = 9001;")
 
@@ -6058,7 +5925,7 @@ sudo mysql -u root -p -e "SET GLOBAL wsrep_log_conflicts=OFF;"
 
 ### Scenario 46: Reading the RabbitMQ Broker Log Across Scenarios
 
-> **Runs on:** **each of node1–node3**. Each broker writes its own log, so it shows only that node's view of the cluster. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 has no broker; its Process 5 client-side errors are in `journalctl -u flowfirst-process5` on node4.
+> **Runs on:** **each of node1–node3**. Each broker writes its own log, so it shows only that node's view of the cluster. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 has no broker; its Remote Worker (Process 5) client-side errors are in `journalctl -u flowfirst-process5` on node4.
 
 Use this scenario alongside Scenarios 13, 16–25, 40–42 and 44 to work out from the log what the broker did and why. Exact wording varies between RabbitMQ versions, so the commands below grep for stable keywords rather than whole lines.
 
@@ -6213,7 +6080,7 @@ sudo journalctl -u flowfirst-process2 --since "30 min ago" --no-pager | grep -E 
 | `Connection dropped`, `socket connection broken` | kazoo lost its server; it reconnects to another one in `ZK_HOSTS` and keeps the same session if it does so within the timeout | 16–22 |
 | `expired`, `EXPIRED_SESSION`, `Session has expired` | Reconnect came too late — ephemerals are gone; the process re-registers (`register_process` falls back to `set` on `NodeExistsError`) and re-enters election | 20–22, 36 |
 | `Config ... unreadable`, `Config watch parse error` | Bad value in `/flowfirst/config/*`; the process keeps the default or the previous value | 35 |
-| `Dedup: duplicate detected` | Process 4 skipped a redelivered message because its dedup znode still exists | 37 |
+| `Dedup: duplicate detected` | DB Updater (Process 4) skipped a redelivered message because its dedup znode still exists | 37 |
 | `ZK unavailable ... degraded mode`, `ZK election failed ... single-node mode` | Process started without ZooKeeper; check the ensemble before trusting leadership | 19, 34 |
 
 #### C. Build a timeline on one server
@@ -6334,7 +6201,7 @@ HTTP lines (`flowfirst_api_front`) read, left to right: `client:port [accept tim
 | `Tq` | Time to receive the full request from the client | Slow client or network |
 | `Tw` | Time queued in HAProxy waiting for a free backend slot | Backends saturated |
 | `Tc` | Time to connect to the backend | Network latency or packet loss to that node (Scenario 20) |
-| `Tr` | Time the backend took to answer | Slow Process 1 on that node |
+| `Tr` | Time the backend took to answer | Slow API Gateway (Process 1) on that node |
 | `Tt` | Total time | Sum of the above plus data transfer |
 | `status` | HTTP status; `-1` means no response was received | `503` with `<NOSRV>`: no healthy backend; `502`: backend closed early |
 | termination flags (4 characters) | Who ended the session, and in what phase. `----` is a normal end | See the table in C |
@@ -6345,7 +6212,7 @@ TCP lines (`mariadb_galera_front`, `rabbitmq_amqp_front`) are shorter: `client:p
 
 | Log keyword (grep for) | Meaning | Typical scenarios |
 |---|---|---|
-| `Server flowfirst_api_back/nodeX is DOWN` | Health checks (`GET /health` every 3 s, `fall 2`) failed twice, so about 6 s after the fault. The text after `reason:` says why: `Layer4 connection problem` (port closed or host down), `Layer4 timeout`, `Layer7 wrong status, code: 503` (Process 1 is up but answering with an error) | 8, 11, 12, 16–25 |
+| `Server flowfirst_api_back/nodeX is DOWN` | Health checks (`GET /health` every 3 s, `fall 2`) failed twice, so about 6 s after the fault. The text after `reason:` says why: `Layer4 connection problem` (port closed or host down), `Layer4 timeout`, `Layer7 wrong status, code: 503` (API Gateway (Process 1) is up but answering with an error) | 8, 11, 12, 16–25 |
 | `Server flowfirst_api_back/nodeX is UP` | Two consecutive passed checks (`rise 2`) | 11.2, 12, 16–19 |
 | `X active and Y backup servers left` | Servers still in rotation after a state change; `0 active` means the next request gets a 503 | 12 (all processes stopped) |
 | `backend flowfirst_api_back has no server available!` | All three backends are down | 12, 19 |
@@ -6353,7 +6220,7 @@ TCP lines (`mariadb_galera_front`, `rabbitmq_amqp_front`) are shorter: `client:p
 | `Proxy flowfirst_api_front started`, `Stopping frontend`, `Stopping backend`, `Proxy ... stopped` | HAProxy started, was reloaded, or was stopped (including by Pacemaker moving the group) | 8, 15, 17 |
 | status `503` with `<NOSRV>` in the request line | No backend was selectable when the request arrived | 12, 19 |
 | status `504`, flags `sH` | Backend did not answer within `timeout server 1m` | 20, 21 |
-| status `502`, flags `SH` | Backend closed the connection before sending a full response (for example Process 1 was stopped mid-request) | 11, 16 |
+| status `502`, flags `SH` | Backend closed the connection before sending a full response (for example API Gateway (Process 1) was stopped mid-request) | 11, 16 |
 | flags `cD` / `CD` | Client side timeout (`c`) or abort (`C`) while data was flowing | 20, 21 |
 | flags `SC` / `sC` | Backend refused (`SC`) or did not accept (`sC`) the connection | 11, 16–25 |
 | flags `----` | Normal end of session | any |
@@ -6392,7 +6259,7 @@ HAProxy's syslog timestamps look like `Oct 12 14:17:31` (no year), which is what
 
 Expected for Scenario 17 (reboot of the VIP holder): the old holder logs `Stopping frontend` / `Proxy ... stopped` (if it shut down cleanly) and nothing after it; the new holder logs `Proxy flowfirst_api_front started` and, since its backends were already healthy, no `is UP` lines unless a backend changed.
 
-> **Noise from the health checks:** Process 1 logs one `[http]` line per HTTP request, including HAProxy's own `GET /health` checks every 3 s per backend. When reading `journalctl -u flowfirst-process1`, filter them out with `grep -v "GET /health"`.
+> **Noise from the health checks:** API Gateway (Process 1) logs one `[http]` line per HTTP request, including HAProxy's own `GET /health` checks every 3 s per backend. When reading `journalctl -u flowfirst-process1`, filter them out with `grep -v "GET /health"`.
 
 #### E. Ask HAProxy directly (live state, no log needed)
 
@@ -6579,9 +6446,9 @@ sudo crm_report --from "2026-10-12 14:00:00" --to "2026-10-12 14:30:00" /tmp/flo
 
 ### Scenario 50: Reading Swift Logs and Detecting Missing Objects
 
-> **Runs on:** client-side logs (`journalctl -u flowfirst-process4`) on the **current Process 4 leader node** (find it with `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health.process4`); for Flow 3, Process 5 only forwards the message, so Swift errors still appear on the Process 4 leader. The `curl` and `mariadb` reconciliation checks in D run from **any machine that can reach the VIP** (the `mariadb` client is installed on node1–node3). Swift **server** logs (proxy, account, container and object servers, installed by Phase 2b) are in the journal of **each of node1–node3**: a request through the VIP is handled by whichever node HAProxy chose, and the object itself is written to all three nodes, so check all three.
+> **Runs on:** client-side logs (`journalctl -u flowfirst-process4`) on the **current DB Updater (Process 4) leader node** (find it with `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health.process4`); for Flow 3, Remote Worker (Process 5) only forwards the message, so Swift errors still appear on the DB Updater (Process 4) leader. The `curl` and `mariadb` reconciliation checks in D run from **any machine that can reach the VIP** (the `mariadb` client is installed on node1–node3). Swift **server** logs (proxy, account, container and object servers, installed by Phase 2b) are in the journal of **each of node1–node3**: a request through the VIP is handled by whichever node HAProxy chose, and the object itself is written to all three nodes, so check all three.
 
-Use this scenario alongside Scenarios 2, 37 and 44, and any scenario that stops RabbitMQ, MariaDB or the network, to find out whether Process 4 stored each payload in Swift, and why not when it did not. Swift failures are **non-fatal by design**: Process 4 prints a note, still writes the MariaDB row and still acknowledges the message, so a Swift outage never shows up as a stuck queue.
+Use this scenario alongside Scenarios 2, 37 and 44, and any scenario that stops RabbitMQ, MariaDB or the network, to find out whether DB Updater (Process 4) stored each payload in Swift, and why not when it did not. Swift failures are **non-fatal by design**: DB Updater (Process 4) prints a note, still writes the MariaDB row and still acknowledges the message, so a Swift outage never shows up as a stuck queue.
 
 #### A. Find where Swift is and whether it is enabled
 
@@ -6589,7 +6456,7 @@ Use this scenario alongside Scenarios 2, 37 and 44, and any scenario that stops 
 # On the node you are investigating
 grep -E "^SWIFT_" /opt/flowfirst/.env            # SWIFT_ENABLED, SWIFT_AUTH_URL, SWIFT_USER, SWIFT_CONTAINER (the key is secret; do not paste it into tickets)
 
-# Ask Process 1 (any node, via the VIP) — this runs get_swift_status() from the node that answers
+# Ask API Gateway (Process 1) (any node, via the VIP) — this runs get_swift_status() from the node that answers
 curl -s http://${FLOWFIRST_VIP}:8080/swift/status | jq .
 ```
 ```json
@@ -6598,7 +6465,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/swift/status | jq .
 
 `"status": "error"` carries an `error` field with the underlying exception text. `"enabled": false` means `SWIFT_ENABLED` is false on the node that answered, and every object write is skipped. Because HAProxy round-robins `/swift/status`, run it a few times to see all three nodes.
 
-> **Check the URL, it is easy to get wrong:** `SWIFT_AUTH_URL` must be `http://${FLOWFIRST_VIP}:8090/auth/v1.0` (HAProxy's Swift frontend, `SWIFT_LB_PORT`), the same on every node including node4. Port `8080` on the VIP is HAProxy in front of **Process 1**, which has no `/auth/v1.0` route, and a node-local proxy on `:8888` would bypass the load balancer. Confirm that `curl -sI -H "X-Auth-User: ${SWIFT_USER}" -H "X-Auth-Key: <key>" "${SWIFT_AUTH_URL}"` returns `X-Auth-Token` and `X-Storage-Url` headers before trusting any other result here.
+> **Check the URL, it is easy to get wrong:** `SWIFT_AUTH_URL` must be `http://${FLOWFIRST_VIP}:8090/auth/v1.0` (HAProxy's Swift frontend, `SWIFT_LB_PORT`), the same on every node including node4. Port `8080` on the VIP is HAProxy in front of **API Gateway (Process 1)**, which has no `/auth/v1.0` route, and a node-local proxy on `:8888` would bypass the load balancer. Confirm that `curl -sI -H "X-Auth-User: ${SWIFT_USER}" -H "X-Auth-Key: <key>" "${SWIFT_AUTH_URL}"` returns `X-Auth-Token` and `X-Storage-Url` headers before trusting any other result here.
 
 #### B. Message phrasebook — what each line means
 
@@ -6614,14 +6481,14 @@ The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account 
 | `Failed to put object '<name>' in container '<c>': <error>` | The same failure, logged by `src/swift/swift_storage.py` with its logger (an ERROR line; `Could not ensure container` is a WARNING) | any Swift outage |
 | `Could not ensure container '<c>' exists: <error>` | Container create/check failed, usually auth or connectivity | install |
 | `Auth GET failed: <url> 401 Unauthorized` | Wrong `SWIFT_USER` / `SWIFT_KEY` for that node's `.env` | install |
-| `Auth GET failed: <url> 404 Not Found` | `SWIFT_AUTH_URL` points at something that is not a Swift auth endpoint (for example HAProxy to Process 1; see the note in A) | install |
+| `Auth GET failed: <url> 404 Not Found` | `SWIFT_AUTH_URL` points at something that is not a Swift auth endpoint (for example HAProxy to API Gateway (Process 1); see the note in A) | install |
 | `Object PUT failed: <url> 503 Service Unavailable` | Swift is up but unhealthy (disk, replication or backend failure) | storage outage |
 | `Object PUT failed: ... 507 Insufficient Storage` | A Swift device is full or unmounted | storage outage |
 | `Container PUT failed ... 404` / `Account HEAD failed ... 404` | The account is missing or not auto-created for that user | install |
 | `[Errno 111] Connection refused`, `Max retries exceeded with url`, `Read timed out`, `Name or service not known` | Swift is not reachable from this node (service down, wrong host, firewall, DNS, partition) | 22–25 |
 | `DUPLICATE via ZK dedup — skipping insert` | The message was already handled, so **no** Swift write is attempted for the redelivery | 37 |
 
-**REST API (`GET /swift/...` on Process 1):**
+**REST API (`GET /swift/...` on API Gateway (Process 1)):**
 
 | Response | Meaning |
 |---|---|
@@ -6644,10 +6511,10 @@ The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account 
 
 To correlate a client error with the server log, match the **time** and the **object path** (`/v1/AUTH_<account>/flowfirst_messages/flow1/<message_id>.json`); the client text does not include the server's `tx` id.
 
-#### C. Build a timeline on the Process 4 leader
+#### C. Build a timeline on the DB Updater (Process 4) leader
 
 ```bash
-# On the Process 4 leader node
+# On the DB Updater (Process 4) leader node
 sudo journalctl -u flowfirst-process4 --since "30 min ago" --no-pager \
   | grep -E "Swift|swift|Auth GET|Object PUT|Container (PUT|HEAD)|Account HEAD|Errno|Max retries" | tail -60
 ```
@@ -6688,13 +6555,13 @@ Rows can legitimately exceed objects if `SWIFT_ENABLED=false` was set on some no
 #### E. Watch live while running another scenario
 
 ```bash
-# On the Process 4 leader node, in a second terminal, then run Scenario 2 or 44
+# On the DB Updater (Process 4) leader node, in a second terminal, then run Scenario 2 or 44
 sudo journalctl -u flowfirst-process4 -f --no-pager | grep --line-buffered -E "Swift|Auth GET|Object PUT|Errno|Max retries"
 ```
 
 #### F. Controlled failure test (optional)
 
-This shows the failure path without touching Swift itself. Run it from **any of node1–node3**. It changes `.env` on **all three** nodes, because the Process 4 leader may be re-elected on a different node when the clones restart:
+This shows the failure path without touching Swift itself. Run it from **any of node1–node3**. It changes `.env` on **all three** nodes, because the DB Updater (Process 4) leader may be re-elected on a different node when the clones restart:
 
 ```bash
 # 1. Disable Swift on every node (the units read /opt/flowfirst/.env on start), then restart the P4 clone
@@ -6703,7 +6570,7 @@ for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
 done
 sudo pcs resource restart flowfirst-p4-res-clone
 
-# 2. Send one Flow 1 message, then look for the note on the current Process 4 leader node
+# 2. Send one Flow 1 message, then look for the note on the current DB Updater (Process 4) leader node
 curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
   -d '{"item_id": 9501, "initial_data": "swift-disabled-test"}' | jq -r .payload.message_id
 sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep "Swift store note"
@@ -6737,7 +6604,7 @@ Use this scenario alongside Scenarios 16–26 (reboots and network faults), and 
 | `dmesg` / `journalctl -k` | `sudo dmesg -T` | Kernel ring buffer: NIC link changes, OOM killer, disk errors, `iptables` LOG targets |
 | Per-service files | See Scenarios 45–50 | `/var/log/mariadb/`, `/var/log/rabbitmq/`, `/var/log/zookeeper/`, `/var/log/pacemaker/`, `/var/log/cluster/` |
 
-**FlowFirst process output in the journal and in `/var/log/messages`.** Each process unit sets `SyslogIdentifier=flowfirst-pN` (`flowfirst-p1` … `flowfirst-p5`; Process 5 runs on node4). A node installed before Process 5's unit had this line tags its lines `python`: re-run `systemd/install_services.sh /opt/flowfirst --remote` and restart the unit, or use `-u flowfirst-process5`. `gt.configure_logging()` sends every FlowFirst logger (the five processes, `gt`, `zk` and `swift_storage`) to stdout, so the lines go into the journal, and from there into `/var/log/messages` via rsyslog. It also writes them to a rotating file per process (Scenario 60). Three consequences:
+**FlowFirst process output in the journal and in `/var/log/messages`.** Each process unit sets `SyslogIdentifier=flowfirst-pN` (`flowfirst-p1` … `flowfirst-p5`; Remote Worker (Process 5) runs on node4). A node installed before Remote Worker (Process 5)'s unit had this line tags its lines `python`: re-run `systemd/install_services.sh /opt/flowfirst --remote` and restart the unit, or use `-u flowfirst-process5`. `gt.configure_logging()` sends every FlowFirst logger (the five processes, `gt`, `zk` and `swift_storage`) to stdout, so the lines go into the journal, and from there into `/var/log/messages` via rsyslog. It also writes them to a rotating file per process (Scenario 60). Three consequences:
 
 - **Filter by identifier or unit.** `sudo journalctl -t flowfirst-p4 --since "30 min ago"` (or `-u flowfirst-process4`) works on the journal; in `/var/log/messages` grep for `flowfirst-p4\[`.
 - **Severity is not preserved.** journald stores every stdout line as priority `info`, so `journalctl -p warning` does **not** list FlowFirst `WARNING`/`ERROR` lines. Search for the level prefix instead: `journalctl -u flowfirst-process4 --no-pager | grep -E "(WARNING|ERROR) "`. The journal line carries only a level prefix and the message (no timestamp or logger name; the file in `/var/log/flowfirst/` has both). The prefix comes from `LOG_LEVEL` (default `INFO`; set `DEBUG` in `.env` and restart the processes for more, `WARNING` for less).
@@ -7012,7 +6879,7 @@ curl -s -o /dev/null -w "DELETE %{http_code}\n" -X DELETE -H "X-Auth-Token: ${TO
 
 ### Scenario 53: Swift Node Loss — Writes Continue on 2 of 3 Replicas, Then Catch-Up
 
-> **Runs on:** stop and start on **node3** (the node being failed); the `curl`, `swift-get-nodes` and `swift-recon` checks run from **node1 or node2** (node3's Swift is down) and `curl` from any machine that can reach the VIP. The Process 4 log check runs on the **current Process 4 leader**.
+> **Runs on:** stop and start on **node3** (the node being failed); the `curl`, `swift-get-nodes` and `swift-recon` checks run from **node1 or node2** (node3's Swift is down) and `curl` from any machine that can reach the VIP. The DB Updater (Process 4) log check runs on the **current DB Updater (Process 4) leader**.
 
 Swift needs `floor(3/2)+1 = 2` replica writes to accept a PUT, so one node can be lost without an outage. This scenario takes node3's Swift down **without** stopping the rest of node3 (Pacemaker, MariaDB and the pipeline keep running), writes objects while it is down, brings it back, and confirms the replicators copy the missing objects to it. Scenarios 17 and 18 already cover whole-node reboots; use this one to study Swift's own behaviour.
 
@@ -7037,17 +6904,17 @@ for i in 1 2 3 4 5; do
     "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/outage/obj${i}.txt"
 done
 
-# Send pipeline messages; each one is stored by Process 4 via swiftclient
+# Send pipeline messages; each one is stored by DB Updater (Process 4) via swiftclient
 for i in 1 2 3; do
   curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
     -d "{\"item_id\": 53${i}, \"initial_data\": \"swift-node-loss-${i}\"}" | jq -r .payload.message_id
 done
 sleep 10
-# On the Process 4 leader
+# On the DB Updater (Process 4) leader
 sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep -E "Stored in Swift|Swift store note"
 ```
 
-*Expected:* all `PUT` lines return `201`; Process 4 prints `Stored in Swift object storage: flow1/<message_id>.json` for each message and no `Swift store note:`. A request that reaches node3's stopped proxy before HAProxy marks it down is a refused connection, which HAProxy re-dispatches to another node (`option redispatch`, `retries 3` in the template defaults); if a client still sees a `5xx`, `swiftclient` retries it (`retries=3`).
+*Expected:* all `PUT` lines return `201`; DB Updater (Process 4) prints `Stored in Swift object storage: flow1/<message_id>.json` for each message and no `Swift store note:`. A request that reaches node3's stopped proxy before HAProxy marks it down is a refused connection, which HAProxy re-dispatches to another node (`option redispatch`, `retries 3` in the template defaults); if a client still sees a `5xx`, `swiftclient` retries it (`retries=3`).
 
 #### 53.3 — Only two copies exist while node3 is down
 
@@ -7124,7 +6991,7 @@ sudo journalctl -t proxy-server --since "2 minutes ago" --no-pager | grep -E "er
 
 *Expected:* every `PUT` returns `201`. The first PUT served by each proxy logs a line of the form `ERROR Node will be error limited for 60.00s: <NODE3_IP>:6200/flowfirst, error: ERROR Insufficient Storage` (`error_suppression_interval` defaults to 60 s). While the node is limited the proxy skips it without trying, so there is no further log line and no added latency. After 60 s the proxy tries node3 again and gets another `507`, so the line repeats at most once a minute per proxy, and only while requests keep arriving.
 
-Pipeline messages sent now (`/api/flow1`) are stored by Process 4 as usual: the `Stored in Swift object storage` line appears and no `Swift store note:` is printed.
+Pipeline messages sent now (`/api/flow1`) are stored by DB Updater (Process 4) as usual: the `Stored in Swift object storage` line appears and no `Swift store note:` is printed.
 
 #### 54.4 — The replicators notice
 
@@ -7232,7 +7099,7 @@ Quarantined files are kept until you remove them. In a real incident leave them 
 
 ### Scenario 56: Swift Token Cache (memcached) Failure — 401 Re-Auth, Then 503 When All Caches Are Down
 
-> **Runs on:** `systemctl stop|start memcached` on **node3** (then on all three nodes for 56.3); the `curl` calls run from any machine that can reach the VIP; the client-side check runs on the **current Process 4 leader**; the proxy log check runs on **each of node1–node3**.
+> **Runs on:** `systemctl stop|start memcached` on **node3** (then on all three nodes for 56.3); the `curl` calls run from any machine that can reach the VIP; the client-side check runs on the **current DB Updater (Process 4) leader**; the proxy log check runs on **each of node1–node3**.
 
 tempauth keeps its tokens **only in memcached**, and all three proxies share the same three memcached servers (`memcache_servers` in `/etc/swift/proxy-server.conf`). Token lifetime is 24 hours. This scenario shows what a lost cache server does to clients: one lost server costs a re-login, losing all of them stops logins.
 
@@ -7264,7 +7131,7 @@ curl -s -o /dev/null -w "login %{http_code}\n" -H "X-Storage-User: ${SWIFT_USER}
 
 *Expected:* the old token returns `204` on every proxy **if its cache entry lived on node1 or node2** and `401` on every proxy if the entry was held by node3's memcached (the entry is found by hashing the token, so all proxies agree). The login returns `200`. Run the loop with a few different tokens (log in again, repeat) to see both outcomes. A `401` here is not an error in Swift: the token was lost with the cache server. The proxies log `Error connecting to memcached: <NODE3_IP>:11211` lines (`sudo journalctl -t proxy-server --since "2 minutes ago" | grep memcached`); after 10 errors in 60 s a proxy stops trying that server for 60 s.
 
-**What the pipeline sees:** `python-swiftclient` handles a `401` itself: it logs in again once and repeats the request, so Process 4 keeps writing and prints `Stored in Swift object storage` with no `Swift store note:`.
+**What the pipeline sees:** `python-swiftclient` handles a `401` itself: it logs in again once and repeats the request, so DB Updater (Process 4) keeps writing and prints `Stored in Swift object storage` with no `Swift store note:`.
 
 ```bash
 for i in 1 2 3; do
@@ -7272,7 +7139,7 @@ for i in 1 2 3; do
     -d "{\"item_id\": 56${i}, \"initial_data\": \"memcached-one-down-${i}\"}" | jq -r .payload.message_id
 done
 sleep 10
-# On the Process 4 leader
+# On the DB Updater (Process 4) leader
 sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep -E "Stored in Swift|Swift store note"
 ```
 
@@ -7296,11 +7163,11 @@ for i in 1 2; do
     -d "{\"item_id\": 56${i}9, \"initial_data\": \"memcached-all-down-${i}\"}" | jq -r .payload.message_id
 done
 sleep 30
-# On the Process 4 leader
+# On the DB Updater (Process 4) leader
 sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep -E "Stored in Swift|Swift store note"
 ```
 
-*Expected:* `Swift store note: Auth GET failed: http://<VIP>:8090/auth/v1.0 503 Service Unavailable  [first 60 chars of response] b'<html><h1>Service Unavailable</h1><p>The server is currently'` (`python-swiftclient` appends the first 60 bytes of the reply body to its error text; the client retries a `5xx` with 1 s, 2 s and 4 s pauses first, so each message waits about 7 s on Swift before it is acknowledged). Process 4 also logs the same text in an `ERROR Failed to put object 'flow1/<message_id>.json' ...` line just before it. The MariaDB rows are still written. These two items (5619 and 5629) are missing from Swift; Scenario 58 shows how to back-fill.
+*Expected:* `Swift store note: Auth GET failed: http://<VIP>:8090/auth/v1.0 503 Service Unavailable  [first 60 chars of response] b'<html><h1>Service Unavailable</h1><p>The server is currently'` (`python-swiftclient` appends the first 60 bytes of the reply body to its error text; the client retries a `5xx` with 1 s, 2 s and 4 s pauses first, so each message waits about 7 s on Swift before it is acknowledged). DB Updater (Process 4) also logs the same text in an `ERROR Failed to put object 'flow1/<message_id>.json' ...` line just before it. The MariaDB rows are still written. These two items (5619 and 5629) are missing from Swift; Scenario 58 shows how to back-fill.
 
 #### 56.4 — Restore
 
@@ -7316,7 +7183,7 @@ curl -s -o /dev/null -w "login %{http_code}\n" -H "X-Storage-User: ${SWIFT_USER}
 
 ### Scenario 57: Swift Credential Failures — Wrong Key, Key Rotation and Token Lifetime
 
-> **Runs on:** the `curl` and `swift_storage` checks (A, B) on **any node** that has `/opt/flowfirst` and its `.venv` (node1–node3; node4 has them too but does not call Swift); the `.env` change in C on **all of node1–node3** (Process 4 can run on any of them); the `proxy-server.conf` change in D on **all of node1–node3**.
+> **Runs on:** the `curl` and `swift_storage` checks (A, B) on **any node** that has `/opt/flowfirst` and its `.venv` (node1–node3; node4 has them too but does not call Swift); the `.env` change in C on **all of node1–node3** (DB Updater (Process 4) can run on any of them); the `proxy-server.conf` change in D on **all of node1–node3**.
 
 Credentials sit in two places: `user_<account>_<user> = <key> .admin` in `/etc/swift/proxy-server.conf` on each node (server side), and `SWIFT_USER` / `SWIFT_KEY` in `.env` on each node (client side). A mismatch gives `401` and, because Swift writes are non-fatal, only a `Swift store note:` line, so nothing alerts you.
 
@@ -7340,7 +7207,7 @@ print(swift_storage.get_swift_status())"
 
 *Expected:* `(False, "Auth GET failed: http://<VIP>:8090/auth/v1.0 401 Unauthorized  [first 60 chars of response] b'<html><h1>Unauthorized</h1><p>This server could not verify t'")` and a status dict with `'status': 'error'` and the same text in `error`. The same text is also printed to stderr as `Failed to put object 'flow9/cred-test.json' in container 'flowfirst_messages': ...` (a plain script has no logging set-up, so there is no `ERROR` prefix; the pipeline processes add it through `gt.configure_logging()`). A `401` costs one extra login attempt after a 1 s pause and is then raised, so it fails after about 1 s, unlike the 7 s of retries for the `503` in Scenario 56. The environment variable overrides `.env` because `python-dotenv` does not replace values that are already set.
 
-#### C. Break and fix the client key on the Process 4 side
+#### C. Break and fix the client key on the DB Updater (Process 4) side
 
 ```bash
 # On each of node1-node3 (the P4 leader can move when the clone restarts)
@@ -7354,7 +7221,7 @@ sleep 10
 curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -H "Content-Type: application/json" \
   -d '{"item_id": 5701, "initial_data": "bad-swift-key"}' | jq -r .payload.message_id
 sleep 8
-# On the Process 4 leader
+# On the DB Updater (Process 4) leader
 sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep -E "Swift store note|Persisted to MariaDB"
 curl -s http://${FLOWFIRST_VIP}:8080/swift/status | jq -r '.status, .error'
 
@@ -7382,7 +7249,7 @@ curl -s -o /dev/null -w "new key: %{http_code}\n" -H "X-Storage-User: ${SWIFT_US
 curl -s -o /dev/null -w "old token: %{http_code}\n" -I -H "X-Auth-Token: ${TOKEN}" "${SWIFT_VIP_URL}/v1/${ACCT}"
 ```
 
-*Expected:* `old key: 401`, `new key: 200`, and `old token: 204`. **A token issued before the rotation keeps working** until it expires (24 hours) or its cache entry is lost, because tempauth only checks the key when a token is issued. So a rotation does not log existing clients out; it only blocks new logins with the old key. After the rotation, put `NEWKEY` into `SWIFT_KEY` in `.env` on every node and restart Process 4 and Process 1, as in C, or the next login by the pipeline will get a `401`. To undo the test, set `NEWKEY="${SWIFT_KEY}"` and run the same `for` loop again.
+*Expected:* `old key: 401`, `new key: 200`, and `old token: 204`. **A token issued before the rotation keeps working** until it expires (24 hours) or its cache entry is lost, because tempauth only checks the key when a token is issued. So a rotation does not log existing clients out; it only blocks new logins with the old key. After the rotation, put `NEWKEY` into `SWIFT_KEY` in `.env` on every node and restart DB Updater (Process 4) and API Gateway (Process 1), as in C, or the next login by the pipeline will get a `401`. To undo the test, set `NEWKEY="${SWIFT_KEY}"` and run the same `for` loop again.
 
 > The proxies read `proxy-server.conf` only at start. Editing it on one node leaves the other two accepting the old key, so a load-balanced login may succeed or fail depending on which proxy answers. Always change and restart all three.
 
@@ -7390,9 +7257,9 @@ curl -s -o /dev/null -w "old token: %{http_code}\n" -I -H "X-Auth-Token: ${TOKEN
 
 ### Scenario 58: Total Swift Outage During the Pipeline — Detect and Back-Fill from MariaDB
 
-> **Runs on:** the stop and start of the proxies on **each of node1–node3**; the message sends and the reconciliation from **any machine with a `mariadb` client that can reach the VIP** (node1–node3 have it); the log check on the **current Process 4 leader**.
+> **Runs on:** the stop and start of the proxies on **each of node1–node3**; the message sends and the reconciliation from **any machine with a `mariadb` client that can reach the VIP** (node1–node3 have it); the log check on the **current DB Updater (Process 4) leader**.
 
-Swift writes are best-effort (Scenario 50), so a Swift outage never stops the pipeline: MariaDB rows are written, messages are acknowledged, and objects are missing afterwards. `put_message_object()` is not retried later and a redelivered message is skipped by the ZooKeeper dedup barrier, so the gap persists until someone fills it. Process 4 stores the same JSON in MariaDB (`raw_payload`) as in Swift, so the missing objects can be rebuilt from the table.
+Swift writes are best-effort (Scenario 50), so a Swift outage never stops the pipeline: MariaDB rows are written, messages are acknowledged, and objects are missing afterwards. `put_message_object()` is not retried later and a redelivered message is skipped by the ZooKeeper dedup barrier, so the gap persists until someone fills it. DB Updater (Process 4) stores the same JSON in MariaDB (`raw_payload`) as in Swift, so the missing objects can be rebuilt from the table.
 
 #### 58.1 — Stop every Swift proxy
 
@@ -7415,11 +7282,11 @@ for i in 1 2 3; do
     -d "{\"item_id\": 58${i}, \"initial_data\": \"swift-outage-${i}\"}" | jq -r .payload.message_id
 done
 sleep 40
-# On the Process 4 leader
+# On the DB Updater (Process 4) leader
 sudo journalctl -u flowfirst-process4 --since "3 minutes ago" --no-pager | grep -E "Swift store note|Persisted to MariaDB" | tail -8
 ```
 
-*Expected:* for each item, `Swift store note: Auth GET failed: http://<VIP>:8090/auth/v1.0 503 Service Unavailable  [first 60 chars of response] b'<html><body><h1>503 Service Unavailable</h1>\nNo server is av'` followed by `Persisted to MariaDB`. The body here is HAProxy's built-in 503 page (the request never reaches a Swift proxy), unlike Scenario 56 where tempauth itself answers. Each message spends about 7 s in the Swift client's retries (1 s + 2 s + 4 s pauses, four login attempts) before the note is printed, and Process 4 handles one message at a time per flow (`prefetch_count=1`), so a long outage slows the pipeline by that amount per message even though nothing fails.
+*Expected:* for each item, `Swift store note: Auth GET failed: http://<VIP>:8090/auth/v1.0 503 Service Unavailable  [first 60 chars of response] b'<html><body><h1>503 Service Unavailable</h1>\nNo server is av'` followed by `Persisted to MariaDB`. The body here is HAProxy's built-in 503 page (the request never reaches a Swift proxy), unlike Scenario 56 where tempauth itself answers. Each message spends about 7 s in the Swift client's retries (1 s + 2 s + 4 s pauses, four login attempts) before the note is printed, and DB Updater (Process 4) handles one message at a time per flow (`prefetch_count=1`), so a long outage slows the pipeline by that amount per message even though nothing fails.
 
 #### 58.3 — Restore Swift
 
@@ -7457,7 +7324,7 @@ M -N -B -r -e "SELECT message_id, flow_id, item_id, raw_payload FROM processed_m
 curl -s "http://${FLOWFIRST_VIP}:8080/swift/object/flow1/$(M -N -B -e 'SELECT message_id FROM processed_messages WHERE item_id = 581 AND flow_id = 1').json" | jq -r .payload.initial_data
 ```
 
-*Expected:* `swift-outage-1`. The restored object holds the JSON that Process 4 stored in MariaDB (Process 4 added its `process4_saved_to_mariadb` history step before both writes), formatted compactly rather than with the original indentation. For a larger gap, widen the `WHERE` clause by `created_at` and compare against `/swift/objects?prefix=flow1/` as in Scenario 50 D. A stored object is a copy, not the source of truth: MariaDB remains authoritative, and nothing reads Swift back into the pipeline.
+*Expected:* `swift-outage-1`. The restored object holds the JSON that DB Updater (Process 4) stored in MariaDB (DB Updater (Process 4) added its `process4_saved_to_mariadb` history step before both writes), formatted compactly rather than with the original indentation. For a larger gap, widen the `WHERE` clause by `created_at` and compare against `/swift/objects?prefix=flow1/` as in Scenario 50 D. A stored object is a copy, not the source of truth: MariaDB remains authoritative, and nothing reads Swift back into the pipeline.
 
 ---
 
@@ -7465,9 +7332,9 @@ curl -s "http://${FLOWFIRST_VIP}:8080/swift/object/flow1/$(M -N -B -e 'SELECT me
 
 ### Scenario 59: Reading the REST API (HTTP) Request Log Across Scenarios
 
-> **Runs on:** the `curl` traffic generators from any machine that can reach the VIP. The log itself lives on **each of node1–node3**: every node runs its own Process 1, and HAProxy sends each request to one of them, so a single node's journal holds only the requests that node served. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 runs no Process 1 and has no REST API log.
+> **Runs on:** the `curl` traffic generators from any machine that can reach the VIP. The log itself lives on **each of node1–node3**: every node runs its own API Gateway (Process 1), and HAProxy sends each request to one of them, so a single node's journal holds only the requests that node served. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 runs no API Gateway (Process 1) and has no REST API log.
 
-Process 1 is the only FlowFirst component that speaks HTTP to clients. It has no access-log file: each request becomes one `INFO [http]` line, written by `RestApiHandler.log_message` in [`src/application/process1.py`](src/application/process1.py). Scenario 48 covers the HAProxy side of the same requests. Use this scenario alongside Scenarios 1, 11, 12, 29 and 40–41, and 56–58 for the Swift endpoints, to see which node served a request, what status it returned, and why a request failed. Exact wording of Python's own error lines varies between Python versions, so the commands below grep for stable keywords.
+API Gateway (Process 1) is the only FlowFirst component that speaks HTTP to clients. It has no access-log file: each request becomes one `INFO [http]` line, written by `RestApiHandler.log_message` in [`src/application/process1.py`](src/application/process1.py). Scenario 48 covers the HAProxy side of the same requests. Use this scenario alongside Scenarios 1, 11, 12, 29 and 40–41, and 56–58 for the Swift endpoints, to see which node served a request, what status it returned, and why a request failed. Exact wording of Python's own error lines varies between Python versions, so the commands below grep for stable keywords.
 
 #### A. Locate the log and generate some traffic
 
@@ -7482,7 +7349,7 @@ INFO [http] 192.168.1.11 — "GET /health HTTP/1.0" 200 -
 
 Each line is `INFO [http] <client ip> — "<request line>" <status> <size>`. Three things to know before reading it:
 
-- **The client IP is HAProxy, not the real client.** Requests that came through the VIP arrive from the VIP holder's node address (normally its primary IP, not the VIP itself). The real client address is in the HAProxy log (Scenario 48, field 1) and in the `X-Forwarded-For` header that HAProxy adds; Process 1 does not log that header.
+- **The client IP is HAProxy, not the real client.** Requests that came through the VIP arrive from the VIP holder's node address (normally its primary IP, not the VIP itself). The real client address is in the HAProxy log (Scenario 48, field 1) and in the `X-Forwarded-For` header that HAProxy adds; API Gateway (Process 1) does not log that header.
 - **The size is always `-`.** The handler does not report a response size.
 - **There is no duration.** To get timing, use the `Tr`/`Tt` fields in the HAProxy log, or `curl -w '%{time_total}'`.
 
@@ -7498,7 +7365,7 @@ curl -s -o /dev/null -w "POST item_id=abc    -> %{http_code}\n" -X POST ${V}/api
 curl -s -o /dev/null -w "GET  limit=abc      -> %{http_code}\n" "${V}/swift/objects?limit=abc"
 ```
 
-*Expected output:* `200`, `404`, (a node name), `400`, `500`, `502`. The last one is produced by HAProxy, not by Process 1: the `limit=abc` handler raises an uncaught `ValueError`, so Process 1 prints a traceback and closes the connection without answering (see C). Then read the log on the node named by `handled_by_node` for the `POST`, and on every node for the rest:
+*Expected output:* `200`, `404`, (a node name), `400`, `500`, `502`. The last one is produced by HAProxy, not by API Gateway (Process 1): the `limit=abc` handler raises an uncaught `ValueError`, so API Gateway (Process 1) prints a traceback and closes the connection without answering (see C). Then read the log on the node named by `handled_by_node` for the `POST`, and on every node for the rest:
 
 ```bash
 sudo journalctl -u flowfirst-process1 -o cat --since "2 min ago" --no-pager | grep -v "GET /health HTTP/1.0"
@@ -7543,7 +7410,7 @@ sudo journalctl -u flowfirst-process1 -o cat --since "1 min ago" --no-pager | gr
 
 | Log text (grep for) | Meaning | Typical scenarios |
 |---|---|---|
-| `"GET /health HTTP/1.0" 200 -` | HAProxy health probe; Process 1 is up | any |
+| `"GET /health HTTP/1.0" 200 -` | HAProxy health probe; API Gateway (Process 1) is up | any |
 | `"GET /health HTTP/1.1" 200 -` | A real client called `/health` (through the VIP or directly) | 1, 29 |
 | `"POST /api/flow1" 200 -` (also `flow2`, `flow3`, `batch`) | Message(s) published to RabbitMQ; the response body names `handled_by_node` | 1, 2, 40 |
 | `[Flow N] Published #...` just before a `200` | Confirms the publish happened before the response | 2, 44 |
@@ -7554,13 +7421,13 @@ sudo journalctl -u flowfirst-process1 -o cat --since "1 min ago" --no-pager | gr
 | `"OPTIONS ..." 204 -` | Browser CORS pre-flight request | any |
 | `code 501, message Unsupported method ('PUT')` | A method other than GET, POST or OPTIONS (for example `PUT`, `DELETE`) was sent; Python's server answers it itself | any |
 | `code 400, message Bad request syntax`, `Bad request version`, `Bad HTTP/0.9 request type` | Something that is not HTTP reached port 8082, for example a TLS handshake or a port scanner. The request line shows as unreadable bytes. | any |
-| A bare `Traceback (most recent call last):` with no `[http]` line after it | A handler raised an exception that Process 1 did not catch (the eventlet worker prints it to stderr), so no response was written. The client sees a dropped connection and HAProxy typically logs `502` with flags `SH`. Example: `limit=abc` on `/swift/objects`. | 48 |
+| A bare `Traceback (most recent call last):` with no `[http]` line after it | A handler raised an exception that API Gateway (Process 1) did not catch (the eventlet worker prints it to stderr), so no response was written. The client sees a dropped connection and HAProxy typically logs `502` with flags `SH`. Example: `limit=abc` on `/swift/objects`. | 48 |
 | `BrokenPipeError`, `ConnectionResetError` in a traceback | The client (or HAProxy) closed the connection before the response was written. HAProxy shows flags `cD`/`CD`. | 20, 21 |
 | `HTTP accept error:` | The listening socket failed (not an idle timeout, which is filtered out) | any |
-| `HTTP server listening on 0.0.0.0:8082`, `HTTP server stopped.` | Process 1 started or stopped serving on the backend port | 11, 12, 16–19 |
-| `All greenthreads started`, `Shutdown signal` | Process 1 start and stop (same journal) | 11, 12 |
+| `HTTP server listening on 0.0.0.0:8082`, `HTTP server stopped.` | API Gateway (Process 1) started or stopped serving on the backend port | 11, 12, 16–19 |
+| `All greenthreads started`, `Shutdown signal` | API Gateway (Process 1) start and stop (same journal) | 11, 12 |
 
-The tracebacks go to stderr, which the unit also sends to the journal, so they appear under the same `-u flowfirst-process1`. Because the handler runs inside the process, a `500` with `error:` means Process 1 caught the problem and answered, whereas a traceback with no access line means it did not.
+The tracebacks go to stderr, which the unit also sends to the journal, so they appear under the same `-u flowfirst-process1`. Because the handler runs inside the process, a `500` with `error:` means API Gateway (Process 1) caught the problem and answered, whereas a traceback with no access line means it did not.
 
 #### D. Build a timeline and compare the nodes
 
@@ -7605,19 +7472,19 @@ The two logs have no shared request ID. Match them by time, path and status:
 ```bash
 # On the VIP holder (HLOG as in Scenario 48): the request as HAProxy saw it, including the real client and the chosen backend
 sudo grep -E 'POST /api/flow1' ${HLOG} | tail -3
-# On the backend node it names: the same request as Process 1 saw it
+# On the backend node it names: the same request as API Gateway (Process 1) saw it
 sudo journalctl -u flowfirst-process1 -o short-iso --since "2 min ago" --no-pager | grep -F 'POST /api/flow1'
 ```
 
 HAProxy's `flowfirst_api_back/node2` field and the `handled_by_node` value in the response must name the same node as the journal you are reading. Read the two sides together:
 
-| HAProxy log | Process 1 journal | Likely cause |
+| HAProxy log | API Gateway (Process 1) journal | Likely cause |
 |---|---|---|
 | `200` | `200` | Healthy |
-| `500` | `500` with `POST ... error:` | Process 1 answered with an error; the cause is in the `error:` text |
+| `500` | `500` with `POST ... error:` | API Gateway (Process 1) answered with an error; the cause is in the `error:` text |
 | `502 ... SH` | traceback, no access line | Handler crashed before answering |
-| `503` with `<NOSRV>` | nothing | No backend was up, so the request never reached Process 1 (Scenarios 12, 19) |
-| `SC` flags, no backend | nothing | Connection refused; Process 1 is stopped on that node (Scenarios 11, 16) |
+| `503` with `<NOSRV>` | nothing | No backend was up, so the request never reached API Gateway (Process 1) (Scenarios 12, 19) |
+| `SC` flags, no backend | nothing | Connection refused; API Gateway (Process 1) is stopped on that node (Scenarios 11, 16) |
 | `504 ... sH` | access line shows a late `200`, or nothing | Backend took longer than `timeout server 1m` (Scenarios 20, 21) |
 
 #### F. Watch live while running another scenario
@@ -7631,7 +7498,7 @@ sudo journalctl -u flowfirst-process1 -o cat -f \
 
 #### G. Manage the log: volume and retention
 
-The request lines are `INFO` records, so `LOG_LEVEL=WARNING` in `.env` (and a restart) turns the access lines off together with the other `INFO` messages; do that only if you accept losing them. The same lines are also in `/var/log/flowfirst/process1.log` with a timestamp, which is easier to grep by time than the journal (Scenario 60). Their volume is set by the health probes (about 28,800 lines per day per node) plus your own traffic, and by `/api/batch` (one access line per call, not per message). Retention and rate limits are the journald settings in Scenario 51 G: if a load test produces more than the journal's rate limit, you will see `Suppressed N messages from flowfirst-process1.service` and the missing lines will not be in the journal.
+The request lines are `INFO` records, so `LOG_LEVEL=WARNING` in `.env` (and a restart) turns the access lines off together with the other `INFO` messages; do that only if you accept losing them. The same lines are also in `/var/log/flowfirst/api_gateway.log` with a timestamp, which is easier to grep by time than the journal (Scenario 60). Their volume is set by the health probes (about 28,800 lines per day per node) plus your own traffic, and by `/api/batch` (one access line per call, not per message). Retention and rate limits are the journald settings in Scenario 51 G: if a load test produces more than the journal's rate limit, you will see `Suppressed N messages from flowfirst-process1.service` and the missing lines will not be in the journal.
 
 ```bash
 # Total journal size on this node, and whether messages were dropped
@@ -7645,7 +7512,7 @@ sudo journalctl --since "1 hour ago" --no-pager | grep -E "Suppressed [0-9]+ mes
 
 ### Scenario 60: Pipeline Process Log Files (`/var/log/flowfirst`)
 
-> **Runs on:** **each node that runs a pipeline process**: node1–node3 for Processes 1–4, and node4 for Process 5. Each node's files hold only what that node's processes did. The cross-node trace in D runs from any of node1–node4 over `ssh`.
+> **Runs on:** **each node that runs a pipeline process**: node1–node3 for Processes 1–4, and node4 for Remote Worker (Process 5). Each node's files hold only what that node's processes did. The cross-node trace in D runs from any of node1–node4 over `ssh`.
 
 Every pipeline process logs through Python's `logging` module and writes each record twice: to stdout (the systemd journal) and to its own rotating file, `<LOG_DIR>/processN.log`. The file adds what the journal line lacks: a timestamp, the logger name, and the full traceback of every caught error. Scenarios 47–51 and 59 read the journal; this scenario reads the files.
 
@@ -7665,10 +7532,10 @@ The unit files set `LogsDirectory=flowfirst`, so systemd creates `/var/log/flowf
 ```bash
 # On each node
 sudo ls -lh /var/log/flowfirst/
-sudo head -3 /var/log/flowfirst/process1.log
+sudo head -3 /var/log/flowfirst/api_gateway.log
 ```
 ```
-2026-06-15 14:00:01,214 INFO     flowfirst: [gt] Logging to /var/log/flowfirst/process1.log (level=INFO, rotate at 52428800 bytes, keep 7)
+2026-06-15 14:00:01,214 INFO     flowfirst: [gt] Logging to /var/log/flowfirst/api_gateway.log (level=INFO, rotate at 52428800 bytes, keep 7)
 2026-06-15 14:00:01,215 INFO     src.gt.gt: [gt] eventlet monkey-patch applied.
 2026-06-15 14:00:01,300 INFO     flowfirst.p1: Starting (node=node1, pool=1000) ...
 ```
@@ -7693,7 +7560,7 @@ sudo systemctl show flowfirst-process1 -p LogsDirectory
 | `WARNING` | Degraded but working: ZooKeeper unavailable, election failed, MariaDB init failed, duplicate skipped by the dedup barrier, Swift store failed (the message is still saved to MariaDB) | `[Flow 2] DUPLICATE via ZK dedup — skipping insert for <id>` |
 | `ERROR` | A message or request failed. The record is followed by a traceback. The message is rejected with `requeue=False`: kept in `flowfirst_dead_letters` if the dead-letter policy is applied, **discarded** if not (see Message Safety). | `[Flow 1] Error: ...` |
 | `CRITICAL` | An uncaught exception ended the process. The traceback is logged before it exits, so a crash is no longer visible only in the journal. | `Uncaught exception` |
-| `DEBUG` | Per-message detail such as the Process 4 history steps and ZK dedup first-seen | `  [process2_examined] @ ...` |
+| `DEBUG` | Per-message detail such as the DB Updater (Process 4) history steps and ZK dedup first-seen | `  [process2_examined] @ ...` |
 
 ```bash
 # Everything that went wrong on this node today, with tracebacks
@@ -7714,21 +7581,21 @@ Unlike the journal (Scenario 51 A), the file has a real level on every line, so 
 | `ZK ready` / `ZK service registered` | ZooKeeper connected | 34, 38 |
 | `WARNING ZK unavailable ... degraded mode` / `standalone mode` | ZooKeeper could not be reached; the process runs without leader election or dedup | 36 |
 | `WARNING ZK election failed ... single-node mode` | Election raised an error; the process runs on this node without the leader gate | 36 |
-| `WARNING MariaDB init failed` | Process 4 could not create or check the schema at start-up | 14, 24 |
+| `WARNING MariaDB init failed` | DB Updater (Process 4) could not create or check the schema at start-up | 14, 24 |
 | `DUPLICATE via ZK dedup` | Failover re-delivery was caught before the insert | 37 |
 | `Swift store note` | Swift write failed; the row is still in MariaDB | 56–58 |
 | `ERROR [Flow N] Error:` + traceback | One message failed and was dead-lettered | 13, 25, 42 |
 | `ERROR POST ... error:` + traceback | A REST request failed with HTTP 500 | 59 |
-| `ERROR dedup-reaper error` | Process 4 could not clean expired dedup znodes | 37 |
+| `ERROR dedup-reaper error` | DB Updater (Process 4) could not clean expired dedup znodes | 37 |
 | `CRITICAL Uncaught exception` | The process crashed; systemd will restart it (`Restart=always`) | any |
 
 #### D. Trace one message across all processes
 
-Every message carries a `message_id`, and Process 4 and Process 5 log it as `msg_id=`. The earlier hops log the `item_id`, so start from the item you sent (Scenario 2) and find its id:
+Every message carries a `message_id`, and DB Updater (Process 4) and Remote Worker (Process 5) log it as `msg_id=`. The earlier hops log the `item_id`, so start from the item you sent (Scenario 2) and find its id:
 
 ```bash
 # On the node that handled the POST (handled_by_node in the response)
-sudo grep -h "#9001" /var/log/flowfirst/process1.log
+sudo grep -h "#9001" /var/log/flowfirst/api_gateway.log
 
 # From any of node1–node4: every log line that mentions the item, in time order
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
@@ -7736,7 +7603,7 @@ for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
 done | sed -E 's#^/var/log/flowfirst/##' | sort -t: -k2
 ```
 
-Expected for a Flow 1 item: lines from `process1.log` (`Published`), `process2.log` (`Received` and `Reflected`), `process3.log` (`Picked up` and `Forwarded`) and `process4.log` (`Consumed` and `Persisted to MariaDB`), each on whichever node held that process's leader role. A hop that is missing from the list shows where the message stopped. Use `grep -B1 -A5` on the `ERROR` line of the next process to read the traceback.
+Expected for a Flow 1 item: lines from `api_gateway.log` (`Published`), `process2.log` (`Received` and `Reflected`), `process3.log` (`Picked up` and `Forwarded`) and `process4.log` (`Consumed` and `Persisted to MariaDB`), each on whichever node held that process's leader role. A hop that is missing from the list shows where the message stopped. Use `grep -B1 -A5` on the `ERROR` line of the next process to read the traceback.
 
 #### E. Watch live while running another scenario
 
@@ -7770,7 +7637,7 @@ sudo ls -lh /var/log/flowfirst/process4.log*
 #   LOG_MAX_BYTES=10485760   LOG_BACKUP_COUNT=3
 ```
 
-Rotation renames `process4.log` to `process4.log.1`, shifts the older ones up, and deletes the oldest beyond `LOG_BACKUP_COUNT`. Old data is therefore **lost** once the limit is reached; copy a file off the node before it rotates away if you need it for an incident review. `INFO` volume is mostly one or two lines per message plus the Process 1 access lines, including HAProxy's health probes (about 28,800 per day, Scenario 59 B). If space matters more than detail, `LOG_LEVEL=WARNING` keeps only problems.
+Rotation renames `process4.log` to `process4.log.1`, shifts the older ones up, and deletes the oldest beyond `LOG_BACKUP_COUNT`. Old data is therefore **lost** once the limit is reached; copy a file off the node before it rotates away if you need it for an incident review. `INFO` volume is mostly one or two lines per message plus the API Gateway (Process 1) access lines, including HAProxy's health probes (about 28,800 per day, Scenario 59 B). If space matters more than detail, `LOG_LEVEL=WARNING` keeps only problems.
 
 ---
 
@@ -7778,7 +7645,7 @@ Rotation renames `process4.log` to `process4.log.1`, shifts the older ones up, a
 
 ### Scenario 61: Scalability Test — Thousands of Concurrent API Invocations (Four-Node Cluster)
 
-> **Runs on:** the load generator on a **separate client host** that can reach the VIP (not a cluster node: it would use the CPU you are trying to measure; if you have no spare host, use node4, which runs only Process 5). It needs Python 3.9+ and a copy of this repository, but **no `pip install`** (`scripts/load_test_api.py` uses only the standard library). Observation commands run on **node1–node3** (HAProxy on the VIP holder; RabbitMQ, MariaDB and ZooKeeper on any of them) and on **node4** for Process 5. Tuning changes are made on **all four nodes**.
+> **Runs on:** the load generator on a **separate client host** that can reach the VIP (not a cluster node: it would use the CPU you are trying to measure; if you have no spare host, use node4, which runs only Remote Worker (Process 5)). It needs Python 3.9+ and a copy of this repository, but **no `pip install`** (`scripts/load_test_api.py` uses only the standard library). Observation commands run on **node1–node3** (HAProxy on the VIP holder; RabbitMQ, MariaDB and ZooKeeper on any of them) and on **node4** for Remote Worker (Process 5). Tuning changes are made on **all four nodes**.
 
 This scenario answers one question: *how many API calls can the four-node deployment accept at the same time, how many messages per second can the pipeline actually finish, and which setting limits each?* It uses the other scenarios as building blocks: Scenario 1 (REST API), 9 (HAProxy dashboard), 40 (batch publishing), 43 (metrics), 45–51 and 60 (logs).
 
@@ -7786,11 +7653,11 @@ This scenario answers one question: *how many API calls can the four-node deploy
 
 The load generator keeps a fixed number of **virtual users (VUs)**. Each VU sends one request, waits for the answer, then sends the next (a closed loop), so *N* VUs means *N* requests in flight. Throughput follows from that: `requests/s ≈ VUs ÷ (latency + think time)`. To model a real population rather than a hammer, set `LOAD_THINK_MS`: 5000 users who each call once every 10 s is `LOAD_STEPS=5000` with `LOAD_THINK_MS=10000` (about 500 req/s).
 
-A `200` from `POST /api/flow1` only means *Process 1 published the message to RabbitMQ*. The message is finished when Process 4 has stored it in MariaDB and Swift. The pipeline therefore has two capacities, and the test measures both:
+A `200` from `POST /api/flow1` only means *API Gateway (Process 1) published the message to RabbitMQ*. The message is finished when DB Updater (Process 4) has stored it in MariaDB and Swift. The pipeline therefore has two capacities, and the test measures both:
 
 | Capacity | What it is | How the test shows it |
 |---|---|---|
-| **Intake** | How many API calls HAProxy and Process 1 accept per second at acceptable latency | Per-step `req/s`, `p95`, `err` |
+| **Intake** | How many API calls HAProxy and API Gateway (Process 1) accept per second at acceptable latency | Per-step `req/s`, `p95`, `err` |
 | **Completion** | How many messages per second Processes 2–5, MariaDB and Swift finish | Queue backlog during the run, and the **drain time** afterwards |
 
 If intake is higher than completion, every request still succeeds, but the RabbitMQ backlog grows without limit. A test that only looks at HTTP status would report success for a system that is falling behind.
@@ -7801,20 +7668,20 @@ All have defaults that reproduce the previous fixed behaviour, so doing nothing 
 
 | Variable | Default | Limits | Raise it when |
 |---|---|---|---|
-| `API_REQUEST_POOL_SIZE` | `0` (= 40) | Requests **one** Process 1 serves at the same time. When all slots are busy the accept loop pauses and new connections wait in the kernel queue. | Latency rises with VUs while `req/s` stays flat (Little's law: the slots are full) |
-| `API_LISTEN_BACKLOG` | `50` | Connections queued for Process 1 while all slots are busy. The kernel caps it at `net.core.somaxconn` (4096 on RHEL 9). | HAProxy shows connect errors / `503` / `504` under bursts |
+| `API_REQUEST_POOL_SIZE` | `0` (= 40) | Requests **one** API Gateway (Process 1) serves at the same time. When all slots are busy the accept loop pauses and new connections wait in the kernel queue. | Latency rises with VUs while `req/s` stays flat (Little's law: the slots are full) |
+| `API_LISTEN_BACKLOG` | `50` | Connections queued for API Gateway (Process 1) while all slots are busy. The kernel caps it at `net.core.somaxconn` (4096 on RHEL 9). | HAProxy shows connect errors / `503` / `504` under bursts |
 | `GT_CONSUMERS_PER_QUEUE` | `1` | Parallel consumers per queue in P2–P5. Each is a greenthread with its **own** RabbitMQ connection. | Queues grow during a step and drain slowly afterwards |
 | `GT_PREFETCH_COUNT` | `1` | Messages in flight per consumer. `1` means a network round trip per message. | Same as above, once consumers are no longer the limit |
 | `HAPROXY_MAXCONN` | `4000` | `global maxconn` of HAProxy: concurrent client connections for the whole process. Once reached, HAProxy stops accepting and new clients wait in the kernel queue. | Peak VUs (or client connections, with `LOAD_KEEPALIVE=true` one per VU) approach this |
 | `HAPROXY_FRONTEND_MAXCONN` | `3000` | `maxconn` per frontend (`defaults` section). It is the lower of the two for the API frontend, so it is the first one you hit. | Peak VUs approach this |
 | `GT_POOL_SIZE` | `1000` | Greenthreads per process; must exceed consumers + helper threads | Only if you raise `GT_CONSUMERS_PER_QUEUE` very far |
-| `ZK_DEDUP_TTL_MS`, `GT_DEDUP_REAP_INTERVAL_S` | `300000`, `600` | How long Process 4 dedup znodes live and how often they are cleaned | `zk_znode_count` keeps climbing (see D) |
+| `ZK_DEDUP_TTL_MS`, `GT_DEDUP_REAP_INTERVAL_S` | `300000`, `600` | How long DB Updater (Process 4) dedup znodes live and how often they are cleaned | `zk_znode_count` keeps climbing (see D) |
 | `SWIFT_ENABLED` | `true` | `false` skips the Swift write so you can measure the MariaDB-only ceiling | To separate Swift from MariaDB (see B) |
 | `LOG_LEVEL` | `INFO` | `INFO` writes at least one line per request and per message to the journal and to `/var/log/flowfirst/` | `WARNING` removes that overhead for the final capacity run |
 
 The load generator has its own `LOAD_*` variables (target, `LOAD_STEPS`, `LOAD_STEP_DURATION_S`, `LOAD_RAMP_S`, `LOAD_FLOW_MIX`, `LOAD_THINK_MS`, `LOAD_TIMEOUT_S`, `LOAD_KEEPALIVE`, `LOAD_SLO_P95_MS`, `LOAD_MAX_ERROR_PCT`, `LOAD_ITEM_ID_BASE`, `LOAD_DRAIN_TIMEOUT_S`, `LOAD_REPORT_INTERVAL_S`, `RABBITMQ_MGMT_PORT`). Each is explained next to its default in `src/config/.env.example`, and each can be overridden on the command line (`python3 scripts/load_test_api.py --help`).
 
-> **What the code implies for scale-out (check it, do not assume it).** Each process wraps its work in a ZooKeeper leader election (`LeaderElection(...).run(callback)`), and kazoo's `Election.run` holds a lock for the whole callback. Read literally, that means **only the elected leader of each of Processes 1–4 does the work**, and the other nodes wait as standbys; Process 5 on node4 has no election. If that is what your cluster does, adding nodes adds failover, not capacity, and the levers are the per-process parameters above. Section A measures which case you have.
+> **What the code implies for scale-out (check it, do not assume it).** Each process wraps its work in a ZooKeeper leader election (`LeaderElection(...).run(callback)`), and kazoo's `Election.run` holds a lock for the whole callback. Read literally, that means **only the elected leader of each of Processes 1–4 does the work**, and the other nodes wait as standbys; Remote Worker (Process 5) on node4 has no election. If that is what your cluster does, adding nodes adds failover, not capacity, and the levers are the per-process parameters above. Section A measures which case you have.
 
 #### A. Pre-flight: limits that cap the test before the application does
 
@@ -7823,16 +7690,16 @@ The load generator has its own `LOAD_*` variables (target, `LOAD_STEPS`, `LOAD_S
 ulimit -n                      # needs to exceed your largest LOAD_STEPS value + ~200; the script raises the soft limit up to the hard limit
 ulimit -n 65536                # or raise it in /etc/security/limits.d/ for a permanent change
 
-# 2. On node1, node2, node3: kernel accept queue (caps API_LISTEN_BACKLOG) and open-file limit of Process 1
+# 2. On node1, node2, node3: kernel accept queue (caps API_LISTEN_BACKLOG) and open-file limit of API Gateway (Process 1)
 sysctl net.core.somaxconn
 sudo cat /proc/$(pgrep -f 'src.application.process1' | head -1)/limits | grep "open files"     # 65536 from the unit file
 
 # 3. Which nodes actually answer API calls right now?
 curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq -c '.pipeline_health | map_values(keys)'
-for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do echo -n "${n}: "; ssh "${n}" "sudo ss -tln | grep -c ':8082 '"; done      # 1 = Process 1 is listening, 0 = not
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do echo -n "${n}: "; ssh "${n}" "sudo ss -tln | grep -c ':8082 '"; done      # 1 = API Gateway (Process 1) is listening, 0 = not
 echo "show stat" | ssh ${NODE1_IP} "sudo socat stdio /var/lib/haproxy/stats" | cut -d, -f1,2,18 | grep flowfirst_api_back   # UP / DOWN per backend (run on the VIP holder)
 
-# 4. MariaDB connection ceiling (Process 4 opens a connection per insert)
+# 4. MariaDB connection ceiling (DB Updater (Process 4) opens a connection per insert)
 mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -e "SHOW VARIABLES LIKE 'max_connections'; SHOW GLOBAL STATUS LIKE 'Max_used_connections';"
 
 # 5. Record the starting point: queues must be empty and the stack healthy
@@ -7840,7 +7707,7 @@ ssh ${NODE1_IP} "sudo rabbitmqctl list_queues name messages messages_unacknowled
 curl -s http://${FLOWFIRST_VIP}:8080/health | jq -r '.status, .node'
 ```
 
-*Expected:* `somaxconn` 4096; Process 1 listening on port 8082 on every node you intend to serve the API (the count in step 3); every `flowfirst_api_back` server `UP`; all queues at 0 messages. If step 3 shows only one node listening and the other two backends `DOWN` in HAProxy, you have the single-leader case described above, and the `served by` line in C will show a single node. Record which case you have; it decides how to read every later result.
+*Expected:* `somaxconn` 4096; API Gateway (Process 1) listening on port 8082 on every node you intend to serve the API (the count in step 3); every `flowfirst_api_back` server `UP`; all queues at 0 messages. If step 3 shows only one node listening and the other two backends `DOWN` in HAProxy, you have the single-leader case described above, and the `served by` line in C will show a single node. Record which case you have; it decides how to read every later result.
 
 The test writes real data. Choose an unused `LOAD_ITEM_ID_BASE` (the default `9000000` is well above the item ids used by the other scenarios), and expect a few hundred thousand rows, objects and ZooKeeper znodes for a full run.
 
@@ -7874,24 +7741,24 @@ The script exits `0` when the last step passed, `1` when a step failed, and `2` 
 
 | Symptom in the step line | Probable bottleneck | Confirm with | Lever |
 |---|---|---|---|
-| `req/s` stops growing while `p50`/`p95` grow in proportion to VUs, no errors | Process 1 request slots full (accept loop paused) | HAProxy `qcur` > 0 on backends, Process 1 near 100 % of one core | `API_REQUEST_POOL_SIZE` |
+| `req/s` stops growing while `p50`/`p95` grow in proportion to VUs, no errors | API Gateway (Process 1) request slots full (accept loop paused) | HAProxy `qcur` > 0 on backends, API Gateway (Process 1) near 100 % of one core | `API_REQUEST_POOL_SIZE` |
 | `errors : timeout`, HAProxy `scur`/`qcur` high, `econ` or `hrsp_5xx` rising | Backlog full or backends saturated | Step D; `ss -ltn` `Recv-Q` on port 8082 | `API_LISTEN_BACKLOG`, `API_REQUEST_POOL_SIZE` |
-| `req/s` flat, latency rising, Process 1 **below** 100 % of a core, RabbitMQ healthy | Process 1 publishes through **one shared channel**, one message at a time (a semaphore around `basic_publish`), and builds each message with `json.dumps(indent=2)` | Compare `req/s` of `POST` mixes with `health:1` (`--mix health:1`, which skips publishing) | No setting changes this; it is a code limit. Report it as the per-node intake ceiling |
+| `req/s` flat, latency rising, API Gateway (Process 1) **below** 100 % of a core, RabbitMQ healthy | API Gateway (Process 1) publishes through **one shared channel**, one message at a time (a semaphore around `basic_publish`), and builds each message with `json.dumps(indent=2)` | Compare `req/s` of `POST` mixes with `health:1` (`--mix health:1`, which skips publishing) | No setting changes this; it is a code limit. Report it as the per-node intake ceiling |
 | `errors : reset` or `refused` at a round VU count (about 2000, 3000) | HAProxy `maxconn` reached | HAProxy `scur` equal to `slim`, `Connection refused` from the VIP | `HAPROXY_MAXCONN`, `HAPROXY_FRONTEND_MAXCONN` |
 | `http_503` | No backend available, or HAProxy queue timeout | HAProxy log `<NOSRV>` or `sQ` flags (Scenario 48) | Fix the down backend; see the two rows above |
-| `http_500` | Publish failed inside Process 1 | `grep " ERROR " /var/log/flowfirst/process1.log` | Usually RabbitMQ; see Scenario 46 |
-| `served by:` lists one node although three are `UP` | Not a bug in the test: only one Process 1 receives traffic | Step A.3 | See the note on leader election above |
+| `http_500` | Publish failed inside API Gateway (Process 1) | `grep " ERROR " /var/log/flowfirst/api_gateway.log` | Usually RabbitMQ; see Scenario 46 |
+| `served by:` lists one node although three are `UP` | Not a bug in the test: only one API Gateway (Process 1) receives traffic | Step A.3 | See the note on leader election above |
 | All HTTP 200, **queue max keeps growing**, drain takes minutes | Completion capacity lower than intake | Step D (queues), then E (drain time) | `GT_CONSUMERS_PER_QUEUE`, `GT_PREFETCH_COUNT` |
-| Queue grows only in `flow1_p3_to_p4` / `flow2_p3_reflected` / `flow3_p2_to_p4` | Process 4: MariaDB or Swift | Step D; repeat with `SWIFT_ENABLED=false` | Consumers for Process 4; see below |
+| Queue grows only in `flow1_p3_to_p4` / `flow2_p3_reflected` / `flow3_p2_to_p4` | DB Updater (Process 4): MariaDB or Swift | Step D; repeat with `SWIFT_ENABLED=false` | Consumers for DB Updater (Process 4); see below |
 | `LOAD GENERATOR SATURATED` | Client host | `top` on the client | More client hosts |
 
 With [Monitoring and Alerting](#monitoring-and-alerting) enabled, `FlowFirstQueueBacklog`, `FlowFirstQueueNoConsumers` and `FlowFirstApi5xxRate` raise the same symptoms outside a load test; the levers below are the same.
 
-To tell MariaDB from Swift as the Process 4 limit, run the same step twice: once normally and once after setting `SWIFT_ENABLED=false` on node1–node3 and restarting Process 4 (restart as in C). Process 4 does a ZooKeeper write, a MariaDB insert on a new connection, and, with Swift enabled, a container check plus an object upload through a fresh Swift connection for every message, so Swift is a likely cost. Set it back to `true` afterwards; with it off nothing is written to Swift.
+To tell MariaDB from Swift as the DB Updater (Process 4) limit, run the same step twice: once normally and once after setting `SWIFT_ENABLED=false` on node1–node3 and restarting DB Updater (Process 4) (restart as in C). DB Updater (Process 4) does a ZooKeeper write, a MariaDB insert on a new connection, and, with Swift enabled, a container check plus an object upload through a fresh Swift connection for every message, so Swift is a likely cost. Set it back to `true` afterwards; with it off nothing is written to Swift.
 
 #### C. Apply a tuning change and re-run
 
-Change parameters on **every** node (node4 too, for Process 5), restart, and repeat B. The helper below replaces an existing `KEY=` line or appends the key when it is missing, so running it twice does not create duplicates. Run it from any of node1–node4 with passwordless `ssh` and `sudo`:
+Change parameters on **every** node (node4 too, for Remote Worker (Process 5)), restart, and repeat B. The helper below replaces an existing `KEY=` line or appends the key when it is missing, so running it twice does not create duplicates. Run it from any of node1–node4 with passwordless `ssh` and `sudo`:
 
 ```bash
 setenv() {   # usage: setenv KEY VALUE   — applies to all four nodes
@@ -7922,7 +7789,7 @@ Confirm the new values took effect before the next run: `journalctl -u flowfirst
 Know what each lever costs:
 
 - **`GT_CONSUMERS_PER_QUEUE` > 1** lets several consumers read the same queue, so messages of one queue may finish **out of order**. Nothing in this pipeline depends on order across items; check that this holds for your use before raising it.
-- **`GT_PREFETCH_COUNT` > 1** means that after a consumer crash up to that many unacknowledged messages are redelivered. Process 4 is protected by the ZooKeeper dedup barrier; Processes 2, 3 and 5 are not, so a crash can produce a duplicate downstream message (Process 4 still stores each `message_id` once).
+- **`GT_PREFETCH_COUNT` > 1** means that after a consumer crash up to that many unacknowledged messages are redelivered. DB Updater (Process 4) is protected by the ZooKeeper dedup barrier; Processes 2, 3 and 5 are not, so a crash can produce a duplicate downstream message (DB Updater (Process 4) still stores each `message_id` once).
 - **One process is one CPU core.** Eventlet runs all greenthreads of a process on a single OS thread. If `top` shows a pipeline process at 100 % of one core, more consumers or request slots will not help.
 - **Failures lose messages unless the dead-letter policy is applied.** Consumers reject failed messages with `requeue=False`; without the `flowfirst-dlx` policy ([Message Safety](#message-safety-publisher-confirms-and-the-dead-letter-queue)) RabbitMQ then discards them. With it they wait in `flowfirst_dead_letters`. Under overload the difference between the `200` count and the MariaDB row count (step E) is the number of messages lost or dead-lettered; check the dead-letter queue before calling them lost.
 
@@ -7946,19 +7813,19 @@ watch -n 6 "pidstat -u -l 5 1 | grep -E 'Average:.*(src.application|beam.smp|mar
 # MariaDB / Galera: connections and replication back-pressure
 mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" -e "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Max_used_connections','wsrep_flow_control_paused','wsrep_local_recv_queue_avg');"
 
-# ZooKeeper: Process 4 creates one dedup znode per message, kept for ZK_DEDUP_TTL_MS
+# ZooKeeper: DB Updater (Process 4) creates one dedup znode per message, kept for ZK_DEDUP_TTL_MS
 echo mntr | nc ${NODE1_IP} 2181 | grep -E "zk_znode_count|zk_outstanding_requests|zk_avg_latency"
 
-# Process 1 request log rate (journal) and errors (file; see Scenarios 59 and 60)
+# API Gateway (Process 1) request log rate (journal) and errors (file; see Scenarios 59 and 60)
 sudo grep -c " ERROR " /var/log/flowfirst/process*.log
 ```
 
 How to read them:
 
-- **HAProxy `scur` approaching `slim`**: you are at the `maxconn` limit. **`qcur` > 0 on a backend**: Process 1 cannot take requests as fast as HAProxy sends them.
+- **HAProxy `scur` approaching `slim`**: you are at the `maxconn` limit. **`qcur` > 0 on a backend**: API Gateway (Process 1) cannot take requests as fast as HAProxy sends them.
 - **A RabbitMQ queue that keeps rising** while the other queues are near zero names the slow stage; the queue *before* a stage is that stage's input.
-- **`wsrep_flow_control_paused` well above 0** (fraction of time replication was throttled) means Galera, not Process 4, is the limit: one slow node holds back all writers.
-- **`Max_used_connections` close to `max_connections`** will start refusing Process 4 inserts, which then appear as `[Flow N] Error` lines and lost messages.
+- **`wsrep_flow_control_paused` well above 0** (fraction of time replication was throttled) means Galera, not DB Updater (Process 4), is the limit: one slow node holds back all writers.
+- **`Max_used_connections` close to `max_connections`** will start refusing DB Updater (Process 4) inserts, which then appear as `[Flow N] Error` lines and lost messages.
 - **`zk_znode_count`** grows by one per stored message and falls only when the reaper runs (`GT_DEDUP_REAP_INTERVAL_S`, default every 10 minutes, removing znodes older than `ZK_DEDUP_TTL_MS`, default 5 minutes). At several hundred messages per second this reaches hundreds of thousands of znodes; the reaper deletes them one by one and a very large child list is expensive in ZooKeeper. If the count keeps climbing, lower `GT_DEDUP_REAP_INTERVAL_S` (for example to `60`) and keep `ZK_DEDUP_TTL_MS` longer than the longest redelivery window you need.
 
 #### E. After the run: drain time and an end-to-end check
@@ -7973,9 +7840,9 @@ mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB
   WHERE item_id BETWEEN 9000001 AND <last item_id printed by the script> GROUP BY flow_id;"
 ```
 
-*Expected:* `stored` for each flow equals the `2xx` count printed for that flow. If `stored` is **lower**, messages were lost between the API and MariaDB: look for `ERROR` lines in the process logs, and for the reason in `/var/log/flowfirst/process4.log`. If it is slightly **higher**, some requests timed out on the client but were still accepted by Process 1. Duplicates do not occur, because `message_id` is unique.
+*Expected:* `stored` for each flow equals the `2xx` count printed for that flow. If `stored` is **lower**, messages were lost between the API and MariaDB: look for `ERROR` lines in the process logs, and for the reason in `/var/log/flowfirst/process4.log`. If it is slightly **higher**, some requests timed out on the client but were still accepted by API Gateway (Process 1). Duplicates do not occur, because `message_id` is unique.
 
-Cross-check Swift the same way as in Scenario 50 D (object count against row count). Under overload Swift writes can fail without failing the message: Process 4 logs `Swift store note` as a warning and still stores the row in MariaDB, so a Swift shortfall does not show up in the MariaDB count. Back-fill it with Scenario 58.
+Cross-check Swift the same way as in Scenario 50 D (object count against row count). Under overload Swift writes can fail without failing the message: DB Updater (Process 4) logs `Swift store note` as a warning and still stores the row in MariaDB, so a Swift shortfall does not show up in the MariaDB count. Back-fill it with Scenario 58.
 
 #### F. Choosing a result to report
 
@@ -7983,7 +7850,7 @@ Do not report the last step that happened to run. Report, for the configuration 
 
 1. The **highest passing concurrency** and the **peak passing throughput** printed in the summary (intake).
 2. The **drain time** and implied completion rate (end-to-end).
-3. The **limiting resource** from the table in B (for example "Process 4 at 100 % of one core" or "HAProxy `maxconn`").
+3. The **limiting resource** from the table in B (for example "DB Updater (Process 4) at 100 % of one core" or "HAProxy `maxconn`").
 4. The **parameter values** used (copy the `LOAD_*` and scale lines from `.env`) and the `--csv` file.
 5. Whether the **`stored` count matched the `2xx` count**. A run that loses messages has not passed, whatever the HTTP numbers say.
 
@@ -8105,7 +7972,7 @@ Compare the achieved rate with the expected rate from the table. If `typical` sh
 
 #### D. Freshness: seconds from API call to a stored record
 
-The first entry of `history_trail` is stamped by Process 1 when the request arrives (`process1_created`); `created_at` is set by MariaDB when Process 4 inserts the row. Their difference is the end-to-end latency, using only data that is already stored. Run it after the queues are empty, for each run:
+The first entry of `history_trail` is stamped by API Gateway (Process 1) when the request arrives (`process1_created`); `created_at` is set by MariaDB when DB Updater (Process 4) inserts the row. Their difference is the end-to-end latency, using only data that is already stored. Run it after the queues are empty, for each run:
 
 ```bash
 perf_fresh() {   # usage: perf_fresh <perf_*.log>  — freshness in seconds per flow, for the item_id range of that run
@@ -8128,7 +7995,7 @@ Read it with these limits in mind:
 
 - **Resolution is one second, with up to ±1 s error.** Both timestamps are truncated to whole seconds (`time.strftime`, and `created_at` is a plain `TIMESTAMP`). Quote freshness in whole seconds and never claim sub-second accuracy.
 - **`negative` must be 0.** A negative value means clock skew between the node that stamped the message and the node that inserted it (check `chronyc`), or a MariaDB `time_zone` that differs from the nodes' operating-system time zone (`SELECT @@global.time_zone, @@system_time_zone;`). Do not report freshness until this is resolved.
-- It covers the whole path: RabbitMQ hops, Processes 2–4, the ZooKeeper dedup write and the MariaDB insert. It does **not** include the Swift upload, because the row is inserted before Process 4 writes to Swift. Use Scenario 50 D to confirm Swift keeps up.
+- It covers the whole path: RabbitMQ hops, Processes 2–4, the ZooKeeper dedup write and the MariaDB insert. It does **not** include the Swift upload, because the row is inserted before DB Updater (Process 4) writes to Swift. Use Scenario 50 D to confirm Swift keeps up.
 - Per-stage timings are in `history_trail` too (`process2_*`, `process3_*`, `process4_saved_to_mariadb`), with the same one-second resolution. They are useful for finding which stage grew when freshness is poor, not for measuring it.
 
 #### E. Resource use on every node
@@ -8165,7 +8032,7 @@ perf_sample_collect typical1            # after the run and the drain
 How to read it:
 
 - A process at an average near **100 % of one core** has no headroom: eventlet runs all greenthreads of a process on one core, so more users will only add latency. Compare the profile you are quoting with that figure. A reasonable (but arbitrary) convention is to want the `typical` profile well under 70 % average on the busiest pipeline process; your own policy decides.
-- Remember the leader-election note in Scenario 61: if only one node's Process 1 and Process 4 work, the other nodes will show idle pipeline processes, and the headroom of that one node is the headroom of the system. If that node fails, the new leader inherits the whole load, so judge headroom with that in mind (see G).
+- Remember the leader-election note in Scenario 61: if only one node's API Gateway (Process 1) and DB Updater (Process 4) work, the other nodes will show idle pipeline processes, and the headroom of that one node is the headroom of the system. If that node fails, the new leader inherits the whole load, so judge headroom with that in mind (see G).
 - `RSS_kB_1st` against `RSS_kB_end` shows memory growth during the run; a short run cannot prove there is no leak, see F.
 - `sar` files: read system CPU (`%idle`, `%iowait`), memory (`%memused`), network (`rxkB/s`, `txkB/s`) and disk (`%util`) per node with `less`. A disk at `%util` near 100 or an `%iowait` that stays high points at MariaDB, RabbitMQ or Swift storage. These `pidstat` and `sar` commands and the `ssh` wrappers were not exercised on a real node; the summary `awk` was run on sample `pidstat` text only. Check the first run's raw files before trusting the summary.
 
@@ -8262,7 +8129,7 @@ Add a second table for the soak result (memory, queue and latency trend, log siz
 #### I. What these results do not tell you
 
 - **Closed-loop users.** Each simulated user waits for an answer before sending the next call. When the system slows down, the offered load drops with it, which makes overload look milder than it would be for independent clients arriving at a fixed rate. If the client's traffic arrives regardless of response time, treat the `peak` figures as optimistic and keep a safety margin. An open-loop (fixed-arrival-rate) mode is not implemented.
-- **Synthetic requests.** Payloads are tiny and generated from a pattern. Larger payloads change Process 1, RabbitMQ, MariaDB and Swift costs.
+- **Synthetic requests.** Payloads are tiny and generated from a pattern. Larger payloads change API Gateway (Process 1), RabbitMQ, MariaDB and Swift costs.
 - **Timestamp resolution** is one second (section D), so freshness cannot resolve sub-second behaviour.
 - **One environment.** Hardware, virtualisation, neighbours and network all change the figures. Use the numbers only for the environment in `perf_conditions.txt`.
 - **API acceptance is not completion.** The `200` response times in the first rows of the table are real, but a client who needs the stored record has to wait for the freshness figure.
@@ -8292,248 +8159,29 @@ TLS is **off by default** (every `TLS_*_ENABLED` is `false`), so an existing dep
 
 #### Certificate lifecycle and runtime usage
 
-The diagram below shows the complete SSL/TLS certificate lifecycle — how certificates are **created** on the admin host, **distributed** to each cluster node, **used at runtime** by every process and service, and **maintained** over time (CRL refresh and revocation).
+> 📐 **[View diagram: SSL Certificate Creation, Distribution and Runtime Usage](docs/diagrams.md#4-ssl-certificate-creation-distribution-and-runtime-usage)**
 
-**SSL certificate creation, distribution and runtime usage**
+The diagram covers four stages: ① Create (admin/CA host), ② Distribute (SSH+sudo to each node), ③ Runtime (which cert each component presents), ④ Maintain (CRL refresh, revocation, expiry checks).
 
-```mermaid
-flowchart TD
-    %% ── Stage 1: Creation ───────────────────────────────────────────
-    subgraph CREATE ["① Create — Admin / CA host (pki/ stays here, never on nodes)"]
-        direction TB
-        CA_INIT["<b>security/init_ca.sh</b>
-RSA-4096 root CA
-pki/ca/ca.key  (AES-256 encrypted)
-pki/ca/ca.crt  (public)
-pki/ca/ca.crl  (empty CRL)"]
-
-        ISSUE_VIP["<b>flowfirst-vip</b>  [server]
-Subject Alt Names: VIP IP, flowfirst.local
-Used by: HAProxy HTTPS/Swift/MariaDB-LB/RabbitMQ-LB frontend"]
-        ISSUE_API["<b>nodeN-api</b>  [server]  ×3
-Subject Alt Names: node IP, hostname
-Used by: Process 1 HTTPS listener on each node"]
-        ISSUE_RMQ["<b>nodeN-rabbitmq</b>  [peer]  ×3
-SANs: node IP + VIP IP/DNS
-Used by: RabbitMQ broker TLS + inter-node clustering"]
-        ISSUE_MDB["<b>nodeN-mariadb</b>  [peer]  ×3
-SANs: node IP + VIP IP/DNS
-Used by: MariaDB/Galera client TLS + replication"]
-        ISSUE_ZK["<b>nodeN-zookeeper</b>  [peer]  ×3
-SANs: node IP, hostname
-Used by: ZooKeeper TLS clients + quorum"]
-        ISSUE_SW["<b>nodeN-swift</b>  [server]  ×3
-SANs: node IP, hostname
-Used by: Swift proxy server"]
-        ISSUE_PIPE["<b>nodeN-pipeline</b>  [client]  ×3
-Used by: Processes 1–4 client identity on each node
-Also used by: HAProxy towards Process 1 backends"]
-        ISSUE_N4["<b>node4-pipeline</b>  [client]
-Used by: Process 5 client identity (remote node4)"]
-        ISSUE_ADM["<b>admin-client</b>  [client]
-Used by: operators / curl for mTLS REST API access"]
-
-        CA_INIT -->|"security/issue_all.sh"| ISSUE_VIP
-        CA_INIT -->|"security/issue_all.sh"| ISSUE_API
-        CA_INIT -->|"security/issue_all.sh"| ISSUE_RMQ
-        CA_INIT -->|"security/issue_all.sh"| ISSUE_MDB
-        CA_INIT -->|"security/issue_all.sh"| ISSUE_ZK
-        CA_INIT -->|"security/issue_all.sh"| ISSUE_SW
-        CA_INIT -->|"security/issue_all.sh"| ISSUE_PIPE
-        CA_INIT -->|"security/issue_all.sh"| ISSUE_N4
-        CA_INIT -->|"security/issue_all.sh"| ISSUE_ADM
-    end
-
-    %% ── Stage 2: Distribution ────────────────────────────────────────
-    subgraph DIST ["② Distribute — security/install_certs.sh (SSH+sudo → /etc/flowfirst/tls/)"]
-        direction LR
-        N1["<b>Node 1</b>
-ca.crt  ca.crl
-api/api.{crt,key}
-pipeline/pipeline.{crt,key}
-haproxy/vip.pem  backend.pem
-rabbitmq/rabbitmq.{crt,key}
-mariadb/mariadb.{crt,key}
-zookeeper/zookeeper.{crt,key}
-swift/swift.{crt,key}"]
-        N2["<b>Node 2</b>
-(same set, node2 leaf certs)"]
-        N3["<b>Node 3</b>
-(same set, node3 leaf certs)"]
-        N4["<b>Node 4</b>
-ca.crt  ca.crl
-pipeline/pipeline.{crt,key}"]
-    end
-
-    CREATE -->|"SSH + sudo copy"| DIST
-
-    %% ── Stage 3: Runtime usage ───────────────────────────────────────
-    subgraph RUNTIME ["③ Runtime — TLS connections in a live cluster"]
-        direction TB
-        subgraph EXT ["External access"]
-            CURL(["curl / API client
-admin-client.crt  →  HAProxy :8080
-← verifies flowfirst-vip"])
-        end
-        subgraph API_TIER ["API tier  (nodes 1–3)"]
-            HA(["HAProxy :8080
-presents vip.pem  (server)
-presents backend.pem  (client → P1)
-verifies ca.crt + ca.crl"])
-            P1(["Process 1 :8082
-presents nodeN-api.crt  (server)
-verifies pipeline client cert
-src/tls/tls.py → server_context()"])
-        end
-        subgraph PIPELINE ["Pipeline processes  (nodes 1–3)"]
-            P24(["Processes 2–4
-presents nodeN-pipeline.crt (client)
-tls.py → client_context()"])
-            P5(["Process 5  (node4)
-presents node4-pipeline.crt (client)
-tls.py → client_context()"])
-        end
-        subgraph INFRA ["Infrastructure  (nodes 1–3)"]
-            RMQ(["RabbitMQ :5671
-nodeN-rabbitmq.crt (server)
-peer certs for inter-node"])
-            MDB(["MariaDB :3306
-nodeN-mariadb.crt (server/peer)
-Galera wsrep replication"])
-            ZK(["ZooKeeper :2281
-nodeN-zookeeper.crt (server/peer)
-leader election + dedup"])
-            SW(["Swift :8888/8090
-nodeN-swift.crt (server)
-via HAProxy pass-through"])
-        end
-
-        CURL -- "mTLS :8080" --> HA
-        HA -- "mTLS :8082\nbackend.pem" --> P1
-        P1 -- "pipeline.crt" --> RMQ
-        P1 -- "pipeline.crt" --> MDB
-        P1 -- "pipeline.crt" --> ZK
-        P24 -- "pipeline.crt" --> RMQ
-        P24 -- "pipeline.crt" --> MDB
-        P24 -- "pipeline.crt" --> ZK
-        P24 -- "pipeline.crt" --> SW
-        P5 -- "pipeline.crt" --> RMQ
-        P5 -- "pipeline.crt" --> ZK
-    end
-
-    DIST --> RUNTIME
-
-    %% ── Stage 4: Maintenance ─────────────────────────────────────────
-    subgraph MAINT ["④ Maintain — ongoing certificate operations"]
-        direction TB
-        CRL_R["<b>security/refresh_crl.sh</b>  (weekly cron)
-Re-signs CRL before nextUpdate expires
-Run install_certs.sh --crl-only after"]
-        REVOKE["<b>security/revoke_cert.sh NAME</b>
-Marks cert revoked → regenerates CRL
-Run install_certs.sh --crl-only after"]
-        LIST["<b>security/list_certs.sh</b>
-Prints days-to-expiry for every issued cert
-Run from cron to alert before expiry"]
-        VERIFY["<b>security/verify_tls.sh</b>
-Probes every TLS endpoint
-Prints PASS / FAIL per component"]
-        PREFLIGHT["<b>scripts/preflight_check.py</b>
-Per-node check: CRL days left, cert paths,
-TLS switches, secret strength"]
-    end
-
-    RUNTIME -.->|"cert expired / revoked"| MAINT
-    MAINT -.->|"install_certs.sh re-pushes CRL"| DIST
-```
-
-The following two diagrams give the same information split into two focused views: the left-to-right PKI lifecycle on the admin host, and the runtime certificate map across all connections.
+The following two diagrams give the same information split into focused views.
 
 **PKI lifecycle — creation, distribution and renewal**
 
-```mermaid
-flowchart TD
-    subgraph ADMIN ["Admin / CA host  (pki/ kept here, never on nodes)"]
-        direction TB
-        INIT["<b>security/init_ca.sh</b>\nGenerate RSA-4096 root CA\n(ca.key encrypted AES-256, ca.crt public)\nca.crl created at the same time"]
-        ISSUE["<b>security/issue_all.sh</b>\nIssues 21 leaf certs under pki/issued/\n• flowfirst-vip  (server)\n• node1-3: -api -rabbitmq -mariadb\n  -zookeeper -swift (server/peer)\n  -pipeline (client)\n• node4-pipeline (client)\n• admin-client (client)"]
-        INSTALL["<b>security/install_certs.sh</b>\nSSH+sudo: copies only the files\neach node needs into /etc/flowfirst/tls/"]
-        REFRESH["<b>security/refresh_crl.sh</b>\n(weekly cron) re-sign the CRL\nbefore nextUpdate expires"]
-        REVOKE["<b>security/revoke_cert.sh NAME</b>\nMark cert revoked → regen CRL\nThen re-run install_certs.sh --crl-only"]
-        INIT --> ISSUE
-        ISSUE --> INSTALL
-        REFRESH -->|"install_certs.sh --crl-only"| INSTALL
-        REVOKE -->|"install_certs.sh --crl-only"| INSTALL
-    end
-
-    subgraph NODES ["Cluster nodes (node1 – node3)  /etc/flowfirst/tls/"]
-        direction TB
-        SHARED["ca.crt  ca.crl  (all nodes, root:root 644)"]
-        API_F["api/api.{crt,key}  → Process 1 HTTPS listener  (flowuser)"]
-        PIPE_F["pipeline/pipeline.{crt,key}  → client identity for all processes  (flowuser)"]
-        HA_F["haproxy/vip.pem (VIP server cert)\nhaproxy/backend.pem (= pipeline cert)\n→ HAProxy identity  (haproxy)"]
-        RMQ_F["rabbitmq/rabbitmq.{crt,key}  (rabbitmq)"]
-        MDB_F["mariadb/mariadb.{crt,key}  (mysql)"]
-        ZK_F["zookeeper/zookeeper.{crt,key}  (zookeeper)"]
-        SW_F["swift/swift.{crt,key}  (swift)"]
-    end
-
-    subgraph NODE4 ["Node 4  /etc/flowfirst/tls/"]
-        N4_SHARED["ca.crt  ca.crl"]
-        N4_PIPE["pipeline/pipeline.{crt,key}  → Process 5 client identity"]
-    end
-
-    INSTALL -->|"node1-3"| NODES
-    INSTALL -->|"node4"| NODE4
-```
+> 📐 **[View diagram: PKI Lifecycle](docs/diagrams.md#5-pki-lifecycle--creation-distribution-and-renewal)**
 
 **Runtime TLS connections — who presents which certificate**
 
-```mermaid
-flowchart LR
-    CLIENT(["External client\nadmin-client.crt"])
-    HA(["HAProxy  :8080\nvip.pem server\nbackend.pem client"])
-    P1(["Process 1  :8082\napi.crt server"])
-    P25(["Processes 2–4\npipeline.crt client"])
-    P5(["Process 5 (node4)\npipeline.crt client"])
-    RMQ(["RabbitMQ  :5671\nrabbitmq.crt server"])
-    MDB(["MariaDB  :3306/3307\nmariadb.crt server"])
-    ZK(["ZooKeeper  :2281\nzookeeper.crt server"])
-    SW(["Swift proxy  :8888/8090\nswift.crt server"])
-    CA(["FlowFirst Root CA\n(ca.crt on every node)"])
+> 📐 **[View diagram: Runtime TLS Connections](docs/diagrams.md#6-runtime-tls-connections--who-presents-which-certificate)**
 
-    CA -.->|"trust anchor"| CLIENT
-    CA -.->|"trust anchor"| HA
-    CA -.->|"trust anchor"| P1
-    CA -.->|"trust anchor"| P25
-    CA -.->|"trust anchor"| P5
-
-    CLIENT -- "mTLS  8080\nX-SSL-Client-CN→header" --> HA
-    HA -- "mTLS  8082\nbackend.pem client" --> P1
-    P1 -- "mTLS pipeline.crt" --> RMQ
-    P1 -- "mTLS pipeline.crt" --> MDB
-    P1 -- "mTLS pipeline.crt" --> ZK
-    P25 -- "mTLS pipeline.crt" --> RMQ
-    P25 -- "mTLS pipeline.crt" --> MDB
-    P25 -- "mTLS pipeline.crt" --> ZK
-    P25 -- "mTLS pipeline.crt" --> SW
-    P5 -- "mTLS pipeline.crt" --> RMQ
-    P5 -- "mTLS pipeline.crt" --> ZK
-
-    RMQ -. "peer certs (optional\n--inter-node)" .- RMQ
-    MDB -. "peer certs (optional\n--galera)" .- MDB
-    ZK -. "peer certs (optional\n--quorum)" .- ZK
-```
-
-> **CRL enforcement:** when `TLS_CRL_FILE` is set, HAProxy (`crl-file`), Process 1, and the Python client contexts ([`src/tls/tls.py`](src/tls/tls.py)) each load `ca.crl` at start and reject any certificate whose serial appears in it. RabbitMQ and ZooKeeper do not enforce the CRL. MariaDB enforces it only with `ssl_crl` set in `my.cnf`. A CRL past its `nextUpdate` causes every component to refuse **all** certificates — run `refresh_crl.sh` weekly before that date.
+> **CRL enforcement:** when `TLS_CRL_FILE` is set, HAProxy (`crl-file`), API Gateway (Process 1), and the Python client contexts ([`src/tls/tls.py`](src/tls/tls.py)) each load `ca.crl` at start and reject any certificate whose serial appears in it. RabbitMQ and ZooKeeper do not enforce the CRL. MariaDB enforces it only with `ssl_crl` set in `my.cnf`. A CRL past its `nextUpdate` causes every component to refuse **all** certificates — run `refresh_crl.sh` weekly before that date.
 
 #### A. What gets encrypted, and who must present a certificate
 
 | Link | Port | Server certificate | Client must present | Enforced by |
 |---|---|---|---|---|
 | External client → REST API (VIP) | 8080 (HTTPS) | `flowfirst-vip` on HAProxy | **Yes** — a certificate from the FlowFirst CA (mutual TLS) | HAProxy `verify required` |
-| HAProxy → Process 1 | 8082 (HTTPS) | `<node>-api` | `<node>-pipeline` (HAProxy's own identity) | Process 1 `CERT_REQUIRED` |
-| Processes 1–4 and node4's Process 5 → RabbitMQ | 5671 (AMQPS) | `<node>-rabbitmq` | `pipeline` identity | RabbitMQ `fail_if_no_peer_cert` |
+| HAProxy → API Gateway (Process 1) | 8082 (HTTPS) | `<node>-api` | `<node>-pipeline` (HAProxy's own identity) | API Gateway (Process 1) `CERT_REQUIRED` |
+| Processes 1–4 and node4's Remote Worker (Process 5) → RabbitMQ | 5671 (AMQPS) | `<node>-rabbitmq` | `pipeline` identity | RabbitMQ `fail_if_no_peer_cert` |
 | Processes → MariaDB (through the VIP/HAProxy TCP pass-through) | 3306 / 3307 | `<node>-mariadb` | `pipeline` identity if `--require-client-cert` was run | MariaDB `REQUIRE X509` |
 | Processes → ZooKeeper | 2281 (secure client port) | `<node>-zookeeper` | `pipeline` identity | ZooKeeper `clientAuth=need` |
 | Processes → Swift (via HAProxy) | 8090 → 8888 | `flowfirst-vip`, `<node>-swift` | `pipeline` identity **at HAProxy only** | HAProxy (see limit L-3) |
@@ -8604,9 +8252,9 @@ All values are literals, as always. The two per-node values (`NODE_NAME`, `CURRE
 
 ```ini
 TLS_DIR=/etc/flowfirst/tls
-TLS_CRL_FILE=/etc/flowfirst/tls/ca.crl     # blank = no revocation check in HAProxy / Process 1 / Python clients
+TLS_CRL_FILE=/etc/flowfirst/tls/ca.crl     # blank = no revocation check in HAProxy / API Gateway (Process 1) / Python clients
 TLS_MIN_VERSION=1.2                        # or 1.3
-TLS_API_ENABLED=true                       # Process 1 serves HTTPS; HAProxy fronts it with mutual TLS
+TLS_API_ENABLED=true                       # API Gateway (Process 1) serves HTTPS; HAProxy fronts it with mutual TLS
 TLS_API_CLIENT_AUTH=required               # required | optional | none
 TLS_RABBITMQ_ENABLED=true                  # connect to 5671
 TLS_MARIADB_ENABLED=true
@@ -8628,7 +8276,7 @@ Every step keeps the plain-text listeners on until the encrypted path is proven,
 | 4 | node1–3 | `sudo ./security/enable_mariadb_tls.sh`, one node at a time | delete `zz-flowfirst-tls.cnf`, restart |
 | 5 | node1–3 | `sudo ./security/enable_swift_tls.sh` | remove the `cert_file`/`key_file` lines from `[DEFAULT]` |
 | 6 | node1–4 | set `TLS_RABBITMQ_ENABLED`, `TLS_ZK_ENABLED`, `TLS_MARIADB_ENABLED`, `TLS_SWIFT_ENABLED` to `true` in `.env` (one switch at a time) and restart the processes | set back to `false` |
-| 7 | node1–3 | `TLS_API_ENABLED=true`, restart Process 1 (Pacemaker), then `sudo ./haproxy/setup_haproxy.sh` | set back to `false` and re-run the setup script |
+| 7 | node1–3 | `TLS_API_ENABLED=true`, restart API Gateway (Process 1) (Pacemaker), then `sudo ./haproxy/setup_haproxy.sh` | set back to `false` and re-run the setup script |
 | 8 | one node | `sudo ./security/enable_mariadb_tls.sh --require-client-cert` (replicates to the others) | `ALTER USER … REQUIRE NONE` |
 | 9 | node1–3 | optional hardening: `--disable-plain` on the RabbitMQ and ZooKeeper scripts | re-run without the flag |
 
@@ -8656,11 +8304,11 @@ Rules:
 
 - The certificate must be signed by the FlowFirst CA and still valid, and `--cacert` must be the FlowFirst `ca.crt`. There is deliberately no "insecure" option anywhere in the project.
 - The server name in the URL must be one the VIP certificate lists: the VIP IP, `flowfirst.local` (or your `PKI_VIP_DNS`), or `localhost`. For a DNS name add it to `/etc/hosts` or your DNS.
-- HAProxy sets the `X-SSL-Client-CN` header from the verified certificate and overwrites any value the client sent. Process 1 can therefore use it as "who called". This was tested and a spoofed header was replaced.
+- HAProxy sets the `X-SSL-Client-CN` header from the verified certificate and overwrites any value the client sent. API Gateway (Process 1) can therefore use it as "who called". This was tested and a spoofed header was replaced.
 - A refused connection shows up as `curl: (35)` or `(56)` (no or bad certificate), `(60)` (server not trusted or wrong name) or `(7)` (port closed). Exact codes vary with the curl and OpenSSL versions; read the message text, and confirm with `openssl s_client`.
 - Test scripts: `scripts/test_flows_and_inspect_db.sh` and `scripts/load_test_api.py` use the node's `pipeline` certificate by default; from an admin host set `TLS_CA_FILE`, `TLS_CLIENT_CERT` and `TLS_CLIENT_KEY` (or `LOAD_CACERT`, `LOAD_CERT`, `LOAD_KEY`) to the admin files.
 
-#### H. Remote node4 (Process 5)
+#### H. Remote node4 (Remote Worker (Process 5))
 
 Node4 is outside the Pacemaker cluster and only **connects out**, so it gets one identity: `node4-pipeline`, installed as `pipeline/pipeline.{crt,key}` plus `ca.crt` and `ca.crl`. `install_certs.sh --node 4` does exactly that; no server key ever reaches node4.
 
@@ -8689,7 +8337,7 @@ Who actually honours the CRL (`TLS_CRL_FILE`):
 | Component | Honours `ca.crl`? | Evidence |
 |---|---|---|
 | HAProxy (API, Swift frontends) | Yes | tested: a revoked client certificate was refused |
-| Process 1 HTTPS listener | Yes | tested: a revoked client certificate was refused |
+| API Gateway (Process 1) HTTPS listener | Yes | tested: a revoked client certificate was refused |
 | RabbitMQ | **No** | tested: a revoked certificate still connected |
 | MariaDB | **Yes**, when `TLS_CRL_FILE` is set (`ssl_crl`) | tested on a MariaDB 11.8 container: a revoked client certificate was refused (`certificate revoked`); without `ssl_crl` it connected. The server reads the file at start or on `FLUSH SSL` |
 | ZooKeeper | **No** (not read by its TLS settings) | documented, not tested |
@@ -8732,9 +8380,9 @@ openssl x509 -in /etc/flowfirst/tls/pipeline/pipeline.crt -noout -subject -endda
 
 With TLS on, `tcpdump` captures show encrypted payloads (see the `tcpdump` section above): handshakes and byte counts only. That is the expected result.
 
-#### K000. Publish confirms and Process 1 publish connections
+#### K000. Publish confirms and API Gateway (Process 1) publish connections
 
-Process 1 answers `200` only after RabbitMQ has confirmed that it holds the message (publisher confirms, `mandatory=True`). A confirm costs one broker round trip per publish, so a single connection limits throughput. Process 1 therefore keeps `API_PUBLISH_CONNECTIONS` (default 4, range 1 to 32) connections, each with its own channel and lock, and spreads requests over them round-robin. Each connection reconnects and re-enables confirms by itself after a broker restart.
+API Gateway (Process 1) answers `200` only after RabbitMQ has confirmed that it holds the message (publisher confirms, `mandatory=True`). A confirm costs one broker round trip per publish, so a single connection limits throughput. API Gateway (Process 1) therefore keeps `API_PUBLISH_CONNECTIONS` (default 4, range 1 to 32) connections, each with its own channel and lock, and spreads requests over them round-robin. Each connection reconnects and re-enables confirms by itself after a broker restart.
 
 Measured on **one RabbitMQ container, a 2-vCPU VM, 100 concurrent callers, a single run per row**. These are illustrative, not a cluster result and not a sizing guarantee; repeat with `scripts/load_test_api.py` on the real cluster (Scenario 61):
 
@@ -8746,11 +8394,11 @@ Measured on **one RabbitMQ container, a 2-vCPU VM, 100 concurrent callers, a sin
 | 4 connections (default) | ~2,630 msg/s | 60 ms |
 | 8 connections | ~4,270 msg/s | 32 ms |
 
-Tested against a real RabbitMQ 3 container: 2000 concurrent publishes all arrived exactly once (2000 distinct message ids, queue depth 2000), the heartbeat ran between publishes without deadlock, and after `rabbitmqctl stop_app` / `start_app` publishes failed with `StreamLostError` while the broker was down and then succeeded again without restarting Process 1.
+Tested against a real RabbitMQ 3 container: 2000 concurrent publishes all arrived exactly once (2000 distinct message ids, queue depth 2000), the heartbeat ran between publishes without deadlock, and after `rabbitmqctl stop_app` / `start_app` publishes failed with `StreamLostError` while the broker was down and then succeeded again without restarting API Gateway (Process 1).
 
-Limits: while the broker is down, requests fail (the client gets an error and should retry); nothing is queued in Process 1. More connections mean more RabbitMQ connections per Process 1 instance (3 instances x 4 = 12 by default). Confirm batching across requests would be faster still but was not built.
+Limits: while the broker is down, requests fail (the client gets an error and should retry); nothing is queued in API Gateway (Process 1). More connections mean more RabbitMQ connections per API Gateway (Process 1) instance (3 instances x 4 = 12 by default). Confirm batching across requests would be faster still but was not built.
 
-#### K00. Request limits and error responses (Process 1)
+#### K00. Request limits and error responses (API Gateway (Process 1))
 
 | Input | Limit (`.env`) | Refused with |
 |---|---|---|
@@ -8760,7 +8408,7 @@ Limits: while the broker is down, requests fail (the client gets an error and sh
 | Time a connection may stall | `API_REQUEST_TIMEOUT_S` (30) | connection closed by the server |
 | Bad `Content-Length`, JSON that is not an object, non-numeric `item_id`, `counter`, `value`, `remote_metric`, `count` or `limit` | — | `400` (before this change a non-numeric field returned `500`, and a bad `limit` dropped the connection) |
 
-Error bodies are generic: `{"error": "...", "request_id": "<12 hex>"}`. The exception, with its stack trace for 5xx, goes to the process log (`/var/log/flowfirst/process1.log`) under the same `request_id`, so a support ticket can be matched to the log line: `grep <request_id> /var/log/flowfirst/process1.log`. 404 responses no longer echo the requested path or an unknown config key, and `/swift/status` no longer returns the Swift URL or the raw exception. `API_EXPOSE_ERROR_DETAILS=true` adds a `details` field for development.
+Error bodies are generic: `{"error": "...", "request_id": "<12 hex>"}`. The exception, with its stack trace for 5xx, goes to the process log (`/var/log/flowfirst/api_gateway.log`) under the same `request_id`, so a support ticket can be matched to the log line: `grep <request_id> /var/log/flowfirst/api_gateway.log`. 404 responses no longer echo the requested path or an unknown config key, and `/swift/status` no longer returns the Swift URL or the raw exception. `API_EXPOSE_ERROR_DETAILS=true` adds a `details` field for development.
 
 Tested with the real handler (26 checks, plain HTTP, no real RabbitMQ, ZooKeeper or Swift): every limit above, the boundary values (a body just under the limit is accepted, `count` 0/-3/`x`/100000000 are refused), a stalled client being cut off after the configured 3 s test timeout, the server staying healthy afterwards, and no host, path or library text in any error body.
 
@@ -8768,9 +8416,9 @@ Limits of this work: (1) the log still contains the exception text, which can in
 
 #### K0. Who may change runtime configuration (`POST /zk/config`)
 
-Writing a runtime config value affects every process in the cluster, so it is not open to every certificate holder. Process 1 resolves the caller as follows:
+Writing a runtime config value affects every process in the cluster, so it is not open to every certificate holder. API Gateway (Process 1) resolves the caller as follows:
 
-1. The caller's **client certificate** on the connection to Process 1 gives its CN.
+1. The caller's **client certificate** on the connection to API Gateway (Process 1) gives its CN.
 2. **Only if** that connection was made by one of `ADMIN_TRUSTED_PROXY_CNS` (HAProxy's backend identity, `<node>-pipeline`), the `X-SSL-Client-CN` header is believed. HAProxy deletes any client-sent copy and sets it from the verified certificate. A direct caller with some other certificate that sends the header is treated as its own certificate CN.
 3. The CN must be in `ADMIN_ALLOWED_CNS`. A blank list allows nobody. Without TLS there is no caller identity, so the request is refused unless `ALLOW_UNAUTHENTICATED_ADMIN=true` (dev only).
 
@@ -8786,7 +8434,7 @@ Limits: this protects the one config-write endpoint. It is not general role-base
 | `certificate verify failed` / `(60)` | Wrong CA, or the name used is not in the SAN | `openssl x509 -noout -ext subjectAltName`; use the VIP name listed there |
 | `certificate has expired` or `not yet valid` | Expiry, or clock skew between nodes | `chronyc tracking`; `./security/list_certs.sh` |
 | HAProxy refuses every client | Out-of-date CRL (suspected, untested), or `ca-file` missing | `openssl crl -in ca.crl -noout -nextupdate`; re-publish the CRL |
-| HAProxy backend `DOWN`, log says handshake failure | Backend certificate does not match or Process 1 not on HTTPS | backend server lines use `sni` + `verifyhost <node>`; Process 1 must run with `TLS_API_ENABLED=true` |
+| HAProxy backend `DOWN`, log says handshake failure | Backend certificate does not match or API Gateway (Process 1) not on HTTPS | backend server lines use `sni` + `verifyhost <node>`; API Gateway (Process 1) must run with `TLS_API_ENABLED=true` |
 | RabbitMQ: `handshake_failure` | Client certificate not signed by the CA, or none presented | `/var/log/rabbitmq/*.log`; check `TLS_CLIENT_CERT` |
 | MariaDB: `Access denied` after `--require-client-cert` | Client sends no certificate | `TLS_MARIADB_ENABLED=true` and certificate readable; undo with `ALTER USER … REQUIRE NONE` |
 | ZooKeeper: `ruok` / `mntr` return nothing on the TLS port | Four-letter words do not work over TLS | use the plain port while it exists, or the admin server on `ZK_ADMIN_PORT` |
@@ -8798,7 +8446,7 @@ Limits: this protects the one config-write endpoint. It is not general role-base
 **Tested** (workstation, with containers where noted; never on RHEL nodes):
 
 - The PKI scripts: CA, 21 certificates, expiry report, revocation and CRL, per-node `--stage` layout.
-- The Python TLS module (fails closed) and Process 1's HTTPS listener with the real eventlet code: valid certificates got `200`; no certificate, a revoked certificate, plain HTTP, an untrusted CA and a TLS 1.1 client were refused.
+- The Python TLS module (fails closed) and API Gateway (Process 1)'s HTTPS listener with the real eventlet code: valid certificates got `200`; no certificate, a revoked certificate, plain HTTP, an untrusted CA and a TLS 1.1 client were refused.
 - HAProxy 3.4 in a container in front of mutual-TLS backends: same refusals, plus a wrong hostname; `X-SSL-Client-CN` set from the certificate and not spoofable. `haproxy -c` passes for TLS off and on.
 - RabbitMQ 3 (container): valid certificate connected; none or wrong hostname refused.
 - MariaDB 11 (container): valid certificate worked; untrusted server CA rejected by the client; `REQUIRE X509` worked with a certificate and denied without.
@@ -8811,7 +8459,7 @@ Limits: this protects the one config-write endpoint. It is not general role-base
 1. **No run on a real four-node cluster**, and none through Pacemaker/pcsd (both are unchanged by this work).
 2. The `sudo`, restart and firewall paths of the `enable_*_tls.sh` scripts, the ssh push of `install_certs.sh`, and the ZooKeeper keystore step inside the script (the same commands were run by hand). The HAProxy-to-MariaDB/RabbitMQ TLS pass-through was designed as TCP pass-through and not run end to end with Galera.
 3. **Swift is not mutual TLS at the proxy**: Swift 2.38 hardcodes `ssl.CERT_NONE`, and prints that SSL there is for testing only. This is in the upstream Swift code and cannot be changed from this repository. Client certificates are enforced by HAProxy; the HAProxy-to-proxy hop is encrypted. For stronger isolation put stunnel or nginx in front of the proxy. Anyone who can reach port 8888 on a node directly can talk to the proxy without a client certificate: firewall it to the HAProxy hosts.
-4. **Revocation** is not enforced by RabbitMQ or ZooKeeper (see I). It is enforced by HAProxy, Process 1 and (with `ssl_crl`) MariaDB client connections; whether Galera replication traffic honours the CRL was not tested. Every component that does enforce it fails closed when the CRL expires (see I).
+4. **Revocation** is not enforced by RabbitMQ or ZooKeeper (see I). It is enforced by HAProxy, API Gateway (Process 1) and (with `ssl_crl`) MariaDB client connections; whether Galera replication traffic honours the CRL was not tested. Every component that does enforce it fails closed when the CRL expires (see I).
 5. **Galera SST with `rsync` is not encrypted** by Galera TLS, and blocks the donor. Switch to `MARIADB_SST_METHOD=mariabackup` (non-blocking, no extra encryption by default) and add `MARIADB_SST_ENCRYPT=true` to encrypt the stream with the cluster's own TLS certificates. All nodes must use the same method; change it with a rolling restart (node3 → node2 → node1). This has not been tested on a real cluster.
 6. `--inter-node`, `--galera` and `--quorum` were not tested.
 7. Pacemaker/Corosync (and pcsd) traffic uses their own mechanisms and is not covered here.
@@ -8822,7 +8470,7 @@ Limits: this protects the one config-write endpoint. It is not general role-base
 
 ## Authentication Architecture
 
-> **Status:** API-key and HMAC token authentication are implemented in `src/application/authz.py` and wired into Process 1. The `none` (default) and `cert` modes re-use the existing cert infrastructure. All modes are unit-tested (25 new tests in `tests/test_authz.py`). The HTTP handler integration (`_require_auth`, `POST /auth/token`) was tested by running the existing process1 harness tests with `AUTH_MODE=none`; the harness does not yet exercise auth refusals on flow endpoints directly — add them if you extend this. MFA, biometric, SSO and FIDO2 are documented below but **not implemented**.
+> **Status:** API-key and HMAC token authentication are implemented in `src/application/authz.py` and wired into API Gateway (Process 1). The `none` (default) and `cert` modes re-use the existing cert infrastructure. All modes are unit-tested (25 new tests in `tests/test_authz.py`). The HTTP handler integration (`_require_auth`, `POST /auth/token`) was tested by running the existing process1 harness tests with `AUTH_MODE=none`; the harness does not yet exercise auth refusals on flow endpoints directly — add them if you extend this. MFA, biometric, SSO and FIDO2 are documented below but **not implemented**.
 
 ### Why authentication matters here
 
@@ -8830,7 +8478,7 @@ TLS (Scenario 63) proves the *connection* is encrypted and the *certificate* cam
 
 ### Option 1 — Password / API-key authentication
 
-**How it works.** The caller puts a random key in the `X-Api-Key` header. Process 1 hashes the incoming value with SHA-256 and compares it (constant-time, no timing oracle) against the stored hash. The raw key never touches disk; only its digest is stored in `.env`.
+**How it works.** The caller puts a random key in the `X-Api-Key` header. API Gateway (Process 1) hashes the incoming value with SHA-256 and compares it (constant-time, no timing oracle) against the stored hash. The raw key never touches disk; only its digest is stored in `.env`.
 
 **To enable:**
 ```bash
@@ -8852,7 +8500,7 @@ curl -X POST http://<VIP>:8080/api/flow1 \
   -H "Content-Type: application/json" \
   -d '{"item_id": 1}'
 ```
-A missing or wrong key returns HTTP 401. The key label appears in the Process 1 log so you can see which caller sent each request.
+A missing or wrong key returns HTTP 401. The key label appears in the API Gateway (Process 1) log so you can see which caller sent each request.
 
 **Key rotation:** add the new key alongside the old one (both work), update all callers, then remove the old digest from `AUTH_API_KEYS` and reload (`sudo systemctl reload flowfirst-process1`). There is no downtime if you overlap.
 
@@ -8862,7 +8510,7 @@ A missing or wrong key returns HTTP 401. The key label appears in the Process 1 
 
 ### Option 2 — Token / Bearer authentication (HMAC-signed)
 
-**How it works.** Process 1 issues short-lived tokens at `POST /auth/token`. Each token is a base64-encoded JSON payload (`sub`, `exp`, version) plus an HMAC-SHA256 signature over it, separated by `.`. The signature is computed with `AUTH_TOKEN_SECRET` (a shared secret, never sent to callers). Tokens expire after `AUTH_TOKEN_TTL_S` (default 1 hour). On every flow request the caller sends `Authorization: Bearer <token>`; Process 1 verifies the signature and the expiry before proceeding.
+**How it works.** API Gateway (Process 1) issues short-lived tokens at `POST /auth/token`. Each token is a base64-encoded JSON payload (`sub`, `exp`, version) plus an HMAC-SHA256 signature over it, separated by `.`. The signature is computed with `AUTH_TOKEN_SECRET` (a shared secret, never sent to callers). Tokens expire after `AUTH_TOKEN_TTL_S` (default 1 hour). On every flow request the caller sends `Authorization: Bearer <token>`; API Gateway (Process 1) verifies the signature and the expiry before proceeding.
 
 **To enable:**
 ```bash
@@ -8891,7 +8539,7 @@ curl -X POST http://<VIP>:8080/api/flow1 \
 ```
 In `token` mode, `X-Api-Key` is also accepted directly on flow endpoints, so short-lived clients don't need to implement the token exchange.
 
-**Token rotation / secret rotation:** change `AUTH_TOKEN_SECRET` and restart all Process 1 instances. Every token signed with the old secret is immediately invalid; callers must obtain a new token. Because `AUTH_API_KEYS` is separate, key rotation and secret rotation are independent.
+**Token rotation / secret rotation:** change `AUTH_TOKEN_SECRET` and restart all API Gateway (Process 1) instances. Every token signed with the old secret is immediately invalid; callers must obtain a new token. Because `AUTH_API_KEYS` is separate, key rotation and secret rotation are independent.
 
 **Limits:** tokens are not revokable before expiry — a stolen token is valid until `exp`. Keep `AUTH_TOKEN_TTL_S` short for sensitive environments. The token payload is base64-encoded (not encrypted): the subject and expiry are readable to anyone who has the token, though the content is not a secret. This is not a JWT and does not use an external identity provider.
 
@@ -8957,14 +8605,14 @@ In the context of FlowFirst: passkeys are relevant for the *operator* accessing 
 1. API keys and token secrets are stored in `.env` — a flat file on each node. Anyone who can read `/opt/flowfirst/.env` (typically `flowuser` and `root`) can extract them. Protect the file with filesystem permissions (`chmod 600`) and disk encryption. A proper secrets manager (Vault, AWS Secrets Manager, RHEL IdM) would seal them at rest.
 2. Tokens are not revokable before expiry. If a token is stolen, the only remediation is to rotate `AUTH_TOKEN_SECRET` (which invalidates all tokens immediately, logging out all current callers).
 3. There is no per-caller rate limiting. An authenticated caller can submit as many requests as the pipeline can handle. Scenario 61 sizes the cluster capacity; a malicious or buggy authenticated caller can fill the queues.
-4. `AUTH_API_KEYS` and `AUTH_TOKEN_SECRET` must be identical on all three nodes. They are not auto-synced — change them in `.env` on every node and restart Process 1 on each (rolling restart is safe: during the restart one node will briefly use the old secret, tokens signed by the other nodes still work because the secret is the same).
+4. `AUTH_API_KEYS` and `AUTH_TOKEN_SECRET` must be identical on all three nodes. They are not auto-synced — change them in `.env` on every node and restart API Gateway (Process 1) on each (rolling restart is safe: during the restart one node will briefly use the old secret, tokens signed by the other nodes still work because the secret is the same).
 5. The `cert` mode does not distinguish between calling services: every certificate issued by the CA grants the same access. For per-service access control use `api_key` or `token` mode with a separate key per service.
 
 ---
 
 ## Authorization Architecture
 
-> **Status:** RBAC, ACL, and ABAC authorization are fully implemented in [`src/application/authz.py`](src/application/authz.py) and wired into Process 1. Default `AUTHZ_MODE=none` preserves existing behaviour. 54 new tests in [`tests/test_authz.py`](tests/test_authz.py). OAuth2, ReBAC, DAC, MAC, and Policy-as-Code are documented below but **not implemented** (each requires external infrastructure).
+> **Status:** RBAC, ACL, and ABAC authorization are fully implemented in [`src/application/authz.py`](src/application/authz.py) and wired into API Gateway (Process 1). Default `AUTHZ_MODE=none` preserves existing behaviour. 54 new tests in [`tests/test_authz.py`](tests/test_authz.py). OAuth2, ReBAC, DAC, MAC, and Policy-as-Code are documented below but **not implemented** (each requires external infrastructure).
 
 Authorization runs **after** authentication. Authentication answers *"who are you?"* (identity); authorization answers *"what are you allowed to do?"* (access control). They are independent layers — you can run `AUTH_MODE=api_key` with full RBAC, or `AUTH_MODE=none` (no authentication) with `AUTHZ_MODE=none` (no authorization, the default), or any combination.
 
@@ -9093,23 +8741,7 @@ AUTHZ_POLICY=[{"when":{"identity":"banned_key"},"effect":"deny"}]
 5.  Default: DENY       — fail closed
 ```
 
-```mermaid
-flowchart TD
-    A["Request: identity, action, resource"] --> B{"AUTHZ_MODE=none?"}
-    B -- yes --> ALLOW["Allow"]
-    B -- no --> C{"ABAC deny rule matches?"}
-    C -- yes --> DENY["Deny 403"]
-    C -- no --> D{"rbac in mode AND identity has roles?"}
-    D -- "grants" --> ALLOW
-    D -- "denies" --> E{"acl in mode?"}
-    D -- "no roles" --> F{"acl in mode?"}
-    E -- "acl grants" --> ALLOW
-    E -- "acl denies" --> G{"abac in mode AND allow rule matches?"}
-    F -- "acl grants" --> ALLOW
-    F -- "acl denies / no entry" --> G
-    G -- yes --> ALLOW
-    G -- no --> DENY
-```
+> 📐 **[View diagram: Authorization Decision Flowchart](docs/diagrams.md#7-authorization-decision-flowchart-rbac--acl--abac)**
 
 ---
 
@@ -9130,7 +8762,7 @@ curl -X POST http://<VIP>:8080/api/flow1 \
   -H "Content-Type: application/json" \
   -d '{"item_id": 42}'
 
-# Process 1 checks, in order:
+# API Gateway (Process 1) checks, in order:
 # 1. Authentication: sha256(key) matches ci_bot digest → identity = "ci_bot"
 # 2. ABAC deny: "banned_key" rule does not match "ci_bot" → continue
 # 3. RBAC: "ci_bot" has role "publisher" → "publisher" grants "flow:1:publish" → ALLOW
@@ -9142,7 +8774,7 @@ curl -X POST http://<VIP>:8080/api/flow1 \
 
 #### OAuth 2.0 / OpenID Connect (OIDC)
 
-OAuth 2.0 is an authorization *delegation* framework, not a self-contained implementation. It requires an **Authorization Server (AS)** — a separate service such as Keycloak, Okta, Entra ID, or Auth0 — that issues signed JWT access tokens. Process 1 would verify each token against the AS's public key (fetched from its JWKS endpoint) without needing the signing key itself.
+OAuth 2.0 is an authorization *delegation* framework, not a self-contained implementation. It requires an **Authorization Server (AS)** — a separate service such as Keycloak, Okta, Entra ID, or Auth0 — that issues signed JWT access tokens. API Gateway (Process 1) would verify each token against the AS's public key (fetched from its JWKS endpoint) without needing the signing key itself.
 
 **How it would integrate:**
 - Replace `POST /auth/token` with an OAuth2 client-credentials flow at the AS.
@@ -9166,7 +8798,7 @@ ReBAC models permissions as a **graph of relationships** between principals and 
 
 In DAC, the *owner* of a resource decides who may access it and can delegate that right. Classic example: UNIX file permissions where the file owner can `chmod` and `chown`.
 
-**Why not implemented here:** FlowFirst has no concept of resource ownership. Messages are produced by Process 1 and consumed by Processes 2–4; there is no per-message owner whose permissions should vary. Implementing DAC would require attaching an owner identity and a permission mask to every resource object and checking them at every access point — a significant data-model change with no clear benefit for a pipeline.
+**Why not implemented here:** FlowFirst has no concept of resource ownership. Messages are produced by API Gateway (Process 1) and consumed by Processes 2–4; there is no per-message owner whose permissions should vary. Implementing DAC would require attaching an owner identity and a permission mask to every resource object and checking them at every access point — a significant data-model change with no clear benefit for a pipeline.
 
 ---
 
@@ -9191,11 +8823,11 @@ Policy-as-Code separates authorization logic from application code. The applicat
 
 ### Limits of the implemented authorization
 
-1. **No session persistence.** `_AUTHZ_ROLES`, `_AUTHZ_IDENTITY_ROLES`, `_AUTHZ_ACL`, and `_AUTHZ_POLICY` are parsed once at process start from `.env`. Changing them requires restarting Process 1 on every node (rolling restart is safe: each node picks up the new policy independently).
+1. **No session persistence.** `_AUTHZ_ROLES`, `_AUTHZ_IDENTITY_ROLES`, `_AUTHZ_ACL`, and `_AUTHZ_POLICY` are parsed once at process start from `.env`. Changing them requires restarting API Gateway (Process 1) on every node (rolling restart is safe: each node picks up the new policy independently).
 2. **Flat identity model.** There are no groups within RBAC — assign each identity individually in `AUTHZ_IDENTITY_ROLES`. For large deployments, consider OPA or a directory-backed identity store.
 3. **`flow:*` in the ACL is a glob, not a literal.** An ACL entry `flow:*:publish=svc` grants `svc` publish access on all three flows. If you need per-flow ACLs alongside a wildcard entry, list the flows explicitly.
 4. **ABAC time rules use UTC server time.** If callers are in different time zones, make sure the time window in `AUTHZ_POLICY` accounts for them.
-5. **No deny logging to a SIEM.** Denied requests are logged to the Process 1 journal at `WARNING` level (`[authz] DENIED`). For audit trails, forward the journal to a SIEM (e.g. with `systemd-journal-remote` or Filebeat).
+5. **No deny logging to a SIEM.** Denied requests are logged to the API Gateway (Process 1) journal at `WARNING` level (`[authz] DENIED`). For audit trails, forward the journal to a SIEM (e.g. with `systemd-journal-remote` or Filebeat).
 
 ---
 
@@ -9254,7 +8886,7 @@ sudo ./scripts/backup_flowfirst.sh --out /backup/flowfirst --passphrase-file /ro
 |---|---|
 | Prove a dump is usable, and compare it | `restore_flowfirst.sh --from DIR --passphrase-file F --db --into-database flowfirst_restore_check` then compare `SELECT COUNT(*)` / `CHECKSUM TABLE` with the live table |
 | Recover some rows after a bad delete | the same, then `INSERT ... SELECT` from `flowfirst_restore_check` into the live table; drop the check database afterwards |
-| Replace the live database | stop Process 4 (`sudo pcs resource disable flowfirst-p4-res-clone`), then `restore_flowfirst.sh ... --db --in-place --yes-overwrite`, then `pcs resource enable flowfirst-p4-res-clone`. The dump drops and recreates `MARIADB_DB`; Galera replicates the result to the other nodes. |
+| Replace the live database | stop DB Updater (Process 4) (`sudo pcs resource disable flowfirst-p4-res-clone`), then `restore_flowfirst.sh ... --db --in-place --yes-overwrite`, then `pcs resource enable flowfirst-p4-res-clone`. The dump drops and recreates `MARIADB_DB`; Galera replicates the result to the other nodes. |
 | Get configuration files back | `restore_flowfirst.sh ... --extract-config /root/restore-tmp` (an existing, **empty** directory). Nothing is copied over `/`; you copy the files you need by hand, then delete the directory because it holds keys and passwords. |
 | ZooKeeper runtime tuning | `restore_flowfirst.sh ... --zk` (only the four known keys are written; anything else in a doctored file is skipped) |
 | RabbitMQ users and policies | `restore_flowfirst.sh ... --rabbit` decrypts to a temporary file and prints the `rabbitmqctl import_definitions` command to run from a second terminal; it merges, it does not wipe |
@@ -9277,21 +8909,21 @@ Full-site recovery order: time sync (Phase 0a), restore `config` on each node, b
 
 ## Message Safety: Publisher Confirms and the Dead-Letter Queue
 
-> **Status:** tested on one workstation against a real RabbitMQ 3 container (single node, not a cluster) using the repo's own `config.setup_queues()`, the policy command from `scripts/setup_rabbitmq_dlx.sh --print`, and `scripts/replay_dead_letters.py`. Every behaviour listed under "Tested" was observed, not assumed. **Not tested:** a three-node RabbitMQ cluster, node failure during a publish, quorum or mirrored queues (the queues here are classic durable queues), TLS on these paths, or Process 2 to 5 rejecting a real message end to end (the rejection was simulated by a client doing `basic_nack(requeue=False)`, which is exactly what the handlers do).
+> **Status:** tested on one workstation against a real RabbitMQ 3 container (single node, not a cluster) using the repo's own `config.setup_queues()`, the policy command from `scripts/setup_rabbitmq_dlx.sh --print`, and `scripts/replay_dead_letters.py`. Every behaviour listed under "Tested" was observed, not assumed. **Not tested:** a three-node RabbitMQ cluster, node failure during a publish, quorum or mirrored queues (the queues here are classic durable queues), TLS on these paths, or Transformer (Process 2) to 5 rejecting a real message end to end (the rejection was simulated by a client doing `basic_nack(requeue=False)`, which is exactly what the handlers do).
 
 This chapter explains two protections and how they fit together. The run-book step that applies them is [R3](#r3-dead-letter-policy-and-publisher-confirms).
 
-**1. Publisher confirms and `mandatory=True` (in the code, no switch).** Every publish to RabbitMQ, from Process 1 and from Processes 2 to 5, waits for the broker's answer (`channel.confirm_delivery()` in `setup_queues`) and sets `mandatory=True`. So a publish either succeeds or **raises**:
+**1. Publisher confirms and `mandatory=True` (in the code, no switch).** Every publish to RabbitMQ, from API Gateway (Process 1) and from Processes 2 to 5, waits for the broker's answer (`channel.confirm_delivery()` in `setup_queues`) and sets `mandatory=True`. So a publish either succeeds or **raises**:
 
 | Situation | Result | Tested |
 |---|---|---|
 | Queue exists | accepted | yes |
-| Routing key matches no queue, `mandatory=True` | `pika.exceptions.UnroutableError`; Process 1 answers with an error instead of `200` | yes |
+| Routing key matches no queue, `mandatory=True` | `pika.exceptions.UnroutableError`; API Gateway (Process 1) answers with an error instead of `200` | yes |
 | Same, with `mandatory=False` | accepted and **silently dropped** | yes (this is why the flag is set) |
 | Broker refuses the message (`basic.nack`) | `pika.exceptions.NackError` | not provoked |
-| Connection lost mid-publish | exception from pika; Process 1 reconnects on the next request | covered by the broker-restart test in the throughput chapter |
+| Connection lost mid-publish | exception from pika; API Gateway (Process 1) reconnects on the next request | covered by the broker-restart test in the throughput chapter |
 
-A consumer (Process 2 to 5) acknowledges its input message only after its own publish was confirmed, so a message is never acknowledged upstream and lost downstream. Confirms cost one broker round trip per publish; see the throughput chapter and `API_PUBLISH_CONNECTIONS`. A confirm means the broker took the message, not that it reached the database.
+A consumer (Transformer (Process 2) to 5) acknowledges its input message only after its own publish was confirmed, so a message is never acknowledged upstream and lost downstream. Confirms cost one broker round trip per publish; see the throughput chapter and `API_PUBLISH_CONNECTIONS`. A confirm means the broker took the message, not that it reached the database.
 
 **2. The dead-letter queue (a RabbitMQ policy you must apply).** When a handler raises, the process logs the exception, increments `flow<N>_failed`, and does `basic_nack(requeue=False)`. What happens next depends on one policy:
 
@@ -9302,7 +8934,7 @@ A consumer (Process 2 to 5) acknowledges its input message only after its own pu
 
 `sudo ./scripts/setup_rabbitmq_dlx.sh` applies it once on one RabbitMQ node (`--print` shows the command, `--remove` clears it). It is a policy rather than a queue argument so it can be added to a running cluster; changing queue arguments would make RabbitMQ refuse every process's queue declaration. The pattern `^flow[123]_` matches the nine pipeline queues and not `flowfirst_dead_letters`, so a dead-lettered message cannot be dead-lettered again in a loop. The exchange and queue are created by the processes (`setup_queues`) and are idempotent. `scripts/preflight_check.py` reports a missing policy as **FAIL** and a non-empty dead-letter queue as WARN.
 
-**What fills the dead-letter queue.** Anything that makes a handler raise: a database that is down or has a lock timeout (Process 4), Swift errors that are not caught, a malformed message, a bug. While MariaDB is down, every message Process 4 receives goes to the dead-letter queue (or is discarded without the policy), so an outage can create many entries. The `FlowFirstDeadLetters` alert fires on the first one ([Monitoring and Alerting](#monitoring-and-alerting)).
+**What fills the dead-letter queue.** Anything that makes a handler raise: a database that is down or has a lock timeout (DB Updater (Process 4)), Swift errors that are not caught, a malformed message, a bug. While MariaDB is down, every message DB Updater (Process 4) receives goes to the dead-letter queue (or is discarded without the policy), so an outage can create many entries. The `FlowFirstDeadLetters` alert fires on the first one ([Monitoring and Alerting](#monitoring-and-alerting)).
 
 **Working the queue** (`scripts/replay_dead_letters.py`; uses the same `.env`, TLS and client certificate as the pipeline):
 
@@ -9317,7 +8949,7 @@ python3 scripts/replay_dead_letters.py --discard          # delete them, after y
 2. Replay republishes with a confirm and `mandatory=True`, then acknowledges the dead-letter copy. If the broker refuses the republish the message **stays** in the dead-letter queue. Tested: bodies came back identical, persistent (`delivery_mode=2`), and without the `x-death` header, so a replayed message that fails again is a fresh failure.
 3. A message **without** an `x-death` header (for example one put into the dead-letter queue by hand) has an unknown origin: replay lists it as `UNKNOWN`, says it cannot replay it and leaves it. `--discard` removes it. Tested.
 4. Replay and discard handle the messages waiting when the script starts (or `--limit N`). `--limit` does not choose which messages: it takes them in queue order. The listing is read-only: messages are released back unchanged.
-5. Duplicates: a replayed message reuses its original `message_id`. Process 4 checks the ZooKeeper dedup barrier first, so a message that was already persisted is skipped, **but only for `ZK_DEDUP_TTL_MS` (default 5 minutes)** after it was first marked. After that the same id passes the barrier again. The table has a `UNIQUE` key on `message_id` and the insert is `ON DUPLICATE KEY UPDATE` (`src/db/db.py`), so a second pass **overwrites the existing row with the replayed message's values instead of adding a second row**: no duplicate rows, but the stored values become those of the replayed copy. I read this in the code; I did not run a replay through Process 4 against MariaDB.
+5. Duplicates: a replayed message reuses its original `message_id`. DB Updater (Process 4) checks the ZooKeeper dedup barrier first, so a message that was already persisted is skipped, **but only for `ZK_DEDUP_TTL_MS` (default 5 minutes)** after it was first marked. After that the same id passes the barrier again. The table has a `UNIQUE` key on `message_id` and the insert is `ON DUPLICATE KEY UPDATE` (`src/db/db.py`), so a second pass **overwrites the existing row with the replayed message's values instead of adding a second row**: no duplicate rows, but the stored values become those of the replayed copy. I read this in the code; I did not run a replay through DB Updater (Process 4) against MariaDB.
 6. If the origin queue was deleted, the script re-declares it first (`setup_queues`) and the replay succeeds. Tested.
 
 **Limits (read these).**
@@ -9325,15 +8957,15 @@ python3 scripts/replay_dead_letters.py --discard          # delete them, after y
 2. The dead-letter queue is just another queue: it has no size or age limit, and nothing replays it automatically. Messages wait until a person acts. It is not part of the backup (see [Backup and Restore](#backup-and-restore)).
 3. The policy and the script assume RabbitMQ's default virtual host `/`; the code connects without choosing another one.
 4. Replay does not preserve ordering relative to newer messages.
-5. Process 1 can answer `200` only for what the broker confirmed, but a message that the broker took and a later stage then rejects is no longer visible to the client: the `200` response does not mean the row exists. Use the dead-letter alert and the persisted/published counters to notice.
+5. API Gateway (Process 1) can answer `200` only for what the broker confirmed, but a message that the broker took and a later stage then rejects is no longer visible to the client: the `200` response does not mean the row exists. Use the dead-letter alert and the persisted/published counters to notice.
 
 ---
 
 ## Health, Readiness and Dependencies
 
-> **Status:** tested two ways on one workstation. (1) Unit tests with the real Process 1 handler and a stubbed ZooKeeper whose calls hang 20 s: `/health` and `/ready` answer in well under 3 s, and deliberately re-adding a ZooKeeper call to `/health` made the test fail. (2) The real Process 1 (`python -m src.application.process1`) in a container with a real single-node ZooKeeper 3.9 and RabbitMQ 3, with a real HAProxy (`haproxy:lts`) probing it every 3 s. With ZooKeeper **stopped**: `/health` 200 in about 1 ms, `/ready` 200 in about 1 ms and reporting ZooKeeper `disconnected`, `POST /api/flow1` still 200, a probe on `/health` stayed up (HAProxy returned 200), while a probe on `/zk/health` (the kind of call the old `/health` made) made HAProxy mark the backend down (503). The old `list_registered` call took 10.1 s to fail (`ZK_TIMEOUT`), and `/zk/health` did not answer within 40 s. After ZooKeeper was started again `/ready` returned to `connected` and every probe passed. **Not tested:** a three-node ensemble, Pacemaker, or this on RHEL. The old `/health` itself was not re-run end to end: its behaviour is inferred from the `/zk/health` probe, which makes the same kind of call.
+> **Status:** tested two ways on one workstation. (1) Unit tests with the real API Gateway (Process 1) handler and a stubbed ZooKeeper whose calls hang 20 s: `/health` and `/ready` answer in well under 3 s, and deliberately re-adding a ZooKeeper call to `/health` made the test fail. (2) The real API Gateway (Process 1) (`python -m src.application.process1`) in a container with a real single-node ZooKeeper 3.9 and RabbitMQ 3, with a real HAProxy (`haproxy:lts`) probing it every 3 s. With ZooKeeper **stopped**: `/health` 200 in about 1 ms, `/ready` 200 in about 1 ms and reporting ZooKeeper `disconnected`, `POST /api/flow1` still 200, a probe on `/health` stayed up (HAProxy returned 200), while a probe on `/zk/health` (the kind of call the old `/health` made) made HAProxy mark the backend down (503). The old `list_registered` call took 10.1 s to fail (`ZK_TIMEOUT`), and `/zk/health` did not answer within 40 s. After ZooKeeper was started again `/ready` returned to `connected` and every probe passed. **Not tested:** a three-node ensemble, Pacemaker, or this on RHEL. The old `/health` itself was not re-run end to end: its behaviour is inferred from the `/zk/health` probe, which makes the same kind of call.
 
-Process 1 has three questions it can answer, and they use different endpoints so that one dependency problem cannot take the whole API out of rotation:
+API Gateway (Process 1) has three questions it can answer, and they use different endpoints so that one dependency problem cannot take the whole API out of rotation:
 
 | Endpoint | Question | Calls out to | Used by |
 |---|---|---|---|
@@ -9349,7 +8981,7 @@ Process 1 has three questions it can answer, and they use different endpoints so
 
 **Limits.**
 1. `/health` being green means the process is running. It says nothing about RabbitMQ, MariaDB, ZooKeeper or Swift; for those use `/ready`, `/zk/health`, `/swift/status` and the alerts in [Monitoring and Alerting](#monitoring-and-alerting).
-2. No endpoint checks MariaDB: Process 1 never talks to it.
+2. No endpoint checks MariaDB: API Gateway (Process 1) never talks to it.
 3. `/ready` after an idle broker restart can say `not_ready` until the first request reconnects; see above.
 4. `/health`, `/ready` and `/zk/health` follow the same TLS and client-certificate rules as the rest of the API.
 
@@ -9359,16 +8991,16 @@ Process 1 has three questions it can answer, and they use different endpoints so
 
 > **Status:** the `/metrics` listener was tested on one workstation: unit tests, a child process serving it over plain HTTP and over mutual TLS, and a real Prometheus (container) scraping it with a client certificate (target `up`) and without one (target `down`). The alert rules pass `promtool check rules` and 7 `promtool test rules` scenarios on synthetic series. The RabbitMQ metric names were checked against a real RabbitMQ 3 container. `monitoring/alertmanager.yml` passes `amtool check-config`. **Not tested:** a scrape of a running 4-node cluster, the Galera/MariaDB exporter names (written from the exporter's documentation, syntax-checked only), `node_exporter` names, live Alertmanager routing delivering a notification, and no dashboard is shipped.
 
-**What you get.** With `METRICS_ENABLED=true` each process serves `GET /metrics` in Prometheus text format on `METRICS_PORT_BASE` + its number: Process 1 on 9101, Process 2 on 9102, … Process 5 on 9105. It is a separate listener, not part of the REST API and **not behind HAProxy**, so Prometheus scrapes every node directly, including Node 4. The processes already counted what they handled; the listener only exposes it. It is off by default and a listener that cannot start (port in use, bad certificate) is logged and skipped: the pipeline keeps running, and it never falls back to plaintext when TLS is on.
+**What you get.** With `METRICS_ENABLED=true` each process serves `GET /metrics` in Prometheus text format on `METRICS_PORT_BASE` + its number: API Gateway (Process 1) on 9101, Transformer (Process 2) on 9102, … Remote Worker (Process 5) on 9105. It is a separate listener, not part of the REST API and **not behind HAProxy**, so Prometheus scrapes every node directly, including Node 4. The processes already counted what they handled; the listener only exposes it. It is off by default and a listener that cannot start (port in use, bad certificate) is logged and skipped: the pipeline keeps running, and it never falls back to plaintext when TLS is on.
 
 | Series | Meaning |
 |---|---|
 | `flowfirst_messages_total{process,flow,event}` | Counters since process start. Events: `published` (P1), `processed` (P2, P5), `forwarded`/`reflected` (P3), `persisted`, `swift_stored`, `dedup_skipped` (P4), and **`failed`** (P2–P5: the handler raised and the message was nacked without requeue). |
-| `flowfirst_http_responses_total{class}` | REST API responses by status class (`2xx`…`5xx`), Process 1 only. |
+| `flowfirst_http_responses_total{class}` | REST API responses by status class (`2xx`…`5xx`), API Gateway (Process 1) only. |
 | `flowfirst_events_total{event}` | Other counters (`dedup_reaped`). |
 | `flowfirst_up`, `flowfirst_start_time_seconds`, `flowfirst_stopping` | The process answers; when it started (a changing value means a restart); asked to stop. |
 | `flowfirst_greenthreads` | Greenthreads running. **0 on a standby instance**: a process that lost (or has not won) the ZooKeeper election serves `/metrics` but does no work, so `up` alone cannot tell active from standby. |
-| `flowfirst_publish_connections_open` / `_configured` | Process 1 publisher connections (see API_PUBLISH_CONNECTIONS). |
+| `flowfirst_publish_connections_open` / `_configured` | API Gateway (Process 1) publisher connections (see API_PUBLISH_CONNECTIONS). |
 | `flowfirst_tls_cert_expiry_seconds{cert}` | Seconds until the `api`, `pipeline` and `ca` certificates this process loads expire (negative = expired). Present only when `TLS_API_ENABLED=true`. |
 
 Every series carries `node` and `process` labels. The output holds counters and expiry times, never message content, hostnames of other systems, or credentials. Counters a process can emit are created at 0 when it starts, so the first failure after a restart is visible to `increase()`.
@@ -9386,7 +9018,7 @@ sudo python3 scripts/preflight_check.py        # the "metrics" line: PASS with m
 
 With `TLS_API_ENABLED=true` the listener reuses the API server certificate and `TLS_API_CLIENT_AUTH`, so Prometheus needs a client certificate signed by the FlowFirst CA (`security/issue_cert.sh`, see Scenario 63) and `server_name` must match a name in that node's `-api` certificate. Without TLS, anyone who can reach the port can read the counters: firewall it. The systemd sandbox allows this listener (it only needs TCP).
 
-**Prometheus.** `monitoring/prometheus.yml` is a sample scrape configuration (replace the `<…>` placeholders): the five FlowFirst targets per node, plus the infrastructure exporters the alerts rely on. Those are **not part of FlowFirst**: RabbitMQ's built-in plugin (`rabbitmq-plugins enable rabbitmq_prometheus`, port 15692; per-queue series come from `/metrics/detailed?family=queue_coarse_metrics&family=queue_consumer_count`), `mysqld_exporter` on the Galera nodes (run it on 9114, because its default 9104 is Process 4's metrics port), and `node_exporter`. ZooKeeper is not scraped: the repo's `zoo.cfg` does not enable a Prometheus metrics provider.
+**Prometheus.** `monitoring/prometheus.yml` is a sample scrape configuration (replace the `<…>` placeholders): the five FlowFirst targets per node, plus the infrastructure exporters the alerts rely on. Those are **not part of FlowFirst**: RabbitMQ's built-in plugin (`rabbitmq-plugins enable rabbitmq_prometheus`, port 15692; per-queue series come from `/metrics/detailed?family=queue_coarse_metrics&family=queue_consumer_count`), `mysqld_exporter` on the Galera nodes (run it on 9114, because its default 9104 is DB Updater (Process 4)'s metrics port), and `node_exporter`. ZooKeeper is not scraped: the repo's `zoo.cfg` does not enable a Prometheus metrics provider.
 
 **Alerts.** `monitoring/flowfirst.rules.yml` (FlowFirst's own series and the RabbitMQ queue series) and `monitoring/infrastructure.rules.yml` (Galera, RabbitMQ alarms, disk, clock). Thresholds are starting points; tune them to your traffic.
 
@@ -9412,8 +9044,8 @@ To replace the file receiver with a real notification channel (email, Slack, Pag
 | `FlowFirstMessagesFailing` (warning) | a handler failed any message in 5 min | Process log; without the DLX policy these messages are **discarded** |
 | `FlowFirstProcessDown` (critical) | a scrape target is down 2 min | `systemctl status`, the journal, firewall, client certificate |
 | `FlowFirstNoActiveInstance` (critical) | every instance of a process is on standby | ZooKeeper quorum, Pacemaker |
-| `FlowFirstPipelineStalled` (critical) | P1 published and P4 persisted nothing for 10 min on a flow | Queue alerts, MariaDB, the Process 4 leader |
-| `FlowFirstApi5xxRate` (warning) | over 5% of API responses are 5xx | Process 1 log by the `request_id` in the response |
+| `FlowFirstPipelineStalled` (critical) | P1 published and P4 persisted nothing for 10 min on a flow | Queue alerts, MariaDB, the DB Updater (Process 4) leader |
+| `FlowFirstApi5xxRate` (warning) | over 5% of API responses are 5xx | API Gateway (Process 1) log by the `request_id` in the response |
 | `FlowFirstQueueBacklog`, `FlowFirstQueueNoConsumers` | over 10 000 ready / no consumer on a `flow*` queue | Scenario 61 tuning table |
 | `FlowFirstCertificateExpiresSoon` / `…VerySoon` | under 30 / 7 days | Scenario 63 renewal |
 | `GaleraClusterSizeLow`, `GaleraNodeNotSynced`, `RabbitMq…`, `NodeDiskFillingUp`, `NodeClockSkew` | see the file | the description in the alert |
@@ -9422,7 +9054,7 @@ Check the rules without a cluster: `promtool check rules monitoring/*.rules.yml`
 
 **Limits (read these).**
 1. A counter restarts at 0 when its process restarts (Prometheus' `increase()` and `rate()` handle that). The counters are per process instance, not per cluster: `sum by (flow, event)` across nodes gives the cluster view.
-2. `FlowFirstPipelineStalled` assumes Process 1 **and** Process 4 are both scraped; with only one of them it will fire falsely. It cannot tell a stuck pipeline from messages that are legitimately still in flight for under 10 minutes.
+2. `FlowFirstPipelineStalled` assumes API Gateway (Process 1) **and** DB Updater (Process 4) are both scraped; with only one of them it will fire falsely. It cannot tell a stuck pipeline from messages that are legitimately still in flight for under 10 minutes.
 3. Failures are counted when the handler raises. A message lost *before* a handler runs (for example, an unroutable publish) shows as a 5xx, not as `failed`.
 4. `FlowFirstProcessDown` also fires for a process that is up but whose metrics port is blocked or whose client certificate was rejected: the cause is in the Prometheus target page (`lastError`).
 5. Dedup-skipped messages are counted, but there is no alert on them: failover re-deliveries make a non-zero value normal.
@@ -9433,7 +9065,7 @@ Check the rules without a cluster: `promtool check rules monitoring/*.rules.yml`
 
 ## Production Rollout Run-Book
 
-> **Status: nothing in this run-book has been run on a real four-node cluster.** Every step below was written from the scripts and the tests that exist in the repository (containers on one workstation, unit tests, and the real Process 1 handler with the broker, ZooKeeper and Swift stubbed). Treat the first run as a rehearsal on a **test cluster**, record what differs, and correct this document. Commands that are not in a repository script (for example `ALTER USER`, `rabbitmqctl change_password`) are the standard tools' syntax and were not run here.
+> **Status: nothing in this run-book has been run on a real four-node cluster.** Every step below was written from the scripts and the tests that exist in the repository (containers on one workstation, unit tests, and the real API Gateway (Process 1) handler with the broker, ZooKeeper and Swift stubbed). Treat the first run as a rehearsal on a **test cluster**, record what differs, and correct this document. Commands that are not in a repository script (for example `ALTER USER`, `rabbitmqctl change_password`) are the standard tools' syntax and were not run here.
 
 Use it in two situations: **(1) a new cluster**, where you follow Phases 0 to 6 above and use this chapter as the order of the additions; **(2) an existing cluster** that was installed before these changes (sample passwords, no dead-letter policy, no request limits), where you apply them one at a time with the checks below. Do one node at a time for anything that restarts a process, and never on all three nodes at once.
 
@@ -9487,7 +9119,7 @@ sudo rabbitmqctl list_policies                    # flowfirst-dlx   ^flow[123]_
 python3 scripts/replay_dead_letters.py            # list what is waiting (read-only)
 ```
 
-Confirms and `mandatory=True` need no switch: they are in the code from R1. To prove the policy works, publish a message that a consumer will reject (for example stop the database so Process 4 nacks), then check that `flowfirst_dead_letters` grew by one and that `python3 scripts/replay_dead_letters.py --replay --limit 1` puts it back once the database is up again. Without the policy a rejected message is **discarded**: `preflight_check.py` reports that as FAIL. Operations: look at the queue depth during every check (`rabbitmqctl list_queues name messages | grep dead`); find out **why** before replaying (the process log has the exception), because replaying a message that fails for a permanent reason only puts it back.
+Confirms and `mandatory=True` need no switch: they are in the code from R1. To prove the policy works, publish a message that a consumer will reject (for example stop the database so DB Updater (Process 4) nacks), then check that `flowfirst_dead_letters` grew by one and that `python3 scripts/replay_dead_letters.py --replay --limit 1` puts it back once the database is up again. Without the policy a rejected message is **discarded**: `preflight_check.py` reports that as FAIL. Operations: look at the queue depth during every check (`rabbitmqctl list_queues name messages | grep dead`); find out **why** before replaying (the process log has the exception), because replaying a message that fails for a permanent reason only puts it back.
 
 ### R4. Admin endpoint (`POST /zk/config`)
 
@@ -9507,8 +9139,8 @@ Check both directions: with the `admin-client` certificate `POST /zk/config` ret
 | Setting | Default | Check |
 |---|---|---|
 | `API_MAX_BODY_BYTES`, `API_MAX_BATCH_COUNT`, `API_MAX_LIST_LIMIT`, `API_REQUEST_TIMEOUT_S` | 1 MiB, 100, 1000, 30 s | `curl -s -o /dev/null -w '%{http_code}' -X POST http://<VIP>:8080/api/batch -d '{"count":100000}'` returns `400`; a 2 MiB body returns `413` |
-| `API_EXPOSE_ERROR_DETAILS` | `false` | an error body has `error` and `request_id` only; `grep <request_id> /var/log/flowfirst/process1.log` finds the cause |
-| `API_PUBLISH_CONNECTIONS` | 4 | `sudo rabbitmqctl list_connections | grep -c flowuser` rises by 4 per running Process 1 |
+| `API_EXPOSE_ERROR_DETAILS` | `false` | an error body has `error` and `request_id` only; `grep <request_id> /var/log/flowfirst/api_gateway.log` finds the cause |
+| `API_PUBLISH_CONNECTIONS` | 4 | `sudo rabbitmqctl list_connections | grep -c flowuser` rises by 4 per running API Gateway (Process 1) |
 
 Raise `API_PUBLISH_CONNECTIONS` only after a load run shows publish latency is the bottleneck (Scenario 61 section C), and watch RabbitMQ memory and connection count. HAProxy has its own `timeout http-request 10s` and no body-size limit; if a limit at the edge matters to you, that is not done.
 

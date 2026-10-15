@@ -270,6 +270,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [65](#scenario-65-iot-device-crud--flow-5-query-devices) | IoT Device CRUD — Flow 5: Query Devices | CRUD Pipeline | `POST /api/devices/query`, filter normalisation, `query_devices()` dynamic WHERE |
 | [66](#scenario-66-iot-device-crud--flow-6-update-device-with-remote-edge-sync) | IoT Device CRUD — Flow 6: Update Device with Remote Edge-Sync | CRUD Pipeline | `PUT /api/devices/{id}`, dual-publish P3→P4+P5, edge_sync_token, remote return path |
 | [67](#scenario-67-iot-device-crud--flow-7-soft-delete-device) | IoT Device CRUD — Flow 7: Soft-Delete Device | CRUD Pipeline | `DELETE /api/devices/{id}`, `soft_delete_device()`, `status = decommissioned` |
+| [68](#scenario-68-notification-listener--receiving-and-printing-live-notifications) | Notification Listener — Receiving & Printing Live Notifications | Notifications | Enable `NOTIFICATIONS_ENABLED`, run `scripts/notification_listener.py`, filter by flow or event type |
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
 
@@ -8465,6 +8466,279 @@ Limits: this protects the one config-write endpoint. It is not general role-base
 7. Pacemaker/Corosync (and pcsd) traffic uses their own mechanisms and is not covered here.
 8. Leaf keys are not passphrase-protected, so protect `/etc/flowfirst/tls` with filesystem permissions and disk encryption. The CA key is protected only by its passphrase and the admin host.
 9. Encryption protects the network. It does not replace the application passwords (RabbitMQ, MariaDB, Swift, HAProxy stats): change the sample values in `.env`.
+
+---
+
+## Scenario 68: Notification Listener — Receiving and Printing Live Notifications
+
+> **Goal:** enable the notification facility, run the standalone listener script (`scripts/notification_listener.py`) on any node or machine, and watch notification envelopes printed to the terminal in real time as flows and CRUD operations complete.
+
+### Overview
+
+The notification listener is a self-contained Python script that:
+
+1. Connects directly to RabbitMQ using the same credentials as the pipeline.
+2. Declares a durable subscriber queue and binds it to the `flowfirst.notifications` fanout exchange.
+3. Prints every notification envelope as it arrives — with colour, structured fields, and the payload subset.
+
+It has **no dependency on the FlowFirst source tree** — only `pika` is required. Multiple listeners can run simultaneously; each gets its own copy of every notification.
+
+---
+
+### Prerequisites
+
+**A. Enable notifications on the cluster** (one-time change — do this before running the listener).
+
+On every cluster node, add to `/opt/flowfirst/.env`:
+
+```ini
+NOTIFICATIONS_ENABLED=true
+```
+
+Then restart DB Updater (Process 4) so it picks up the change:
+
+```bash
+# Under Pacemaker (Nodes 1–3):
+sudo pcs resource restart flowfirst-process4
+
+# Verify it came back up on the leader node:
+sudo pcs status | grep process4
+```
+
+**B. Confirm the exchange exists** (optional sanity check — after Process 4 restarts):
+
+```bash
+sudo rabbitmqctl list_exchanges | grep notifications
+# Expected:  flowfirst.notifications   fanout
+```
+
+**C. Install pika on the machine where you will run the listener** (skip if the FlowFirst venv is active):
+
+```bash
+pip install pika
+# or, if the FlowFirst venv is active:
+source /opt/flowfirst/.venv/bin/activate
+```
+
+---
+
+### Which node to run on
+
+| Where | `RMQ_HOST` setting | Notes |
+|---|---|---|
+| **Node 1, 2, or 3** (recommended for quick tests) | `127.0.0.1` (default — no need to set it) | Connects directly to the local broker; no firewall rules needed. |
+| **Node 4** (remote worker node) | Set `RMQ_HOST=<VIP or any cluster node IP>` | Node 4 has no RabbitMQ broker, so it must connect over the network. |
+| **Your laptop or CI machine** | Set `RMQ_HOST=<VIP or any cluster node IP>` | Port 5672 (or 5673 for the HAProxy LB) must be reachable. Use the VIP for automatic failover. |
+
+> Two processes sharing the same `RMQ_QUEUE` name **compete** for messages (round-robin — each gets half). To receive every notification independently on multiple machines, give each a different `RMQ_QUEUE` value.
+
+---
+
+### Step 1 — Run on a cluster node (simplest)
+
+```bash
+# SSH to any of Node 1, 2, or 3:
+ssh node1
+
+# Set the password (must match RABBITMQ_PASSWORD in .env):
+export RMQ_PASSWORD=<your RABBITMQ_PASSWORD>
+
+# Run the listener (repo is at /opt/flowfirst):
+python3 /opt/flowfirst/scripts/notification_listener.py
+```
+
+Expected startup output:
+
+```
+FlowFirst Notification Listener
+  Exchange : flowfirst.notifications
+  Queue    : flowfirst.notifications.listener
+  Broker   : 127.0.0.1:5672 (user=flowuser)
+  Flows    : all
+  Events   : all
+Press Ctrl-C to stop.
+
+Connected. Waiting for notifications …
+```
+
+---
+
+### Step 2 — Trigger notifications
+
+Open a second terminal and send requests through any of the existing flows:
+
+```bash
+VIP=192.168.1.100   # your FLOWFIRST_VIP
+
+# Flow 1 — telemetry message (emits event_type: telemetry.processed)
+curl -s -X POST http://${VIP}:8080/api/flow1 \
+  -H "Content-Type: application/json" \
+  -d '{"item_id": 101, "counter": 500}' | jq .
+
+# Flow 4 — create IoT device (emits event_type: device.created)
+curl -s -X POST http://${VIP}:8080/api/devices \
+  -H "Content-Type: application/json" \
+  -d '{"device_name":"sensor-01","device_type":"temperature_sensor","location":"zone-A"}' | jq .
+
+# Flow 7 — soft-delete a device (emits event_type: device.decommissioned)
+# Replace <device_id> with the device_id returned by the Flow 4 request above
+curl -s -X DELETE http://${VIP}:8080/api/devices/<device_id> | jq .
+```
+
+Each request travels P1 → P2 → P3 → P4. DB Updater (Process 4) emits the notification **after** persisting and acking the pipeline message. Expect a short delay (< 1 s under normal load) between the API response and the notification appearing in the listener.
+
+---
+
+### Step 3 — Read the output
+
+A Flow 1 notification looks like this:
+
+```
+────────────────────────────────────────────────────────────────────────
+▶ telemetry.processed  flow=1  entity=message:101
+  occurred=2025-07-14 11:30:06  node=node2
+  notification_id=3f7a9c12-4b2e-41a8-9c3d-7f8e1b2a6d5c
+  message_id=c1d2e3f4-5a6b-7c8d-9e0f-1a2b3c4d5e6f
+  payload:
+    {
+      "flow": 1,
+      "item_id": 101,
+      "counter": 510,
+      "initial_data": "Flow-1 original payload for item #101"
+    }
+  [#1 received, #0 filtered]
+```
+
+A Flow 4 (device create) notification:
+
+```
+────────────────────────────────────────────────────────────────────────
+▶ device.created  flow=4  entity=device:a8b2c3d4-1234-5678-abcd-ef0123456789
+  occurred=2025-07-14 11:30:08  node=node1
+  notification_id=9a1b2c3d-...
+  message_id=d4e5f6a7-...
+  payload:
+    {
+      "device_name": "sensor-01",
+      "device_type": "temperature_sensor",
+      "location": "zone-A",
+      "firmware_version": "1.0.0",
+      "status": "active",
+      "owner_team": "ops"
+    }
+  [#2 received, #0 filtered]
+```
+
+---
+
+### Step 4 — Filter by flow or event type
+
+```bash
+# Watch device CRUD events only (flows 4, 6, 7):
+FILTER_FLOWS=4,6,7 \
+RMQ_PASSWORD=<password> \
+python3 /opt/flowfirst/scripts/notification_listener.py
+
+# Watch only device creation events:
+FILTER_EVENTS=device.created \
+RMQ_PASSWORD=<password> \
+python3 /opt/flowfirst/scripts/notification_listener.py
+
+# Watch device updates and decommissions only:
+FILTER_EVENTS=device.updated,device.edge_synced,device.decommissioned \
+RMQ_PASSWORD=<password> \
+python3 /opt/flowfirst/scripts/notification_listener.py
+```
+
+Filtered messages are still consumed and acked from the queue (so the queue does not back up), but are not printed.
+
+---
+
+### Step 5 — Run from a remote machine or laptop
+
+```bash
+export RMQ_HOST=192.168.1.100     # VIP — fails over automatically if a node dies
+export RMQ_PORT=5672              # direct; or use 5673 for the HAProxy LB port
+export RMQ_USER=flowuser
+export RMQ_PASSWORD=<password>
+export RMQ_QUEUE=flowfirst.notifications.my-laptop   # unique queue name
+
+python3 scripts/notification_listener.py
+```
+
+Use the VIP as `RMQ_HOST` so the listener automatically reconnects to the surviving broker if a node fails. The built-in reconnect loop retries every `RECONNECT_DELAY` seconds (default 5).
+
+---
+
+### Step 6 — Run two listeners simultaneously
+
+Each listener with a different `RMQ_QUEUE` value receives every notification independently:
+
+```bash
+# Terminal 1 — team-a subscriber
+RMQ_QUEUE=flowfirst.notifications.team-a \
+RMQ_PASSWORD=<password> \
+python3 /opt/flowfirst/scripts/notification_listener.py
+
+# Terminal 2 — team-b subscriber (different queue = full copy)
+RMQ_QUEUE=flowfirst.notifications.team-b \
+RMQ_PASSWORD=<password> \
+python3 /opt/flowfirst/scripts/notification_listener.py
+```
+
+Verify both queues exist:
+
+```bash
+sudo rabbitmqctl list_queues name messages consumers | grep notifications
+# flowfirst.notifications.team-a    0    1
+# flowfirst.notifications.team-b    0    1
+```
+
+---
+
+### Environment variable reference
+
+| Variable | Default | Required | Description |
+|---|---|---|---|
+| `RMQ_PASSWORD` | *(none)* | **Yes** | Must match `RABBITMQ_PASSWORD` in the cluster `.env`. |
+| `RMQ_HOST` | `127.0.0.1` | No | Broker IP or VIP. Use VIP for automatic failover. |
+| `RMQ_PORT` | `5672` | No | AMQP port. Use `5673` for the HAProxy LB port. |
+| `RMQ_USER` | `flowuser` | No | Must match `RABBITMQ_USER` in `.env`. |
+| `RMQ_EXCHANGE` | `flowfirst.notifications` | No | Must match `NOTIFICATIONS_EXCHANGE` in `.env`. |
+| `RMQ_QUEUE` | `flowfirst.notifications.listener` | No | Each unique name is an independent subscriber. |
+| `RMQ_PREFETCH` | `1` | No | In-flight messages limit. Raise for higher throughput. |
+| `FILTER_FLOWS` | *(blank = all)* | No | Comma-separated flow numbers: `4,6,7`. |
+| `FILTER_EVENTS` | *(blank = all)* | No | Comma-separated event types: `device.created,device.updated`. |
+| `PRETTY` | `true` | No | `false` = compact JSON, useful for piping to `jq`. |
+| `RECONNECT_DELAY` | `5` | No | Seconds to wait before reconnecting after a broker error. |
+
+---
+
+### Stopping the listener
+
+Press **Ctrl-C**. The listener finishes the current message, closes the connection cleanly, and prints a summary:
+
+```
+Signal received — stopping.
+
+Stopped. 14 notification(s) printed, 2 filtered, 16 total received.
+```
+
+The subscriber queue persists on the broker (it is durable) and accumulates notifications while the listener is stopped. When the listener restarts it will drain any queued notifications first.
+
+To delete the queue when you are done (so it does not grow indefinitely while the listener is not running):
+
+```bash
+sudo rabbitmqctl delete_queue flowfirst.notifications.listener
+```
+
+---
+
+### What this scenario does NOT cover
+
+- TLS between the listener and RabbitMQ. If `TLS_RABBITMQ_ENABLED=true` on the cluster, the listener needs a client certificate. Add `pika.SSLOptions` with the FlowFirst pipeline certificate (`TLS_CLIENT_CERT` / `TLS_CLIENT_KEY`) — see `src/config/config.py` `get_connection()` for the exact pattern.
+- Authentication / authorisation between the listener and the REST API (the listener bypasses the API entirely).
+- Guaranteeing delivery when the listener is offline. Envelopes published while no queue is bound to the exchange are silently dropped by RabbitMQ. Start the listener (so the queue exists and is bound) before traffic begins if you need every notification.
 
 ---
 

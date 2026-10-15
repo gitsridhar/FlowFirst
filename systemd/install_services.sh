@@ -67,7 +67,27 @@ for unit in "${UNITS[@]}"; do
     echo "  Sandbox installed for ${unit}"
 done
 
-# 4. Reload systemd daemon
+# 4. Open the Process 1 backend port in the firewall on every cluster node.
+#    HAProxy's health checks and proxied requests reach each node on this port.
+#    This must be open on ALL three nodes — not just the one running HAProxy.
+if [[ "${TARGET_MODE}" != "--remote" && "${TARGET_MODE}" != "remote" && "${TARGET_MODE}" != "node4" ]]; then
+    API_BACKEND_PORT="${API_BACKEND_PORT:-8082}"
+    # Read from .env if present (honours a non-default API_BACKEND_PORT)
+    _env_file="${INSTALL_DIR}/.env"
+    if [[ -f "${_env_file}" ]]; then
+        _port="$(grep -E '^API_BACKEND_PORT=' "${_env_file}" | tail -1 | cut -d= -f2 | tr -d '[:space:]')"
+        [[ "${_port}" =~ ^[0-9]+$ ]] && API_BACKEND_PORT="${_port}"
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+        firewall-cmd --permanent --add-port="${API_BACKEND_PORT}/tcp"
+        firewall-cmd --reload
+        echo "  Firewall: opened port ${API_BACKEND_PORT}/tcp (Process 1 backend)"
+    else
+        echo "  Firewall: firewalld not active — ensure port ${API_BACKEND_PORT}/tcp is open on this node"
+    fi
+fi
+
+# 5. Reload systemd daemon
 systemctl daemon-reload
 
 echo ""

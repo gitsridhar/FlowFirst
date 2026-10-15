@@ -78,6 +78,10 @@ frontend flowfirst_api_front
 backend flowfirst_api_back
     mode http
     balance roundrobin
+    # Disable server-side connection reuse so every request is independently round-robined.
+    # Without this, HAProxy reuses an existing keep-alive connection to the same backend for
+    # all requests on a single client connection — all requests land on the same node.
+    http-reuse never
     option forwardfor except 127.0.0.0/8
     option httpchk GET /health
     http-check expect status 200

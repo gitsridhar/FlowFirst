@@ -875,7 +875,7 @@ def _gt_http_server():
 
 
 def _run_api_server():
-    """Leader callback: launch all greenthreads for Process 1."""
+    """Launch all greenthreads for Process 1."""
     gt.register_signal_handlers()
 
     # Greenthread 1: HTTP server (handles requests concurrently)
@@ -920,12 +920,9 @@ def main():
         log.warning(f"ZK unavailable ({e}) — degraded mode.")
         _config_watcher = None
 
-    # Leader election
+    # Process 1 runs on all three nodes simultaneously (cloned resource) — no leader election.
+    # Every node serves the REST API independently; HAProxy round-robins across all three.
     try:
-        election = zklib.LeaderElection("process1", NODE_NAME)
-        election.run(_run_api_server)
-    except Exception as e:
-        log.warning(f"ZK election failed ({e}) — single-node mode.")
         _run_api_server()
     finally:
         zklib.close_client()

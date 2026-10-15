@@ -109,7 +109,7 @@ fi
 
 # Use Python to substitute all placeholders (including the multi-line SST block)
 # without any shell quoting issues. __SST_ENCRYPT_BLOCK__ is read from a file.
-python3 - "${SCRIPT_DIR}/galera.cnf.template" "$_SST_BLOCK_FILE" \
+_GALERA_CNF="$(python3 - "${SCRIPT_DIR}/galera.cnf.template" "$_SST_BLOCK_FILE" \
     "${MARIADB_GALERA_WSREP_PROVIDER}" "${MARIADB_GALERA_CLUSTER_NAME}" \
     "${CLUSTER_ADDRESSES}" "${CURRENT_NODE_IP}" "${CURRENT_NODE_NAME}" \
     "${MARIADB_SST_METHOD}" <<'PYEOF'
@@ -131,7 +131,9 @@ for placeholder, value in (
 ):
     template = template.replace(placeholder, value)
 sys.stdout.write(template)
-PYEOF | sudo tee /etc/my.cnf.d/galera.cnf > /dev/null
+PYEOF
+)"
+printf '%s\n' "${_GALERA_CNF}" | sudo tee /etc/my.cnf.d/galera.cnf > /dev/null
 
 # 4. Stop standalone mariadb if running
 sudo systemctl stop mariadb || true

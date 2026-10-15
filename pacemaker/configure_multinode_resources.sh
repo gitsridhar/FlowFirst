@@ -97,22 +97,30 @@ echo "[4/5] Creating cloned active-active resources for Process 1, 2, 3, and 4..
 
 # Process 4: MariaDB persister
 sudo pcs resource create flowfirst-p4-res systemd:flowfirst-process4 \
-    op monitor interval=15s timeout=20s
+    op start   interval=0s  timeout=60s \
+    op stop    interval=0s  timeout=30s \
+    op monitor interval=30s timeout=30s
 sudo pcs resource clone flowfirst-p4-res clone-max=3 clone-node-max=1
 
 # Process 3: Reflector & Forwarder
 sudo pcs resource create flowfirst-p3-res systemd:flowfirst-process3 \
-    op monitor interval=15s timeout=20s
+    op start   interval=0s  timeout=60s \
+    op stop    interval=0s  timeout=30s \
+    op monitor interval=30s timeout=30s
 sudo pcs resource clone flowfirst-p3-res clone-max=3 clone-node-max=1
 
 # Process 2: Examiner & Reflector
 sudo pcs resource create flowfirst-p2-res systemd:flowfirst-process2 \
-    op monitor interval=15s timeout=20s
+    op start   interval=0s  timeout=60s \
+    op stop    interval=0s  timeout=30s \
+    op monitor interval=30s timeout=30s
 sudo pcs resource clone flowfirst-p2-res clone-max=3 clone-node-max=1
 
 # Process 1: REST API Producer (listening on :8080 on all 3 nodes)
 sudo pcs resource create flowfirst-p1-res systemd:flowfirst-process1 \
-    op monitor interval=15s timeout=20s
+    op start   interval=0s  timeout=60s \
+    op stop    interval=0s  timeout=30s \
+    op monitor interval=30s timeout=30s
 sudo pcs resource clone flowfirst-p1-res clone-max=3 clone-node-max=1
 
 # 5. Order constraints: Processes start before HAProxy routes traffic

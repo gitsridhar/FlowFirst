@@ -328,7 +328,7 @@ chown flowadmin:flowadmin /home/flowadmin/.ssh
 
 **Generate an SSH key pair once (on node1 or your admin workstation) and distribute it:**
 
-`flowadmin` has no password, so `ssh-copy-id flowadmin@<node>` cannot work (it needs a password to log in and install the key). Install the key **as root** instead, which is still available at this stage:
+`flowadmin` has no password, so `ssh-copy-id flowadmin@<node>` cannot work (it needs a password to log in and install the key). RHEL 9 also defaults to `PermitRootLogin prohibit-password`, so `ssh root@<node>` with a password is refused too. Install the key from the **cloud console (root)** of each node instead — see "No root SSH access?" below. If root SSH *does* work in your environment, this loop does it in one go:
 
 ```bash
 # On node1 as root — generate the key pair (accept defaults, no passphrase for automation):
@@ -345,7 +345,15 @@ for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
 done
 ```
 
-> **No root SSH access?** Use the cloud console on each node and append the contents of `id_ed25519.pub` to `/home/flowadmin/.ssh/authorized_keys`, then run `chown flowadmin:flowadmin`, `chmod 600` on that file and `restorecon -R /home/flowadmin/.ssh`.
+> **No root SSH access (the RHEL 9 default)?** Log in to each node from the cloud console as root and run:
+> ```bash
+> install -d -m 700 -o flowadmin -g flowadmin /home/flowadmin/.ssh
+> echo "<paste the one-line contents of id_ed25519.pub>" >> /home/flowadmin/.ssh/authorized_keys
+> chown flowadmin:flowadmin /home/flowadmin/.ssh/authorized_keys
+> chmod 600 /home/flowadmin/.ssh/authorized_keys
+> restorecon -R /home/flowadmin/.ssh
+> ```
+> Get the line to paste with `cat /home/flowadmin/.ssh/id_ed25519.pub` on node1 (or from your workstation's `~/.ssh/id_ed25519.pub` if you SSH in from there). Use the same line on all four nodes.
 >
 > **Still asked for a password?** sshd silently ignores a key when ownership or modes are wrong. Check on the node: `ls -ld /home/flowadmin /home/flowadmin/.ssh /home/flowadmin/.ssh/authorized_keys` (home must not be group/world-writable, `.ssh` must be `700`, `authorized_keys` `600`, all owned by `flowadmin`), `ls -Z /home/flowadmin/.ssh` (type `ssh_home_t`; fix with `restorecon -R`), and `journalctl -u sshd` / `/var/log/secure` for the exact reason. Also confirm `PubkeyAuthentication` is not set to `no` in `/etc/ssh/sshd_config`.
 

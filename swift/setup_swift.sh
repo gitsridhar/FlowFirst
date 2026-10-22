@@ -161,9 +161,20 @@ echo "[3/11] Preparing swift user and storage directory ${SWIFT_DEVICE_PATH}..."
 if ! id swift &>/dev/null; then
     sudo useradd --system --no-create-home --shell /sbin/nologin swift
 fi
-sudo mkdir -p /etc/swift /var/cache/swift /var/run/swift "${SWIFT_DEVICE_PATH}"
-sudo chown -R swift:swift /etc/swift /var/cache/swift /var/run/swift
+sudo mkdir -p /etc/swift /var/cache/swift /var/run/swift /var/log/swift "${SWIFT_DEVICE_PATH}"
+sudo chown -R swift:swift /etc/swift /var/cache/swift /var/run/swift /var/log/swift
+sudo chmod 755 /var/log/swift
 sudo chown swift:swift "${SWIFT_DEVICES_DIR}" "${SWIFT_DEVICE_PATH}"
+
+# /var/run is a tmpfs on RHEL 9 — /var/run/swift is lost on every reboot.
+# Install a systemd-tmpfiles rule so it (and /var/cache/swift) are recreated
+# automatically before any Swift unit starts.
+sudo tee /etc/tmpfiles.d/openstack-swift.conf > /dev/null <<'TMPEOF'
+d /var/run/swift   0755 swift swift -
+d /var/cache/swift 0755 swift swift -
+TMPEOF
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/openstack-swift.conf
+echo "  tmpfiles rule written: /var/run/swift and /var/cache/swift recreated on boot"
 
 # Swift stores object metadata in extended attributes — fail early if unsupported
 _xtest="${SWIFT_DEVICE_PATH}/.xattr_test"
@@ -185,13 +196,38 @@ if [ "${SWIFT_MOUNT_CHECK}" != "true" ] && ! mountpoint -q "${SWIFT_DEVICE_PATH}
     echo "  Created ${SWIFT_DEVICE_PATH}/.ismount (lets swift-recon treat the plain directory as a device)"
 fi
 
-# rsyncd runs confined (rsync_t) and must be able to write replicated data
+# SELinux: label directories with the correct Swift and rsync contexts so that
+# Swift daemons (swift_t) and rsyncd (rsync_t) can both access their paths
+# without PermissionError [Errno 13] denials in Enforcing mode.
 if command -v semanage &>/dev/null && command -v getenforce &>/dev/null \
         && [ "$(getenforce)" != "Disabled" ]; then
+    # Object data — needs swift_data_t for swift daemons AND rsync_data_t for rsyncd.
+    # Apply swift_data_t first; rsync_data_t is set below and both labels coexist
+    # because restorecon picks the most specific match.
+    sudo semanage fcontext -a -t swift_data_t "${SWIFT_DEVICES_DIR}(/.*)?" 2>/dev/null \
+        || sudo semanage fcontext -m -t swift_data_t "${SWIFT_DEVICES_DIR}(/.*)?"
     sudo semanage fcontext -a -t rsync_data_t "${SWIFT_DEVICES_DIR}(/.*)?" 2>/dev/null \
         || sudo semanage fcontext -m -t rsync_data_t "${SWIFT_DEVICES_DIR}(/.*)?"
     sudo restorecon -R "${SWIFT_DEVICES_DIR}"
-    echo "  SELinux: ${SWIFT_DEVICES_DIR} labelled rsync_data_t"
+    echo "  SELinux: ${SWIFT_DEVICES_DIR} labelled swift_data_t / rsync_data_t"
+
+    # Config files
+    sudo semanage fcontext -a -t swift_conf_t "/etc/swift(/.*)?" 2>/dev/null \
+        || sudo semanage fcontext -m -t swift_conf_t "/etc/swift(/.*)?"
+    sudo restorecon -R /etc/swift
+    echo "  SELinux: /etc/swift labelled swift_conf_t"
+
+    # Runtime and cache directories
+    sudo semanage fcontext -a -t swift_var_run_t "/var/run/swift(/.*)?" 2>/dev/null \
+        || sudo semanage fcontext -m -t swift_var_run_t "/var/run/swift(/.*)?"
+    sudo restorecon -R /var/run/swift
+    echo "  SELinux: /var/run/swift labelled swift_var_run_t"
+
+    # Log directory
+    sudo semanage fcontext -a -t swift_log_t "/var/log/swift(/.*)?" 2>/dev/null \
+        || sudo semanage fcontext -m -t swift_log_t "/var/log/swift(/.*)?"
+    sudo restorecon -R /var/log/swift
+    echo "  SELinux: /var/log/swift labelled swift_log_t"
 fi
 
 # ---------------------------------------------------------------------------

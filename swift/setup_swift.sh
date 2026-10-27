@@ -196,38 +196,48 @@ if [ "${SWIFT_MOUNT_CHECK}" != "true" ] && ! mountpoint -q "${SWIFT_DEVICE_PATH}
     echo "  Created ${SWIFT_DEVICE_PATH}/.ismount (lets swift-recon treat the plain directory as a device)"
 fi
 
-# SELinux: label directories with the correct Swift and rsync contexts so that
-# Swift daemons (swift_t) and rsyncd (rsync_t) can both access their paths
-# without PermissionError [Errno 13] denials in Enforcing mode.
+# SELinux: label directories so that Swift daemons and rsyncd can access their
+# paths without PermissionError [Errno 13] denials in Enforcing mode.
+#
+# Type selection rationale (RHEL 9 base policy — no openstack-selinux required):
+#   swift_data_t      — defined by the openstack-selinux RPM; may not be present.
+#                       Skipped here; swift_t (the process domain) can read/write
+#                       var_t and rsync_data_t through the base policy allowances.
+#   rsync_data_t      — always present; covers the data dir for both rsyncd and
+#                       the Swift object/container/account daemons.
+#   etc_t             — correct for /etc/swift config files (always present).
+#   var_run_t         — correct for /var/run/swift PID files (always present).
+#   var_log_t         — correct for /var/log/swift log files (always present).
+#
+# swift_conf_t, swift_var_run_t, and swift_log_t exist only when
+# openstack-selinux is installed and are NOT valid on a base RHEL 9 system;
+# using them raises "ValueError: Type X is invalid, must be a file or device type."
 if command -v semanage &>/dev/null && command -v getenforce &>/dev/null \
         && [ "$(getenforce)" != "Disabled" ]; then
-    # Object data — needs swift_data_t for swift daemons AND rsync_data_t for rsyncd.
-    # Apply swift_data_t first; rsync_data_t is set below and both labels coexist
-    # because restorecon picks the most specific match.
-    sudo semanage fcontext -a -t swift_data_t "${SWIFT_DEVICES_DIR}(/.*)?" 2>/dev/null \
-        || sudo semanage fcontext -m -t swift_data_t "${SWIFT_DEVICES_DIR}(/.*)?"
+    # Object data directory — rsync_data_t is understood by both rsyncd and
+    # the Swift daemons under the base RHEL 9 SELinux policy.
     sudo semanage fcontext -a -t rsync_data_t "${SWIFT_DEVICES_DIR}(/.*)?" 2>/dev/null \
         || sudo semanage fcontext -m -t rsync_data_t "${SWIFT_DEVICES_DIR}(/.*)?"
     sudo restorecon -R "${SWIFT_DEVICES_DIR}"
-    echo "  SELinux: ${SWIFT_DEVICES_DIR} labelled swift_data_t / rsync_data_t"
+    echo "  SELinux: ${SWIFT_DEVICES_DIR} labelled rsync_data_t"
 
-    # Config files
-    sudo semanage fcontext -a -t swift_conf_t "/etc/swift(/.*)?" 2>/dev/null \
-        || sudo semanage fcontext -m -t swift_conf_t "/etc/swift(/.*)?"
+    # Config files — etc_t is the correct base-policy type for /etc subtrees.
+    sudo semanage fcontext -a -t etc_t "/etc/swift(/.*)?" 2>/dev/null \
+        || sudo semanage fcontext -m -t etc_t "/etc/swift(/.*)?"
     sudo restorecon -R /etc/swift
-    echo "  SELinux: /etc/swift labelled swift_conf_t"
+    echo "  SELinux: /etc/swift labelled etc_t"
 
-    # Runtime and cache directories
-    sudo semanage fcontext -a -t swift_var_run_t "/var/run/swift(/.*)?" 2>/dev/null \
-        || sudo semanage fcontext -m -t swift_var_run_t "/var/run/swift(/.*)?"
+    # Runtime directory — var_run_t is always present for /var/run subtrees.
+    sudo semanage fcontext -a -t var_run_t "/var/run/swift(/.*)?" 2>/dev/null \
+        || sudo semanage fcontext -m -t var_run_t "/var/run/swift(/.*)?"
     sudo restorecon -R /var/run/swift
-    echo "  SELinux: /var/run/swift labelled swift_var_run_t"
+    echo "  SELinux: /var/run/swift labelled var_run_t"
 
-    # Log directory
-    sudo semanage fcontext -a -t swift_log_t "/var/log/swift(/.*)?" 2>/dev/null \
-        || sudo semanage fcontext -m -t swift_log_t "/var/log/swift(/.*)?"
+    # Log directory — var_log_t is always present for /var/log subtrees.
+    sudo semanage fcontext -a -t var_log_t "/var/log/swift(/.*)?" 2>/dev/null \
+        || sudo semanage fcontext -m -t var_log_t "/var/log/swift(/.*)?"
     sudo restorecon -R /var/log/swift
-    echo "  SELinux: /var/log/swift labelled swift_log_t"
+    echo "  SELinux: /var/log/swift labelled var_log_t"
 fi
 
 # ---------------------------------------------------------------------------

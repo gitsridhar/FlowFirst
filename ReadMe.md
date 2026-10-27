@@ -362,7 +362,7 @@ done
 ```bash
 for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
     echo -n "${node}: "
-    ssh -o BatchMode=yes -o ConnectTimeout=5 flowadmin@${node} "hostname" || echo "FAILED"
+    sudo ssh -o BatchMode=yes -o ConnectTimeout=5 flowadmin@${node} "hostname" || echo "FAILED"
 done
 ```
 

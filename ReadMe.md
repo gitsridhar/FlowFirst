@@ -373,8 +373,23 @@ restorecon -R /home/flowadmin/.ssh
 ```bash
 # Still on the node1 console as root — switch user (no password needed from root):
 su - flowadmin
+```
 
-# You are now flowadmin. Run the connectivity check:
+You are now `flowadmin`. Before running SSH you must pre-populate `known_hosts` — SSH refuses to connect non-interactively to a host whose fingerprint it has never seen, and would print `Host key verification failed` or prompt you to accept it. Run `ssh-keyscan` once to collect all four host keys silently:
+
+```bash
+# Replace the IPs below with your actual node IPs if the variables are not set.
+# (Set them: export NODE1_IP=<ip> NODE2_IP=<ip> NODE3_IP=<ip> NODE4_IP=<ip>)
+for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
+    ssh-keyscan -H "${node}" >> ~/.ssh/known_hosts 2>/dev/null
+done
+# Remove any duplicate entries that may have crept in:
+sort -u ~/.ssh/known_hosts -o ~/.ssh/known_hosts
+```
+
+Now run the connectivity check — every node should print `OK` with no prompts:
+
+```bash
 for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
     echo -n "${node}: "
     ssh -o BatchMode=yes -o ConnectTimeout=5 flowadmin@${node} "hostname" \
@@ -390,7 +405,7 @@ done
 > |---------|-------------|-----|
 > | `Permission denied (publickey)` | `authorized_keys` missing, wrong content, wrong permissions, or SELinux label | Re-run Step 3 on the failing node. Then: `ls -la /home/flowadmin/.ssh/` (`.ssh` must be `700`, `authorized_keys` must be `600`, both owned by `flowadmin`), then `ls -Z /home/flowadmin/.ssh/` (type must be `ssh_home_t`; fix with `sudo restorecon -R /home/flowadmin/.ssh`). Check `/var/log/secure` on the **target** node for sshd's reason. |
 > | `ssh: connect to host … port 22: Connection refused` | firewall blocks port 22, or sshd is not running | `sudo systemctl status sshd` on target; `sudo firewall-cmd --list-all` — add `--add-service=ssh` if missing |
-> | `Host key verification failed` | First-time connection to that node from this flowadmin session | Run `ssh-keyscan -H ${node} >> /home/flowadmin/.ssh/known_hosts` once per node, then retry |
+> | `Host key verification failed` | `ssh-keyscan` step above was skipped, or a node's host key changed | Re-run the `ssh-keyscan` loop above, then retry |
 > | `PubkeyAuthentication no` in sshd_config | A non-default sshd_config disables key auth | `sudo grep PubkeyAuthentication /etc/ssh/sshd_config` — if set to `no`, change to `yes` and `sudo systemctl reload sshd` |
 
 **Step 5 — From this point on, work as `flowadmin` and prefix install commands with `sudo`:**

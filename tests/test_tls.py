@@ -63,9 +63,21 @@ def test_client_context_verifies_server_and_hostname(tls_files):
     assert ctx.minimum_version == ssl.TLSVersion.TLSv1_2
 
 
+def _tls13_min_supported():
+    """Return True if this SSL library can enforce TLS 1.3 as the minimum version."""
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        return True
+    except (AttributeError, ValueError):
+        return False
+
+
+@pytest.mark.skipif(not _tls13_min_supported(), reason="TLSv1_3 minimum not supported by this SSL library (LibreSSL)")
 def test_min_version_13(tls_files, monkeypatch):
     monkeypatch.setattr(config, "TLS_MIN_VERSION", "1.3")
-    assert tls.client_context().minimum_version == ssl.TLSVersion.TLSv1_3
+    ctx = tls.client_context()
+    assert ctx.minimum_version == ssl.TLSVersion.TLSv1_3
 
 
 @pytest.mark.parametrize("bad", ["1.0", "1.1", "", "tls"])

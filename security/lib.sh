@@ -79,8 +79,16 @@ ca_key_unlock() {
     ca_pass_init
     local base="${TMPDIR:-/tmp}"; [[ -d /dev/shm && -w /dev/shm ]] && base=/dev/shm
     _CA_KEY_TMP="$(umask 077; mktemp -d "${base%/}/flowfirst-ca.XXXXXX")" || die "Cannot create a temporary directory."
-    if ! openssl pkcs8 -in "${CA_DIR}/ca.key" -passin env:PKI_CA_PASS -out "${_CA_KEY_TMP}/ca.plain.key" 2>/dev/null; then
-        ca_key_lock; die "Cannot decrypt ${CA_DIR}/ca.key - wrong CA passphrase?"
+    # openssl genrsa -aes256 produces different PEM headers depending on the version:
+    #   OpenSSL < 3.x and LibreSSL  →  PKCS#1  "BEGIN RSA PRIVATE KEY"  (openssl rsa can decrypt it)
+    #   OpenSSL 3.x (ubuntu-latest) →  PKCS#8  "BEGIN ENCRYPTED PRIVATE KEY"  (openssl pkcs8 can decrypt it)
+    # Try the PKCS#8 path first (newer), fall back to the PKCS#1 path (older / LibreSSL).
+    if ! openssl pkcs8 -in "${CA_DIR}/ca.key" -passin env:PKI_CA_PASS \
+            -out "${_CA_KEY_TMP}/ca.plain.key" 2>/dev/null; then
+        if ! openssl rsa -in "${CA_DIR}/ca.key" -passin env:PKI_CA_PASS \
+                -out "${_CA_KEY_TMP}/ca.plain.key" 2>/dev/null; then
+            ca_key_lock; die "Cannot decrypt ${CA_DIR}/ca.key - wrong CA passphrase?"
+        fi
     fi
     CA_KEY_PLAIN="${_CA_KEY_TMP}/ca.plain.key"
 }

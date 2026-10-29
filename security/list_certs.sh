@@ -20,7 +20,8 @@ for d in "${ISSUED_DIR}"/*/; do
     [[ -f "${crt}" ]] || continue
     serial="$(openssl x509 -in "${crt}" -noout -serial | cut -d= -f2)"
     end="$(openssl x509 -in "${crt}" -noout -enddate | cut -d= -f2)"
-    eku="$(openssl x509 -in "${crt}" -noout -ext extendedKeyUsage 2>/dev/null | tr -d '\n')"
+    eku="$(openssl x509 -in "${crt}" -noout -ext extendedKeyUsage 2>/dev/null; true)"
+    eku="${eku//$'\n'/}"
     case "${eku}" in *"Server"*"Client"*) prof=peer ;; *"Server"*) prof=server ;; *"Client"*) prof=client ;; *) prof=? ;; esac
     if grep -q "^R.*[[:space:]]${serial}[[:space:]]" "${CA_DIR}/index.txt"; then
         status="REVOKED"; bad=1

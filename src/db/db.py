@@ -278,12 +278,19 @@ def query_devices(filters: dict) -> list:
     where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     sql = f"SELECT * FROM devices {where_clause} ORDER BY created_at DESC LIMIT 1000;"
 
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute(sql, params)
-            return cursor.fetchall()
-    finally:
-        if conn:
-            conn.close()
+    max_retries = 3
+    for attempt in range(max_retries):
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                cursor.execute(sql, params)
+                return cursor.fetchall()
+        except pymysql.err.OperationalError as op_err:
+            if op_err.args[0] in (1213, 1205) and attempt < max_retries - 1:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            raise
+        finally:
+            if conn:
+                conn.close()

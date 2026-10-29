@@ -68,7 +68,7 @@ groups:
           description: "These messages failed processing and were set aside, not lost. Find the cause in the logs, fix it, then scripts/replay_dead_letters.py (see ReadMe Production Rollout R3)."
 
       - alert: FlowFirstQueueBacklog
-        expr: max by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"flow[123]_.*"}) > 10000
+        expr: max by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"flow[1-7]_.*"}) > 10000
         for: 10m
         labels: {severity: warning}
         annotations:
@@ -76,7 +76,7 @@ groups:
           description: "The stage that consumes this queue is slower than the one before it. ReadMe Scenario 61 'Tuning' lists the levers (GT_CONSUMERS_PER_QUEUE, GT_PREFETCH_COUNT, API_PUBLISH_CONNECTIONS)."
 
       - alert: FlowFirstQueueNoConsumers
-        expr: max by (queue) (rabbitmq_detailed_queue_consumers{queue=~"flow[123]_.*"}) == 0
+        expr: max by (queue) (rabbitmq_detailed_queue_consumers{queue=~"flow[1-7]_.*"}) == 0
         for: 5m
         labels: {severity: critical}
         annotations:

@@ -383,17 +383,25 @@ class RestApiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # CORS: only enabled when explicitly set in .env (API_CORS_ORIGIN).
+        # Sending '*' while the API uses token/api_key auth is unsafe — browsers
+        # with CORS credentials will reject it and expose the token in preflight.
+        # Default is no CORS headers (server-to-server and CLI callers do not need them).
+        _cors = os.getenv("API_CORS_ORIGIN", "").strip()
+        if _cors:
+            self.send_header("Access-Control-Allow-Origin", _cors)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key, Authorization")
         self.end_headers()
         self.wfile.write(body)
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        _cors = os.getenv("API_CORS_ORIGIN", "").strip()
+        if _cors:
+            self.send_header("Access-Control-Allow-Origin", _cors)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key, Authorization")
         self.end_headers()
 
     def do_GET(self):

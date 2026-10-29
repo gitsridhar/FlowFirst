@@ -38,17 +38,28 @@ _TLS_HANDSHAKE_TIMEOUT_S = 10.0
 _FLOWS = ("1", "2", "3")
 _ALL_FLOWS = ("1", "2", "3", "4", "5", "6", "7")
 EXPECTED_COUNTERS: Dict[str, List[str]] = {
-    "api_gateway": [f"flow{f}_published" for f in _FLOWS] + [f"http_{c}xx" for c in "2345"],
-    "transformer": [f"flow{f}_{e}" for f in _FLOWS for e in ("processed", "failed")],
-    "forwarder": ["flow1_forwarded", "flow1_failed", "flow2_reflected", "flow2_failed"],
+    "api_gateway": (
+        [f"flow{f}_published" for f in _ALL_FLOWS]
+        + [f"http_{c}xx" for c in "2345"]
+    ),
+    "transformer": [f"flow{f}_{e}" for f in _ALL_FLOWS for e in ("processed", "failed")]
+                   + ["flow6_remote_processed"],
+    "forwarder": (
+        ["flow1_forwarded", "flow1_failed", "flow2_reflected", "flow2_failed"]
+        + [f"flow{f}_{e}" for f in ("4", "5", "6", "7") for e in ("forwarded", "failed")]
+    ),
     "db_updater": (
         ["dedup_reaped"]
-        + [f"flow{f}_{e}" for f in _FLOWS
+        + [f"flow{f}_{e}" for f in _ALL_FLOWS
            for e in ("persisted", "swift_stored", "dedup_skipped", "failed")]
+        + ["flow6_remote_persisted", "flow6_remote_swift_stored",
+           "flow6_remote_dedup_skipped", "flow6_remote_notified"]
         + [f"flow{f}_notified" for f in _ALL_FLOWS]
-        + ["flow6_remote_notified"]
     ),
-    "remote_worker": ["flow3_processed", "flow3_failed"],
+    "remote_worker": [
+        "flow3_processed", "flow3_failed",
+        "flow6_processed", "flow6_failed",
+    ],
 }
 
 Sample = Union[float, int, List[Tuple[Dict[str, str], float]]]

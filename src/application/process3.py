@@ -233,11 +233,28 @@ def handle_flow6_message(ch, method, properties, body):
             delivery_mode=pika.DeliveryMode.Persistent,
             content_type="application/json",
         )
-        # Dual-publish: direct persistence path AND remote edge-sync fan-out
-        ch.basic_publish(exchange="", mandatory=True, routing_key=QUEUE_FLOW6_P3_TO_P4,
-                         body=msg_body, properties=props)
-        ch.basic_publish(exchange="", mandatory=True, routing_key=QUEUE_FLOW6_P3_TO_P5,
-                         body=msg_body, properties=props)
+        # Dual-publish: direct persistence path AND remote edge-sync fan-out.
+        # Both publishes use mandatory=True with publisher confirms.  If the first
+        # succeeds but the second raises, the message has already landed on P4's
+        # queue — the only safe option is to ack the inbound message so it is not
+        # delivered again (which would cause a duplicate insert on P4) and log the
+        # P5 publish failure.  The ZK dedup barrier in P4 guards against any
+        # duplicate even if the message is somehow re-delivered later.
+        p4_published = False
+        try:
+            ch.basic_publish(exchange="", mandatory=True, routing_key=QUEUE_FLOW6_P3_TO_P4,
+                             body=msg_body, properties=props)
+            p4_published = True
+            ch.basic_publish(exchange="", mandatory=True, routing_key=QUEUE_FLOW6_P3_TO_P5,
+                             body=msg_body, properties=props)
+        except Exception as pub_exc:
+            if p4_published:
+                # P4 path delivered; P5 path failed.  Ack so we don't re-deliver to P4.
+                log.error(f"[Flow 6] P5 publish failed after P4 succeeded — acking to avoid duplicate P4 insert: {pub_exc}", exc_info=True)
+                gt.metrics_counter["flow6_failed"] += 1
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+                return
+            raise   # P4 itself failed — let the outer except handle it
         gt.metrics_counter["flow6_forwarded"] += 1
         log.info(f"[Flow 6] Validated and dual-published to '{QUEUE_FLOW6_P3_TO_P4}' and '{QUEUE_FLOW6_P3_TO_P5}'")
         ch.basic_ack(delivery_tag=method.delivery_tag)

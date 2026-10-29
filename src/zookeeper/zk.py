@@ -79,6 +79,8 @@ _CONFIG_DEFAULTS = {
     "flow1_counter_step":      10,
     "flow2_scale_factor":      1.15,
     "flow3_remote_multiplier": 2,
+    "flow6_update_seq":        0,    # 0 = use system clock ms timestamp (see process2.py handle_flow6_message)
+    "flow7_grace_period_s":    0,    # 0 = no grace period before deletion marker is forwarded
 }
 
 

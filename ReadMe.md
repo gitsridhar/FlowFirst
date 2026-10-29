@@ -368,19 +368,21 @@ restorecon -R /home/flowadmin/.ssh
 
 **Step 4 — Verify passwordless SSH works between all nodes:**
 
-Log in as `flowadmin` on node1 (via console or SSH, since the key is now installed) and run:
+`flowadmin` has no login password — authentication is by key only. You are currently root on the console, so switch to `flowadmin` with `su`:
 
 ```bash
-# Log in as flowadmin first — do NOT run this as root or with sudo:
-ssh flowadmin@${NODE1_IP}
+# Still on the node1 console as root — switch user (no password needed from root):
+su - flowadmin
 
-# Then from that session:
+# You are now flowadmin. Run the connectivity check:
 for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
     echo -n "${node}: "
     ssh -o BatchMode=yes -o ConnectTimeout=5 flowadmin@${node} "hostname" \
         && echo "OK" || echo "FAILED"
 done
 ```
+
+> **`${NODE1_IP}` not set?** If the variables are not in your current shell, either export them manually (`export NODE1_IP=<ip> NODE2_IP=...`) or source the `.env` file once it exists: `set -a && source /opt/flowfirst/.env && set +a`. At this point in the install (before Phase 0b) it is easiest to just type the IPs directly.
 
 > **All nodes should print `OK`. Common reasons for `FAILED`:**
 >
@@ -391,10 +393,15 @@ done
 > | `Host key verification failed` | First-time connection to that node from this flowadmin session | Run `ssh-keyscan -H ${node} >> /home/flowadmin/.ssh/known_hosts` once per node, then retry |
 > | `PubkeyAuthentication no` in sshd_config | A non-default sshd_config disables key auth | `sudo grep PubkeyAuthentication /etc/ssh/sshd_config` — if set to `no`, change to `yes` and `sudo systemctl reload sshd` |
 
-**Step 5 — From this point on, log in as `flowadmin` and prefix install commands with `sudo`:**
+**Step 5 — From this point on, work as `flowadmin` and prefix install commands with `sudo`:**
 
 ```bash
-ssh flowadmin@${NODE1_IP}
+# From the node1 console (still as root):
+su - flowadmin
+
+# Or from a remote machine (key auth — no password):
+ssh -i /home/flowadmin/.ssh/id_ed25519 flowadmin@${NODE1_IP}
+
 # All subsequent phases run as flowadmin with sudo
 ```
 

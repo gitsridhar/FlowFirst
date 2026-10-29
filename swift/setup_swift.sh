@@ -176,6 +176,14 @@ TMPEOF
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/openstack-swift.conf
 echo "  tmpfiles rule written: /var/run/swift and /var/cache/swift recreated on boot"
 
+# /var/run is a tmpfs on RHEL 9 — rsyncd.pid is also lost on every reboot.
+# Install a tmpfiles rule so the PID file path survives.
+sudo tee /etc/tmpfiles.d/rsyncd.conf > /dev/null <<'TMPEOF'
+f /var/run/rsyncd.pid 0644 root root -
+TMPEOF
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/rsyncd.conf
+echo "  tmpfiles rule written: /var/run/rsyncd.pid recreated on boot"
+
 # Swift stores object metadata in extended attributes — fail early if unsupported
 _xtest="${SWIFT_DEVICE_PATH}/.xattr_test"
 sudo touch "${_xtest}"

@@ -74,7 +74,8 @@ def put_message_object(
     container = container_name or SWIFT_CONTAINER
     msg_id = message_data.get("message_id", "")
     flow = message_data.get("flow", "unknown")
-    obj_name = object_name or f"flow{flow}/{msg_id}.json"
+    prefix = message_data.get("swift_path_prefix", "")
+    obj_name = object_name or f"{prefix}flow{flow}/{msg_id}.json"
 
     try:
         conn = get_swift_connection()

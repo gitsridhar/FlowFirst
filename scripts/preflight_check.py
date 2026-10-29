@@ -202,6 +202,34 @@ def check_sandbox():
         say("PASS", "service sandbox", "drop-in present for %d unit(s); score: systemd-analyze security <unit>" % len(units))
 
 
+def check_swift_services():
+    """Check that Swift systemd units are active on this node (nodes 1-3 only)."""
+    # openstack-swift-* units are not installed on node4; skip silently when none are present.
+    swift_units = [
+        "openstack-swift-proxy",
+        "openstack-swift-account",
+        "openstack-swift-container",
+        "openstack-swift-object",
+        "memcached",
+        "rsyncd",
+    ]
+    present = [u for u in swift_units if shutil.which("systemctl") and
+               run(["systemctl", "cat", u + ".service"], timeout=5)[0] == 0]
+    if not present:
+        say("SKIP", "Swift services", "no openstack-swift units installed on this node (node4 or pre-install)")
+        return
+    inactive = []
+    for u in present:
+        rc, _ = run(["systemctl", "is-active", "--quiet", u], timeout=5)
+        if rc != 0:
+            inactive.append(u)
+    if inactive:
+        say("FAIL", "Swift services", "not active: %s — check: journalctl -u %s -n 50" % (
+            ", ".join(inactive), inactive[0]))
+    else:
+        say("PASS", "Swift services", "%d unit(s) active" % len(present))
+
+
 def check_backup_tools():
     """Tools the backup script needs on this node. Does not prove a backup exists or has been verified."""
     missing = [t for t in ("openssl", "gzip", "tar") if not shutil.which(t)]
@@ -263,6 +291,7 @@ def main():
         check_metrics(env, cfg)
         check_tls(env, cfg)
     check_rabbitmq()
+    check_swift_services()
     check_backup_tools()
     check_sandbox()
     print("\n%d PASS, %d WARN, %d FAIL, %d SKIP" % tuple(RESULTS.count(x) for x in ("PASS", "WARN", "FAIL", "SKIP")))

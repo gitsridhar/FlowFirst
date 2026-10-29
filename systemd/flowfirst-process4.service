@@ -1,7 +1,7 @@
 [Unit]
 Description=FlowFirst DB Updater (Process 4) - MariaDB Persister & Sink
-After=network.target rabbitmq-server.service mariadb.service zookeeper.service
-Wants=rabbitmq-server.service mariadb.service zookeeper.service
+After=network.target rabbitmq-server.service mariadb.service zookeeper.service openstack-swift-proxy.service
+Wants=rabbitmq-server.service mariadb.service zookeeper.service openstack-swift-proxy.service
 
 [Service]
 Type=simple

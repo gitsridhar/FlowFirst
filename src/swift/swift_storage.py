@@ -75,7 +75,9 @@ def put_message_object(
     msg_id = message_data.get("message_id", "")
     flow = message_data.get("flow", "unknown")
     prefix = message_data.get("swift_path_prefix", "")
-    obj_name = object_name or f"{prefix}flow{flow}/{msg_id}.json"
+    # Callers may supply a fully-qualified object name via swift_object_name (e.g. Flow 5
+    # query results).  Falls back to the standard flow<N>/<msg_id>.json layout.
+    obj_name = object_name or message_data.get("swift_object_name") or f"{prefix}flow{flow}/{msg_id}.json"
 
     try:
         conn = get_swift_connection()

@@ -211,7 +211,7 @@ def check_swift_services():
         "openstack-swift-container",
         "openstack-swift-object",
         "memcached",
-        "rsyncd",
+        "rsync-daemon",   # RHEL 9: the rsync-daemon package installs rsync-daemon.service, not rsyncd.service
     ]
     present = [u for u in swift_units if shutil.which("systemctl") and
                run(["systemctl", "cat", u + ".service"], timeout=5)[0] == 0]

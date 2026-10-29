@@ -297,19 +297,19 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 
 #### Phase 0 (pre-step) — Create a dedicated admin user
 
-> **Run as root on every node (1–4) before anything else.**
+> **Run as root on every node (1–4) before anything else — via the cloud/hypervisor console, not SSH.**
 
 Do not perform the installation as `root`. Create a dedicated user (`flowadmin` is used throughout this guide), add it to the `wheel` group (RHEL's sudoers group), and set up passwordless SSH between the cluster nodes. All `sudo` commands in subsequent phases run as `flowadmin`.
 
 **Why a dedicated user, not root:**
-- Root login is typically disabled or audited separately; `flowadmin` actions are logged under their own identity in the journal and in `/var/log/secure`.
+- Root login is disabled by default on RHEL 9 (`PermitRootLogin prohibit-password`); `flowadmin` actions are logged under their own identity in the journal and in `/var/log/secure`.
 - The `flowuser` system account that *runs the pipeline processes* is separate and has no login shell — `flowadmin` is your operator/installer identity, `flowuser` is the service identity.
 - Passwordless `sudo` is scoped to `flowadmin` only; other users on the nodes are unaffected.
 - `install_certs.sh` and `configure_multinode_resources.sh` SSH between nodes using the calling user's identity — a named account with a known key is easier to audit and rotate than root.
 
-```bash
-# Run on EVERY node (1–4) as root:
+**Step 1 — Run this block on EVERY node (1–4) from the cloud/hypervisor console as root:**
 
+```bash
 # 1. Create the admin user (no login password — SSH key only)
 useradd -m -s /bin/bash -c "FlowFirst admin" flowadmin
 
@@ -320,57 +320,82 @@ usermod -aG wheel flowadmin
 echo "flowadmin ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/flowadmin
 chmod 440 /etc/sudoers.d/flowadmin
 
-# 4. Create the .ssh directory
-mkdir -p /home/flowadmin/.ssh
-chmod 700 /home/flowadmin/.ssh
-chown flowadmin:flowadmin /home/flowadmin/.ssh
+# 4. Create the .ssh directory with the correct ownership and modes
+install -d -m 700 -o flowadmin -g flowadmin /home/flowadmin/.ssh
 ```
 
-**Generate an SSH key pair once (on node1 or your admin workstation) and distribute it:**
-
-`flowadmin` has no password, so `ssh-copy-id flowadmin@<node>` cannot work (it needs a password to log in and install the key). RHEL 9 also defaults to `PermitRootLogin prohibit-password`, so `ssh root@<node>` with a password is refused too. Install the key from the **cloud console (root)** of each node instead — see "No root SSH access?" below. If root SSH *does* work in your environment, this loop does it in one go:
+**Step 2 — Generate the SSH key pair once (on node1's console as root):**
 
 ```bash
-# On node1 as root — generate the key pair (accept defaults, no passphrase for automation):
-sudo -u flowadmin ssh-keygen -t ed25519 -C "flowadmin@flowfirst" -N "" -f /home/flowadmin/.ssh/id_ed25519
+# On node1 console, as root — generate a key pair for flowadmin with no passphrase:
+sudo -u flowadmin ssh-keygen -t ed25519 -C "flowadmin@flowfirst" -N "" \
+    -f /home/flowadmin/.ssh/id_ed25519
 
-# Install the public key into authorized_keys on all four nodes (including node1 itself),
-# with the ownership, modes and SELinux context sshd requires:
-for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
-    ssh root@${node} "install -d -m 700 -o flowadmin -g flowadmin /home/flowadmin/.ssh \
-      && cat >> /home/flowadmin/.ssh/authorized_keys \
-      && chown flowadmin:flowadmin /home/flowadmin/.ssh/authorized_keys \
-      && chmod 600 /home/flowadmin/.ssh/authorized_keys \
-      && restorecon -R /home/flowadmin/.ssh" < /home/flowadmin/.ssh/id_ed25519.pub
-done
+# Print the public key — you will paste this line onto every other node:
+cat /home/flowadmin/.ssh/id_ed25519.pub
 ```
 
-> **No root SSH access (the RHEL 9 default)?** Log in to each node from the cloud console as root and run:
+Copy the single output line (it starts with `ssh-ed25519 AAAA...`). You will paste it in Step 3.
+
+**Step 3 — Install the public key on every node (console as root on each):**
+
+Run the following on **all four nodes** (including node1 itself). Paste the public key line from Step 2 where indicated:
+
+```bash
+# Replace the line below with the actual output of 'cat id_ed25519.pub' from node1:
+PUBKEY="ssh-ed25519 AAAA...paste-full-line-here... flowadmin@flowfirst"
+
+install -d -m 700 -o flowadmin -g flowadmin /home/flowadmin/.ssh
+echo "${PUBKEY}" >> /home/flowadmin/.ssh/authorized_keys
+chown flowadmin:flowadmin /home/flowadmin/.ssh/authorized_keys
+chmod 600 /home/flowadmin/.ssh/authorized_keys
+# SELinux: label the directory correctly so sshd can read the key
+restorecon -R /home/flowadmin/.ssh
+```
+
+> **Tip — copy the key without manual paste (optional):** If you can already SSH into the other nodes as your own user and have `sudo`, you can push the key without using the cloud console:
 > ```bash
-> install -d -m 700 -o flowadmin -g flowadmin /home/flowadmin/.ssh
-> echo "<paste the one-line contents of id_ed25519.pub>" >> /home/flowadmin/.ssh/authorized_keys
-> chown flowadmin:flowadmin /home/flowadmin/.ssh/authorized_keys
-> chmod 600 /home/flowadmin/.ssh/authorized_keys
-> restorecon -R /home/flowadmin/.ssh
+> # From node1 as flowadmin — push the public key to node2 and node3:
+> for node in ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
+>     cat /home/flowadmin/.ssh/id_ed25519.pub | \
+>         ssh <your-user>@${node} "sudo tee -a /home/flowadmin/.ssh/authorized_keys > /dev/null \
+>           && sudo chown flowadmin:flowadmin /home/flowadmin/.ssh/authorized_keys \
+>           && sudo chmod 600 /home/flowadmin/.ssh/authorized_keys \
+>           && sudo restorecon -R /home/flowadmin/.ssh"
+> done
 > ```
-> Get the line to paste with `cat /home/flowadmin/.ssh/id_ed25519.pub` on node1 (or from your workstation's `~/.ssh/id_ed25519.pub` if you SSH in from there). Use the same line on all four nodes.
->
-> **Still asked for a password?** sshd silently ignores a key when ownership or modes are wrong. Check on the node: `ls -ld /home/flowadmin /home/flowadmin/.ssh /home/flowadmin/.ssh/authorized_keys` (home must not be group/world-writable, `.ssh` must be `700`, `authorized_keys` `600`, all owned by `flowadmin`), `ls -Z /home/flowadmin/.ssh` (type `ssh_home_t`; fix with `restorecon -R`), and `journalctl -u sshd` / `/var/log/secure` for the exact reason. Also confirm `PubkeyAuthentication` is not set to `no` in `/etc/ssh/sshd_config`.
+> Replace `<your-user>` with whatever account you currently use to SSH in (your personal account, `ec2-user`, `cloud-user`, `vagrant`, etc.). That user only needs `sudo` access.
 
-**Verify passwordless SSH works between all nodes:**
+**Step 4 — Verify passwordless SSH works between all nodes:**
+
+Log in as `flowadmin` on node1 (via console or SSH, since the key is now installed) and run:
 
 ```bash
+# Log in as flowadmin first — do NOT run this as root or with sudo:
+ssh flowadmin@${NODE1_IP}
+
+# Then from that session:
 for node in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
     echo -n "${node}: "
-    sudo ssh -o BatchMode=yes -o ConnectTimeout=5 flowadmin@${node} "hostname" || echo "FAILED"
+    ssh -o BatchMode=yes -o ConnectTimeout=5 flowadmin@${node} "hostname" \
+        && echo "OK" || echo "FAILED"
 done
 ```
 
-**From this point on, log in as `flowadmin` and prefix install commands with `sudo`:**
+> **All nodes should print `OK`. Common reasons for `FAILED`:**
+>
+> | Symptom | Likely cause | Fix |
+> |---------|-------------|-----|
+> | `Permission denied (publickey)` | `authorized_keys` missing, wrong content, wrong permissions, or SELinux label | Re-run Step 3 on the failing node. Then: `ls -la /home/flowadmin/.ssh/` (`.ssh` must be `700`, `authorized_keys` must be `600`, both owned by `flowadmin`), then `ls -Z /home/flowadmin/.ssh/` (type must be `ssh_home_t`; fix with `sudo restorecon -R /home/flowadmin/.ssh`). Check `/var/log/secure` on the **target** node for sshd's reason. |
+> | `ssh: connect to host … port 22: Connection refused` | firewall blocks port 22, or sshd is not running | `sudo systemctl status sshd` on target; `sudo firewall-cmd --list-all` — add `--add-service=ssh` if missing |
+> | `Host key verification failed` | First-time connection to that node from this flowadmin session | Run `ssh-keyscan -H ${node} >> /home/flowadmin/.ssh/known_hosts` once per node, then retry |
+> | `PubkeyAuthentication no` in sshd_config | A non-default sshd_config disables key auth | `sudo grep PubkeyAuthentication /etc/ssh/sshd_config` — if set to `no`, change to `yes` and `sudo systemctl reload sshd` |
+
+**Step 5 — From this point on, log in as `flowadmin` and prefix install commands with `sudo`:**
 
 ```bash
 ssh flowadmin@${NODE1_IP}
-# All subsequent phases are run as flowadmin with sudo
+# All subsequent phases run as flowadmin with sudo
 ```
 
 **Set `PKI_SSH_USER` in `.env`** so `security/install_certs.sh` uses `flowadmin` when pushing certificates to nodes over SSH (Phase 6 / Scenario 63):
@@ -379,13 +404,13 @@ ssh flowadmin@${NODE1_IP}
 PKI_SSH_USER=flowadmin
 ```
 
-> **Disabling root SSH (optional but recommended after setup):**
-> Once `flowadmin` SSH is confirmed working on all nodes, disable direct root SSH login:
+> **Disabling root SSH (already the default on RHEL 9):**
+> RHEL 9 ships with `PermitRootLogin prohibit-password` — password-based root login is already blocked. To fully disable root SSH (including key-based root login) after confirming `flowadmin` works:
 > ```bash
 > sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 > sudo systemctl reload sshd
 > ```
-> All subsequent `sudo` operations still work through `flowadmin`. Re-enable only via the cloud console if locked out.
+> Re-enable only via the cloud console if locked out. All `sudo` operations still work through `flowadmin`.
 
 ---
 
@@ -1034,7 +1059,7 @@ sudo swift-ring-builder /etc/swift/object.builder
 
 # 3. All services active on this node
 systemctl is-active openstack-swift-proxy openstack-swift-account openstack-swift-container \
-  openstack-swift-object openstack-swift-object-replicator memcached rsyncd
+  openstack-swift-object openstack-swift-object-replicator memcached rsync-daemon
 
 # 4. Direct to a node's proxy, then through the VIP once Phase 3/5 is done
 curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" \
@@ -6497,7 +6522,7 @@ The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account 
 | Where | What to look for |
 |---|---|
 | `journalctl -t proxy-server -t object-server -t container-server -t account-server` | Request lines from each daemon: status code, `tx<id>` transaction id and the object path. The Swift daemons log to **syslog** (facility `LOCAL0` unless changed), which `rsyslog` and the journal both receive |
-| `journalctl -u openstack-swift-proxy -u openstack-swift-object -u openstack-swift-object-replicator -u rsyncd -u memcached` | Service start/stop, crashes and tracebacks that are not request lines. Replicator output shows whether a returned node is catching up |
+| `journalctl -u openstack-swift-proxy -u openstack-swift-object -u openstack-swift-object-replicator -u rsync-daemon -u memcached` | Service start/stop, crashes and tracebacks that are not request lines. Replicator output shows whether a returned node is catching up |
 | `/var/log/rsyncd.log` | Replication transfers between nodes (written by `rsyncd`, configured in `/etc/rsyncd.conf`) |
 | `sudo swift-ring-builder /etc/swift/object.builder` and `md5sum /etc/swift/*.ring.gz` | Ring layout, and whether the ring files are identical on all three nodes (a mismatch causes odd 404/503 results) |
 | `401` / `403` on the auth line | Credential or ACL problem |
@@ -6795,11 +6820,11 @@ Use this after Phase 2b, after any node reboot (Scenarios 16–19), and before a
 #### 52.1 — Services, ring files and `swift.conf` agree on all three nodes
 
 ```bash
-# All Swift units, memcached and rsyncd active on every node
+# All Swift units, memcached and rsync-daemon active on every node
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
   echo "== ${n}"
   ssh "${n}" "systemctl is-active openstack-swift-proxy openstack-swift-account openstack-swift-container \
-    openstack-swift-object openstack-swift-object-replicator openstack-swift-object-auditor memcached rsyncd | sort | uniq -c"
+    openstack-swift-object openstack-swift-object-replicator openstack-swift-object-auditor memcached rsync-daemon | sort | uniq -c"
 done
 
 # Rings and swift.conf (hash secrets) identical everywhere

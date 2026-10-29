@@ -9614,3 +9614,5 @@ The only benchmark in this repository (one RabbitMQ container, 2 vCPU, ReadMe K0
 ### R10. What this run-book does not cover
 
 Still open: no point-in-time database recovery; no dashboard; no ZooKeeper, HAProxy or Swift alerts; the file-receiver Alertmanager setup records alerts to a log file but sends no page (add a real receiver in `alertmanager.yml`); live Alertmanager routing has not been tested; Swift objects are now backed up but the swift backup part has not been tested against a real Swift cluster; Swift cannot require client certificates at its proxy; RabbitMQ and ZooKeeper do not honour the CRL; `MARIADB_SST_METHOD=mariabackup` with `MARIADB_SST_ENCRYPT=true` is implemented but not tested on a real cluster; `HAPROXY_MAX_BODY_BYTES` is in the template but not tested against a live HAProxy; no per-client rate limiting; the GitHub Actions workflow has never been run; and **nothing here has been run on a real four-node cluster, on RHEL 9, with SELinux enforcing, or under Pacemaker**. The chapters above state what was tested and how.
+
+Sridhar

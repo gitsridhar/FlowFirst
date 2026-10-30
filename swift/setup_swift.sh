@@ -147,6 +147,7 @@ echo "[2/11] Installing Swift server packages..."
 if ! sudo dnf install -y --enablerepo="${REPO_ID}" \
         openstack-swift-proxy openstack-swift-account \
         openstack-swift-container openstack-swift-object \
+        openstack-selinux \
         memcached rsync rsync-daemon attr xfsprogs policycoreutils-python-utils; then
     echo "ERROR: dnf could not resolve all Swift dependencies."
     echo "  If a python3-* package is missing, enable the CodeReady Builder repo and retry:"
@@ -176,14 +177,6 @@ TMPEOF
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/openstack-swift.conf
 echo "  tmpfiles rule written: /var/run/swift and /var/cache/swift recreated on boot"
 
-# /var/run is a tmpfs on RHEL 9 — rsyncd.pid is also lost on every reboot.
-# Install a tmpfiles rule so the PID file path survives.
-sudo tee /etc/tmpfiles.d/rsyncd.conf > /dev/null <<'TMPEOF'
-f /var/run/rsyncd.pid 0644 root root -
-TMPEOF
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/rsyncd.conf
-echo "  tmpfiles rule written: /var/run/rsyncd.pid recreated on boot"
-
 # Swift stores object metadata in extended attributes — fail early if unsupported
 _xtest="${SWIFT_DEVICE_PATH}/.xattr_test"
 sudo touch "${_xtest}"
@@ -204,24 +197,34 @@ if [ "${SWIFT_MOUNT_CHECK}" != "true" ] && ! mountpoint -q "${SWIFT_DEVICE_PATH}
     echo "  Created ${SWIFT_DEVICE_PATH}/.ismount (lets swift-recon treat the plain directory as a device)"
 fi
 
-# SELinux: label directories so that Swift daemons and rsyncd can access their
-# paths without PermissionError [Errno 13] denials in Enforcing mode.
+# SELinux: label ports, directories so that Swift daemons and rsyncd can access
+# their resources without PermissionError [Errno 13] denials in Enforcing mode.
 #
-# Type selection rationale (RHEL 9 base policy — no openstack-selinux required):
-#   swift_data_t      — defined by the openstack-selinux RPM; may not be present.
-#                       Skipped here; swift_t (the process domain) can read/write
-#                       var_t and rsync_data_t through the base policy allowances.
-#   rsync_data_t      — always present; covers the data dir for both rsyncd and
-#                       the Swift object/container/account daemons.
-#   etc_t             — correct for /etc/swift config files (always present).
-#   var_run_t         — correct for /var/run/swift PID files (always present).
-#   var_log_t         — correct for /var/log/swift log files (always present).
+# openstack-selinux (installed in Step 2) provides the full Swift SELinux policy:
+#   swift_port_t      — allows swift_t to bind to the four Swift TCP ports.
+#                       Without it the proxy gets "Permission denied" at bind().
+#   swift_t           — allows POSIX semaphore creation (multiprocessing.BoundedSemaphore)
+#                       needed by the object server; without it SemLock raises Errno 13.
+#   swift_var_run_t   — correct label for /var/run/swift PID files.
+#   swift_log_t       — correct label for /var/log/swift.
 #
-# swift_conf_t, swift_var_run_t, and swift_log_t exist only when
-# openstack-selinux is installed and are NOT valid on a base RHEL 9 system;
-# using them raises "ValueError: Type X is invalid, must be a file or device type."
+# Fallbacks (base RHEL 9 policy, used when openstack-selinux is unavailable):
+#   rsync_data_t      — covers the data dir for rsyncd and Swift storage daemons.
+#   etc_t             — /etc/swift config files.
+#   var_run_t         — /var/run/swift PID files.
+#   var_log_t         — /var/log/swift log files.
 if command -v semanage &>/dev/null && command -v getenforce &>/dev/null \
         && [ "$(getenforce)" != "Disabled" ]; then
+    # Swift TCP ports — openstack-selinux adds swift_port_t; without this label
+    # the swift_t process domain gets PermissionError [Errno 13] when binding.
+    for _port in "${SWIFT_PROXY_PORT}" "${SWIFT_ACCOUNT_PORT}" \
+                 "${SWIFT_CONTAINER_PORT}" "${SWIFT_OBJECT_PORT}"; do
+        sudo semanage port -a -t swift_port_t -p tcp "${_port}" 2>/dev/null \
+            || sudo semanage port -m -t swift_port_t -p tcp "${_port}" 2>/dev/null \
+            || true   # port may already be labelled by openstack-selinux RPM
+    done
+    echo "  SELinux: ports ${SWIFT_PROXY_PORT}/${SWIFT_ACCOUNT_PORT}/${SWIFT_CONTAINER_PORT}/${SWIFT_OBJECT_PORT} labelled swift_port_t"
+
     # Object data directory — rsync_data_t is understood by both rsyncd and
     # the Swift daemons under the base RHEL 9 SELinux policy.
     sudo semanage fcontext -a -t rsync_data_t "${SWIFT_DEVICES_DIR}(/.*)?" 2>/dev/null \
@@ -235,17 +238,20 @@ if command -v semanage &>/dev/null && command -v getenforce &>/dev/null \
     sudo restorecon -R /etc/swift
     echo "  SELinux: /etc/swift labelled etc_t"
 
-    # Runtime directory — var_run_t is always present for /var/run subtrees.
-    sudo semanage fcontext -a -t var_run_t "/var/run/swift(/.*)?" 2>/dev/null \
+    # Runtime directory — swift_var_run_t (provided by openstack-selinux) or
+    # var_run_t (base policy fallback) for /var/run/swift PID files.
+    sudo semanage fcontext -a -t swift_var_run_t "/var/run/swift(/.*)?" 2>/dev/null \
+        || sudo semanage fcontext -a -t var_run_t "/var/run/swift(/.*)?" 2>/dev/null \
         || sudo semanage fcontext -m -t var_run_t "/var/run/swift(/.*)?"
     sudo restorecon -R /var/run/swift
-    echo "  SELinux: /var/run/swift labelled var_run_t"
+    echo "  SELinux: /var/run/swift labelled (swift_var_run_t or var_run_t)"
 
-    # Log directory — var_log_t is always present for /var/log subtrees.
-    sudo semanage fcontext -a -t var_log_t "/var/log/swift(/.*)?" 2>/dev/null \
+    # Log directory — swift_log_t (openstack-selinux) or var_log_t (base fallback).
+    sudo semanage fcontext -a -t swift_log_t "/var/log/swift(/.*)?" 2>/dev/null \
+        || sudo semanage fcontext -a -t var_log_t "/var/log/swift(/.*)?" 2>/dev/null \
         || sudo semanage fcontext -m -t var_log_t "/var/log/swift(/.*)?"
     sudo restorecon -R /var/log/swift
-    echo "  SELinux: /var/log/swift labelled var_log_t"
+    echo "  SELinux: /var/log/swift labelled (swift_log_t or var_log_t)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -288,7 +294,9 @@ sudo tee /etc/rsyncd.conf > /dev/null << EOF
 uid = swift
 gid = swift
 log file = /var/log/rsyncd.log
-pid file = /var/run/rsyncd.pid
+# pid file is intentionally omitted: RHEL 9 rsyncd.service is Type=notify and
+# systemd tracks the PID itself.  Writing a pid file to /var/run/ would trigger
+# an SELinux denial (rsyncd_t cannot write var_run_t) and cause startup failure.
 address = ${CURRENT_NODE_IP}
 hosts allow = ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}
 hosts deny = *

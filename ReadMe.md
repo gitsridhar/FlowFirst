@@ -1081,7 +1081,7 @@ sudo swift-ring-builder /etc/swift/object.builder
 
 # 3. All services active on this node
 systemctl is-active openstack-swift-proxy openstack-swift-account openstack-swift-container \
-  openstack-swift-object openstack-swift-object-replicator memcached rsync-daemon
+  openstack-swift-object openstack-swift-object-replicator memcached rsyncd
 
 # 4. Direct to a node's proxy, then through the VIP once Phase 3/5 is done
 curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" \
@@ -6544,7 +6544,7 @@ The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account 
 | Where | What to look for |
 |---|---|
 | `journalctl -t proxy-server -t object-server -t container-server -t account-server` | Request lines from each daemon: status code, `tx<id>` transaction id and the object path. The Swift daemons log to **syslog** (facility `LOCAL0` unless changed), which `rsyslog` and the journal both receive |
-| `journalctl -u openstack-swift-proxy -u openstack-swift-object -u openstack-swift-object-replicator -u rsync-daemon -u memcached` | Service start/stop, crashes and tracebacks that are not request lines. Replicator output shows whether a returned node is catching up |
+| `journalctl -u openstack-swift-proxy -u openstack-swift-object -u openstack-swift-object-replicator -u rsyncd -u memcached` | Service start/stop, crashes and tracebacks that are not request lines. Replicator output shows whether a returned node is catching up |
 | `/var/log/rsyncd.log` | Replication transfers between nodes (written by `rsyncd`, configured in `/etc/rsyncd.conf`) |
 | `sudo swift-ring-builder /etc/swift/object.builder` and `md5sum /etc/swift/*.ring.gz` | Ring layout, and whether the ring files are identical on all three nodes (a mismatch causes odd 404/503 results) |
 | `401` / `403` on the auth line | Credential or ACL problem |
@@ -6842,11 +6842,11 @@ Use this after Phase 2b, after any node reboot (Scenarios 16–19), and before a
 #### 52.1 — Services, ring files and `swift.conf` agree on all three nodes
 
 ```bash
-# All Swift units, memcached and rsync-daemon active on every node
+# All Swift units, memcached and rsyncd active on every node
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
   echo "== ${n}"
   ssh "${n}" "systemctl is-active openstack-swift-proxy openstack-swift-account openstack-swift-container \
-    openstack-swift-object openstack-swift-object-replicator openstack-swift-object-auditor memcached rsync-daemon | sort | uniq -c"
+    openstack-swift-object openstack-swift-object-replicator openstack-swift-object-auditor memcached rsyncd | sort | uniq -c"
 done
 
 # Rings and swift.conf (hash secrets) identical everywhere

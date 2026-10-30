@@ -525,14 +525,14 @@ SWIFT_UNITS=(
     openstack-swift-proxy
 )
 sudo systemctl daemon-reload
-sudo systemctl enable memcached rsync-daemon
-sudo systemctl restart memcached rsync-daemon
+sudo systemctl enable memcached rsyncd
+sudo systemctl restart memcached rsyncd
 sudo systemctl enable "${SWIFT_UNITS[@]}"
 sudo systemctl restart "${SWIFT_UNITS[@]}"
 sleep 3
 
 _failed=0
-for _u in "${SWIFT_UNITS[@]}" memcached rsync-daemon; do
+for _u in "${SWIFT_UNITS[@]}" memcached rsyncd; do
     if ! sudo systemctl is-active --quiet "${_u}"; then
         echo "  WARNING: ${_u} is not active — check: journalctl -u ${_u} -n 50"
         _failed=1

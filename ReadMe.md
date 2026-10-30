@@ -580,7 +580,7 @@ chmod 600 .env
 ./scripts/generate_secrets.sh --write
 ```
 
-> **One-time secrets step:** Run `generate_secrets.sh --write` on **node1 only**. It overwrites the `changeme-*` placeholders in `.env` with cryptographically strong values. Then copy that `.env` to every other node — the secrets must be identical everywhere, but `NODE_NAME` and `CURRENT_NODE_IP` must stay as set in step 4. The easiest way from node1 as `flowadmin`:
+> **One-time secrets step:** Run `generate_secrets.sh --write` on **node1 only**. It replaces the `changeme-*` password placeholders (`RABBITMQ_PASSWORD`, `MARIADB_PASSWORD`, `SWIFT_KEY`, `HAPROXY_STATS_PASS`) with cryptographically strong values. `SWIFT_HASH_PATH_PREFIX` and `SWIFT_HASH_PATH_SUFFIX` are already set to pre-generated values in the per-node `.env` files — the script detects this and leaves them untouched. Then copy the resulting `.env` to every other node — the secrets must be identical everywhere, but `NODE_NAME` and `CURRENT_NODE_IP` must stay as set in step 4. The easiest way from node1 as `flowadmin`:
 > ```bash
 > # From node1 — push the secrets-filled .env to nodes 2, 3, 4
 > # (ssh-keyscan was done in Phase 0 pre-step, so no host-key prompts)
@@ -603,7 +603,7 @@ chmod 600 .env
 
 > **Tests and the quality gate.** `./scripts/ci_check.sh` runs six checks and needs no cluster, network or `.env`: (1) every `.py` parses with the Python 3.9 grammar, (2) `bash -n` on every `.sh`, (3) `ruff` with bug-finding rules only (`ruff.toml`), (4) `pytest` (155 tests), (5) each `requirements*.txt` pins every package named in its `.in` file and carries hashes, (6) no `.env`, `.key`, `.pem` or `.p12` file is tracked by git. `--quick` skips the HTTP tests. Set up once on a dev or CI host: `pip install --require-hashes -r requirements.txt -r requirements-dev.txt` (pytest and ruff live only in `requirements-dev.txt`, never on cluster nodes). `.github/workflows/ci.yml` is an example for GitHub Actions on Python 3.9 and 3.12; any other CI system only has to run the same two commands. What the tests cover: admin authorisation (`authz.py`), secret checks and `.env` parsing (`config.py`), TLS context construction with a throw-away CA (`src/tls/tls.py`), and the real API Gateway (Process 1) HTTP handler for request limits, generic errors and the admin gate, `scripts/preflight_check.py`, the Prometheus `/metrics` listener (plain and mutual TLS), the backup scripts, the systemd units, and the CRL scripts. The handler tests start `tests/_p1_harness.py` as a subprocess (importing API Gateway (Process 1) monkey-patches the standard library, which must not happen inside pytest) with the broker, ZooKeeper and Swift stubbed. **Not covered by the automated tests:** anything that needs a real RabbitMQ, MariaDB, ZooKeeper or Swift (publisher confirms, the dead-letter policy, deduplication, failover), the message handlers of Processes 2 to 5, and the shell install scripts beyond a syntax check (the backup, CRL and systemd scripts have tests; `install_*`, `setup_*` and `enable_*_tls.sh` do not). Several of these were checked **by hand** against real containers on one workstation (publisher confirms and the dead-letter queue, mutual TLS, the systemd sandbox, backups, `/metrics` with a real Prometheus, the health probe with a real HAProxy); each chapter says exactly what was run. None of it ran on a four-node cluster. Passing the gate shows these rules still hold; it does not show the cluster works. To check that the tests can fail, deliberately breaking `admin_decision` and the body-size limit made 3 tests fail. The full gate was run on macOS with Python 3.9.22 and 3.12.10, each in a fresh virtual environment built with `pip install --require-hashes` from the lock files (128 tests passed on both); earlier phases also ran it on 3.14. It has not been run on Linux or RHEL. There, eventlet 0.40.x (the Python 3.9 pin) crashes in its kqueue hub, so the harness selects the `selects` hub on macOS. Linux uses a different hub (epoll) and the workflow in `.github/workflows/ci.yml` has never been run, so a first CI run may still need adjustment.
 
-> **Secrets are checked, not trusted.** `RABBITMQ_PASSWORD`, `MARIADB_PASSWORD`, `SWIFT_KEY` (when Swift is enabled) and `HAPROXY_STATS_PASS` must be at least `SECRET_MIN_LENGTH` (12) characters and not a well-known sample value (`flowpassword`, `admin123`, `testing`, anything starting `changeme`, …). Otherwise `config.py` raises at start (the message names the variable, never the value) and `install_rabbitmq_rhel9.sh`, `bootstrap_galera.sh`, `setup_swift.sh` and `setup_haproxy.sh` exit before changing anything. Run `generate_secrets.sh` on **one** node (or the admin host) and copy the resulting `.env` to the others — the values must be identical on every node, and `SWIFT_HASH_PATH_*` must never change once data is stored. The script keeps `.env.bak` (mode 600); delete it after copying. The check cannot tell a strong-looking but leaked password from a good one; it only blocks known-weak and short values. Never put the `.env` in git.
+> **Secrets are checked, not trusted.** `RABBITMQ_PASSWORD`, `MARIADB_PASSWORD`, `SWIFT_KEY` (when Swift is enabled) and `HAPROXY_STATS_PASS` must be at least `SECRET_MIN_LENGTH` (12) characters and not a well-known sample value (`flowpassword`, `admin123`, `testing`, anything starting `changeme`, …). Otherwise `config.py` raises at start (the message names the variable, never the value) and `install_rabbitmq_rhel9.sh`, `bootstrap_galera.sh`, `setup_swift.sh` and `setup_haproxy.sh` exit before changing anything. Run `generate_secrets.sh --write` on **one** node and copy the resulting `.env` to the others — passwords must be identical on every node. `SWIFT_HASH_PATH_PREFIX` and `SWIFT_HASH_PATH_SUFFIX` are pre-generated in the per-node `.env` files and must never change once data is stored; `generate_secrets.sh` leaves them untouched when they already hold a real value. The script keeps `.env.bak` (mode 600); delete it after copying. Never put the `.env` in git.
 
 Then **edit `.env`** on each node. The rules are simple:
 
@@ -645,7 +645,7 @@ Pre-built files are in `src/config/`. Copy the right one on each node:
 | node3 | `10.10.1.130` | `cp src/config/.env.node3 .env` |
 | node4 | `10.10.1.131` | `cp src/config/.env.node4 .env` |
 
-The only values that differ between nodes are `NODE_NAME` and `CURRENT_NODE_IP`; everything else — including secrets after `generate_secrets.sh --write` — is identical. See Phase 0b for the full copy-and-deploy workflow.
+The only values that differ between nodes are `NODE_NAME` and `CURRENT_NODE_IP`; everything else — including the passwords set by `generate_secrets.sh --write` and the pre-generated Swift hash paths — is identical. See Phase 0b for the full copy-and-deploy workflow.
 
 > **⚠️ `python-dotenv` does not expand `${VAR}` references**
 >
@@ -1055,15 +1055,9 @@ Swift is installed as a **native service** from RPM packages and managed by plai
 
 **How the cluster is formed:** the script builds the account, container and object rings from `NODE1_IP..NODE3_IP` with one **zone per node**, `SWIFT_REPLICAS=3` and a fixed seed, so every node generates **byte-identical** `*.ring.gz` files and nothing has to be copied between nodes. Every object is therefore stored on all three nodes, and one node can fail without losing data or availability (writes need 2 of 3 replicas).
 
-**Before you run it**, generate the two cluster-wide hash secrets **once** and put the **same** values in `/opt/flowfirst/.env` on node1, node2 and node3. They must never change after data is stored. The script refuses to run while they still have the placeholder value:
+`SWIFT_HASH_PATH_PREFIX` and `SWIFT_HASH_PATH_SUFFIX` are already set to pre-generated values in `src/config/.env.node1`–`.env.node3` (and identical in `.env.node4`). You do **not** need to run `openssl rand` manually. They must never change after data is stored; `setup_swift.sh` reads them from `.env` and writes them into `/etc/swift/swift.conf` — if they differ between nodes, objects become unreachable.
 
-```bash
-# On ONE node only, then copy the output into .env on all three nodes
-echo "SWIFT_HASH_PATH_PREFIX=$(openssl rand -hex 16)"
-echo "SWIFT_HASH_PATH_SUFFIX=$(openssl rand -hex 16)"
-```
-
-Also review `SWIFT_USER` / `SWIFT_KEY` (the tempauth login, format `<account>:<user>`) and `SWIFT_AUTH_URL` (`http://<VIP>:8090/auth/v1.0`) in `.env` on **every node including node4**.
+Confirm `SWIFT_USER` / `SWIFT_KEY` (the tempauth login, format `<account>:<user>`) and `SWIFT_AUTH_URL` (`http://10.10.1.200:8090/auth/v1.0`) are set in `.env` on **every node including node4** (they are pre-filled in the per-node files).
 
 ```bash
 cd /opt/flowfirst
@@ -1426,27 +1420,18 @@ Node 4 requires the same Phase 0 bootstrap as the cluster nodes — run **Phase 
 
 ##### `.env` for node4
 
-Node 4 does **not** run `generate_secrets.sh`. Copy the `.env` that was generated on one of the cluster nodes — all shared values (passwords, IPs, Swift hash paths) must be identical across all four nodes:
+Node 4 does **not** run `generate_secrets.sh`. In Phase 0b you already copied `src/config/.env.node4` to `/opt/flowfirst/.env` on node4 — that file has `NODE_NAME=node4`, `CURRENT_NODE_IP=10.10.1.131`, and the same pre-generated Swift hash paths as the cluster nodes. After `generate_secrets.sh --write` runs on node1, copy the secrets-filled `.env` from node1 and restore node4's per-node identity:
 
 ```bash
-# From node1 (or any cluster node), copy the .env to node4:
-scp /opt/flowfirst/.env <node4-ip>:/opt/flowfirst/.env
+# From node1 — push the secrets-filled .env to node4:
+scp /opt/flowfirst/.env flowadmin@10.10.1.131:/opt/flowfirst/.env
+ssh flowadmin@10.10.1.131 "
+    sed -i 's/^NODE_NAME=.*/NODE_NAME=node4/' /opt/flowfirst/.env
+    sed -i 's/^CURRENT_NODE_IP=.*/CURRENT_NODE_IP=10.10.1.131/' /opt/flowfirst/.env
+"
 ```
 
-Then edit the two per-node variables directly on node4:
-
-```bash
-# On node4 — set these two values to node4's own identity:
-sed -i 's/^NODE_NAME=.*/NODE_NAME=node4/' /opt/flowfirst/.env
-sed -i 's/^CURRENT_NODE_IP=.*/CURRENT_NODE_IP=<node4-ip>/' /opt/flowfirst/.env
-```
-
-| Variable | node4 value | Notes |
-|---|---|---|
-| `NODE_NAME` | `node4` | Must be `node4` — Remote Worker (Process 5) uses this for ZooKeeper registration and the `remote_node` field in Flow 6 |
-| `CURRENT_NODE_IP` | `<node4 IP>` | node4's own IP — used by ZooKeeper client binding |
-
-All other variables (`NODE1_IP`–`NODE4_IP`, `FLOWFIRST_VIP`, `RABBITMQ_*`, `MARIADB_*`, `SWIFT_*`, passwords) are **identical to the cluster nodes** — do not change them.
+This is already handled by the push loop in Phase 0b if you include `10.10.1.131` in it. All other variables (`NODE1_IP`–`NODE4_IP`, `FLOWFIRST_VIP`, `RABBITMQ_*`, `MARIADB_*`, `SWIFT_*`, passwords, Swift hash paths) are **identical to the cluster nodes** — do not change them.
 
 > **Firewall on node4:** outbound connections from node4 to the cluster. Ensure node4 can reach:
 > - `NODE1_IP`–`NODE3_IP` on port `5672` (RabbitMQ AMQP) — or `5671` when `TLS_RABBITMQ_ENABLED=true`

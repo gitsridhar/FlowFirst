@@ -567,13 +567,37 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install --require-hashes -r requirements.txt
 
-# 4. Initialise environment configuration
-cp src/config/.env.example .env
+# 4. Copy the pre-built .env for THIS node (already has all IPs set):
+#      node1 (10.10.1.128): cp src/config/.env.node1 .env
+#      node2 (10.10.1.129): cp src/config/.env.node2 .env
+#      node3 (10.10.1.130): cp src/config/.env.node3 .env
+#      node4 (10.10.1.131): cp src/config/.env.node4 .env
+cp src/config/.env.node1 .env          # ← change node1 to match THIS node
+chmod 600 .env
 
-# 5. Generate strong secrets ONCE (RabbitMQ / MariaDB / Swift / HAProxy-stats passwords and the Swift hash values).
-#    The processes and install scripts refuse to start with the sample passwords from the example file.
+# 5. Generate strong secrets ONCE — run on node1 only, then copy .env to the other nodes.
+#    The processes and install scripts refuse to start with the sample passwords.
 ./scripts/generate_secrets.sh --write
 ```
+
+> **One-time secrets step:** Run `generate_secrets.sh --write` on **node1 only**. It overwrites the `changeme-*` placeholders in `.env` with cryptographically strong values. Then copy that `.env` to every other node — the secrets must be identical everywhere, but `NODE_NAME` and `CURRENT_NODE_IP` must stay as set in step 4. The easiest way from node1 as `flowadmin`:
+> ```bash
+> # From node1 — push the secrets-filled .env to nodes 2, 3, 4
+> # (ssh-keyscan was done in Phase 0 pre-step, so no host-key prompts)
+> for node in 10.10.1.129 10.10.1.130 10.10.1.131; do
+>     # Determine which per-node template was used on that node
+>     case "${node}" in
+>         10.10.1.129) nodenum=2 ;; 10.10.1.130) nodenum=3 ;; 10.10.1.131) nodenum=4 ;;
+>     esac
+>     # Transfer the secrets then patch the two per-node lines in place
+>     scp /opt/flowfirst/.env flowadmin@${node}:/opt/flowfirst/.env
+>     ssh flowadmin@${node} "
+>         sed -i 's/^NODE_NAME=.*/NODE_NAME=node${nodenum}/' /opt/flowfirst/.env
+>         sed -i 's/^CURRENT_NODE_IP=.*/CURRENT_NODE_IP=${node}/' /opt/flowfirst/.env
+>     "
+>     echo "${node}: .env deployed"
+> done
+> ```
 
 > **Pinned dependencies.** `requirements.txt` is a generated lock file: every package, including indirect ones, at an exact version with sha256 hashes, so every node installs the same code and a tampered or hijacked package is refused (`--require-hashes`). Humans edit only `requirements.in` (the direct, loosely constrained list) and regenerate with `./scripts/update_requirements.sh` (needs [`uv`](https://docs.astral.sh/uv/) on the machine that regenerates; nodes only need pip). One universal file covers Python 3.9 (the RHEL 9 default) to 3.14 and both x86_64 and aarch64, with environment markers choosing the right version per Python. Upgrade deliberately: `./scripts/update_requirements.sh --upgrade`, run the checks and a test cluster, then commit `requirements.in` and `requirements.txt` together. Tested: the lock installs with `--require-hashes` and passes `pip check` on Python 3.9 and 3.12 (macOS arm64) and every project module imports. Not tested: an install on RHEL 9 itself, or on x86_64. Limits: hashes prove the files are the ones that were locked, not that they are free of vulnerabilities (no scanner is wired in), and `eventlet` is in maintenance mode upstream, so the pin will stop receiving features. Wheels that need compiling (none were required on the tested platforms) would need a compiler on the node.
 
@@ -590,47 +614,38 @@ Then **edit `.env`** on each node. The rules are simple:
 | Variable | node1 | node2 | node3 | What it means |
 |---|---|---|---|---|
 | `NODE_NAME` | `node1` | `node2` | `node3` | The hostname **of this node** — must match `/etc/hostname` and the name passed to `pcs cluster setup` |
-| `CURRENT_NODE_IP` | `${NODE1_IP}` | `${NODE2_IP}` | `${NODE3_IP}` | The cluster-interface IP **of this node** — used by Galera's `wsrep_node_address` and Corosync bind address |
+| `CURRENT_NODE_IP` | `10.10.1.128` | `10.10.1.129` | `10.10.1.130` | The cluster-interface IP **of this node** — used by Galera's `wsrep_node_address` and Corosync bind address |
 
 #### Shared variables (identical on all three nodes)
 
 | Variable | Value | Notes |
 |---|---|---|
 | `CLUSTER_NAME` | `flowfirst_cluster` | Same on every node |
-| `NODE1_IP` | `${NODE1_IP}` | **Always the IP of node1**, regardless of which node the file is on |
-| `NODE2_IP` | `${NODE2_IP}` | **Always the IP of node2** |
-| `NODE3_IP` | `${NODE3_IP}` | **Always the IP of node3** |
-| `FLOWFIRST_VIP` | `${FLOWFIRST_VIP}` | Pacemaker Virtual IP — same on all nodes |
-| `RABBITMQ_HOST` | `${FLOWFIRST_VIP}` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `src/config/config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
-| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `src/config/config.py` builds `${NODE1_IP}:5672,${NODE2_IP}:5672,${NODE3_IP}:5672` at runtime from `NODE*_IP`. |
+| `NODE1_IP` | `10.10.1.128` | **Always the IP of node1**, regardless of which node the file is on |
+| `NODE2_IP` | `10.10.1.129` | **Always the IP of node2** |
+| `NODE3_IP` | `10.10.1.130` | **Always the IP of node3** |
+| `NODE4_IP` | `10.10.1.131` | **Always the IP of node4** (Remote Worker) |
+| `FLOWFIRST_VIP` | `10.10.1.200` | Pacemaker Virtual IP — same on all nodes |
+| `RABBITMQ_HOST` | `10.10.1.200` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `src/config/config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
+| `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `src/config/config.py` builds `10.10.1.128:5672,10.10.1.129:5672,10.10.1.130:5672` at runtime from `NODE*_IP`. |
 | `RABBITMQ_PORT` | `5672` | Literal integer |
-| `MARIADB_HOST` | `${FLOWFIRST_VIP}` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
-| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `src/config/config.py` builds `${NODE1_IP},${NODE2_IP},${NODE3_IP}` at runtime. |
+| `MARIADB_HOST` | `10.10.1.200` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
+| `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `src/config/config.py` builds `10.10.1.128,10.10.1.129,10.10.1.130` at runtime. |
 | `MARIADB_PORT` | `3306` | Literal integer |
-| `SWIFT_AUTH_URL` | `http://${FLOWFIRST_VIP}:8090/auth/v1.0` | **Set to the VIP IP.** HAProxy's Swift frontend (`SWIFT_LB_PORT=8090`) load-balances to the Swift proxy on `:8888`. Must be identical on all nodes including node4. Do **not** use a node-direct address (`:8888`) or the REST API port (`8080`). |
+| `SWIFT_AUTH_URL` | `http://10.10.1.200:8090/auth/v1.0` | **Set to the VIP IP.** HAProxy's Swift frontend (`SWIFT_LB_PORT=8090`) load-balances to the Swift proxy on `:8888`. Must be identical on all nodes including node4. Do **not** use a node-direct address (`:8888`) or the REST API port (`8080`). |
 
 #### Concrete `.env` for each node
 
-**node1** (`/opt/flowfirst/.env`):
-```
-NODE_NAME=node1
-CURRENT_NODE_IP=192.168.1.101
-# everything else identical — see src/config/.env.example
-```
+Pre-built files are in `src/config/`. Copy the right one on each node:
 
-**node2** (`/opt/flowfirst/.env`):
-```
-NODE_NAME=node2
-CURRENT_NODE_IP=192.168.1.102
-# everything else identical — see src/config/.env.example
-```
+| Node | IP | Command |
+|---|---|---|
+| node1 | `10.10.1.128` | `cp src/config/.env.node1 .env` |
+| node2 | `10.10.1.129` | `cp src/config/.env.node2 .env` |
+| node3 | `10.10.1.130` | `cp src/config/.env.node3 .env` |
+| node4 | `10.10.1.131` | `cp src/config/.env.node4 .env` |
 
-**node3** (`/opt/flowfirst/.env`):
-```
-NODE_NAME=node3
-CURRENT_NODE_IP=192.168.1.103
-# everything else identical — see src/config/.env.example
-```
+The only values that differ between nodes are `NODE_NAME` and `CURRENT_NODE_IP`; everything else — including secrets after `generate_secrets.sh --write` — is identical. See Phase 0b for the full copy-and-deploy workflow.
 
 > **⚠️ `python-dotenv` does not expand `${VAR}` references**
 >

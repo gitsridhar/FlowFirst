@@ -33,7 +33,7 @@ for _var in CURRENT_NODE_IP NODE1_IP NODE2_IP NODE3_IP; do
 done
 MARIADB_PORT="${MARIADB_PORT:-3306}"
 MARIADB_GALERA_CLUSTER_NAME="${MARIADB_GALERA_CLUSTER_NAME:-flowfirst_galera_cluster}"
-MARIADB_GALERA_WSREP_PROVIDER="${MARIADB_GALERA_WSREP_PROVIDER:-/usr/lib64/galera/libgalera_smm.so}"
+MARIADB_GALERA_WSREP_PROVIDER="${MARIADB_GALERA_WSREP_PROVIDER:-}"
 MARIADB_SST_METHOD="${MARIADB_SST_METHOD:-rsync}"
 MARIADB_SST_ENCRYPT="${MARIADB_SST_ENCRYPT:-false}"
 
@@ -55,20 +55,62 @@ echo " Node Name:         ${CURRENT_NODE_NAME}"
 echo " Node IP:           ${CURRENT_NODE_IP}"
 echo " Cluster Name:      ${MARIADB_GALERA_CLUSTER_NAME}"
 echo " Cluster Members:   ${CLUSTER_ADDRESSES}"
-echo " WSREP Provider:    ${MARIADB_GALERA_WSREP_PROVIDER}"
 echo " MariaDB Port:      ${MARIADB_PORT}"
 echo "=================================================================="
 
-# 1. Install MariaDB server and Galera packages
-echo "[1/5] Installing mariadb-server and galera..."
+# 1. Configure official MariaDB repository for latest GA release
+echo "[1/5] Configuring official MariaDB repository for latest release..."
 if command -v dnf >/dev/null 2>&1; then
-    PKGS=(mariadb-server mariadb mariadb-server-galera galera rsync)
-    [[ "$MARIADB_SST_METHOD" == "mariabackup" ]] && PKGS+=(mariadb-backup)
-    sudo dnf install -y "${PKGS[@]}"
+    # Disable OS AppStream mariadb module to prevent conflicts with the latest official repository
+    sudo dnf module reset -y mariadb 2>/dev/null || true
+    sudo dnf module disable -y mariadb 2>/dev/null || true
+
+    TMP_REPO_SETUP="$(mktemp /tmp/mariadb_repo_setup.XXXXXX)"
+    if curl -fsSL -o "${TMP_REPO_SETUP}" "https://r2.mariadb.com/downloads/mariadb_repo_setup" 2>/dev/null || \
+       curl -fsSL -o "${TMP_REPO_SETUP}" "https://downloads.mariadb.com/MariaDB/mariadb_repo_setup" 2>/dev/null; then
+        echo "  Running official mariadb_repo_setup script..."
+        sudo bash "${TMP_REPO_SETUP}" --skip-maxscale
+        rm -f "${TMP_REPO_SETUP}"
+    else
+        echo "  Writing official /etc/yum.repos.d/mariadb.repo..."
+        sudo tee /etc/yum.repos.d/mariadb.repo > /dev/null << 'EOF'
+[mariadb-main]
+name = MariaDB Server (Latest)
+baseurl = https://dlm.mariadb.com/repo/mariadb-server/latest/yum/rhel/9/$basearch
+gpgkey = https://supplychain.mariadb.com/MariaDB-Server-GPG-KEY
+gpgcheck = 1
+enabled = 1
+EOF
+    fi
+    sudo dnf clean metadata
+    sudo dnf makecache
+
+    # 2. Install MariaDB server and Galera packages
+    echo "[2/5] Installing latest MariaDB server and Galera packages..."
+    PKGS=(MariaDB-server MariaDB-client galera-4 rsync)
+    [[ "$MARIADB_SST_METHOD" == "mariabackup" ]] && PKGS+=(MariaDB-backup)
+    if ! sudo dnf install -y "${PKGS[@]}"; then
+        echo "  Retrying with standard package names..."
+        FALLBACK_PKGS=(mariadb-server mariadb mariadb-server-galera galera rsync)
+        [[ "$MARIADB_SST_METHOD" == "mariabackup" ]] && FALLBACK_PKGS+=(mariadb-backup)
+        sudo dnf install -y "${FALLBACK_PKGS[@]}"
+    fi
 fi
 
-# 2. Configure Firewall for Galera replication ports
-echo "[2/5] Configuring firewall ports for MariaDB and Galera (3306, 4567, 4568, 4444)..."
+# Detect WSREP provider library path if not explicitly configured
+if [ -z "${MARIADB_GALERA_WSREP_PROVIDER}" ]; then
+    if [ -f "/usr/lib64/galera-4/libgalera_smm.so" ]; then
+        MARIADB_GALERA_WSREP_PROVIDER="/usr/lib64/galera-4/libgalera_smm.so"
+    elif [ -f "/usr/lib64/galera/libgalera_smm.so" ]; then
+        MARIADB_GALERA_WSREP_PROVIDER="/usr/lib64/galera/libgalera_smm.so"
+    else
+        MARIADB_GALERA_WSREP_PROVIDER="/usr/lib64/galera-4/libgalera_smm.so"
+    fi
+fi
+echo "  WSREP Provider:   ${MARIADB_GALERA_WSREP_PROVIDER}"
+
+# 3. Configure Firewall for Galera replication ports
+echo "[3/5] Configuring firewall ports for MariaDB and Galera (3306, 4567, 4568, 4444)..."
 if command -v firewall-cmd >/dev/null 2>&1 && sudo systemctl is-active --quiet firewalld; then
     sudo firewall-cmd --permanent --add-port="${MARIADB_PORT}/tcp"   # Standard MySQL/MariaDB client port
     sudo firewall-cmd --permanent --add-port=4567/tcp               # Galera Cluster replication traffic
@@ -78,8 +120,8 @@ if command -v firewall-cmd >/dev/null 2>&1 && sudo systemctl is-active --quiet f
     sudo firewall-cmd --reload
 fi
 
-# 3. Deploy Galera configuration
-echo "[3/5] Generating /etc/my.cnf.d/galera.cnf..."
+# 4. Deploy Galera configuration
+echo "[4/5] Generating /etc/my.cnf.d/galera.cnf..."
 # Build the optional SST encryption block (mariabackup + encrypt only).
 # Write it to a temp file so it can be read by Python without any shell quoting problems.
 _SST_BLOCK_FILE="$(mktemp /tmp/flowfirst-sst-block.XXXXXX)"
@@ -135,7 +177,8 @@ PYEOF
 )"
 printf '%s\n' "${_GALERA_CNF}" | sudo tee /etc/my.cnf.d/galera.cnf > /dev/null
 
-# 4. Stop standalone mariadb if running
+# 5. Stop standalone mariadb if running
+echo "[5/5] Stopping standalone MariaDB service if running..."
 sudo systemctl stop mariadb || true
 
 echo ""

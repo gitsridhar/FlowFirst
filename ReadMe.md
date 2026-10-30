@@ -184,7 +184,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | **0 (pre)** | All nodes (1–4) | Create `flowadmin` user, add to `wheel`, grant passwordless sudo, distribute SSH key — **all subsequent phases run as `flowadmin`** | `useradd flowadmin` → `usermod -aG wheel` → `/etc/sudoers.d/flowadmin` → `ssh-keygen` + `ssh-copy-id` |
 | **0a** | All nodes (1–4) | Time synchronisation — install & configure Chrony | `dnf install -y chrony` → `chronyc makestep` |
 | **0b** | All nodes (1–4) | Clone repo, create Python venv, copy `.env` | `git clone` → `python3 -m venv .venv` → `pip install --require-hashes -r requirements.txt` |
-| **1** | Nodes 1–3 only | MariaDB Galera cluster setup (server) | `mariadb-galera/setup_galera_node.sh` |
+| **1** | Nodes 1–3 only | MariaDB Galera cluster setup (configures official MariaDB repo for latest GA release) | `mariadb-galera/setup_galera_node.sh` |
 | **1 bootstrap** | Node 1 only | Bootstrap the primary Galera node | `mariadb-galera/bootstrap_galera.sh` |
 | **1b** | Nodes 1–3 only | ZooKeeper 3-node ensemble (servers) | `zookeeper/setup_zookeeper.sh` |
 | **1c** | All nodes (1–4) | Raise OS file-descriptor limit for eventlet greenthreads | `ulimit -n 65536` + `/etc/security/limits.d/flowfirst.conf` |
@@ -651,12 +651,13 @@ The only values that differ between nodes are `NODE_NAME` and `CURRENT_NODE_IP`;
 
 ### Phase 1a: Setup MariaDB Galera Cluster on All 3 Nodes
 
-All scripts automatically read parameters from `/opt/flowfirst/.env`.
+> `mariadb-galera/setup_galera_node.sh` configures the official MariaDB repository (via `mariadb_repo_setup`) so that the latest stable GA release of MariaDB Server and Galera are always installed.
+> All scripts automatically read parameters from `/opt/flowfirst/.env`.
 
 #### 1. On Node 1:
 ```bash
 cd /opt/flowfirst
-# Configure Galera node settings (reads from .env)
+# Configure MariaDB repository & Galera node settings (reads from .env)
 sudo ./mariadb-galera/setup_galera_node.sh
 
 # Bootstrap primary cluster node

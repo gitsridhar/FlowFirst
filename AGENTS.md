@@ -154,6 +154,7 @@ cp src/config/.env.example .env
 | `VIP_NIC` | Physical cluster NIC name on **this** node (e.g. `ens3`, `enp0s3`) — may differ per node |
 
 ### Phase 1 — MariaDB Galera Cluster (Nodes 1–3)
+> `setup_galera_node.sh` configures the official MariaDB repository (`mariadb_repo_setup`) to ensure the latest MariaDB Server and Galera packages are installed.
 ```bash
 cd /opt/flowfirst
 

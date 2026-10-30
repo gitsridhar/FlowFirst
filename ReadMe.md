@@ -1153,13 +1153,15 @@ sudo ./haproxy/setup_haproxy.sh
 # Validate config syntax — no service start
 sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 
-# Confirm TCP frontends bind to the VIP, not wildcard
+# Inspect the bind lines — all frontends use wildcard (*) so HAProxy can accept
+# connections on the VIP address regardless of which node Pacemaker assigns it to.
 grep "bind" /etc/haproxy/haproxy.cfg
-# Expected:
-#   bind *:8080               ← REST API
-#   bind *:9000               ← stats
-#   bind ${FLOWFIRST_VIP}:3306   ← MariaDB (VIP only — no port conflict)
-#   bind ${FLOWFIRST_VIP}:5672   ← RabbitMQ (VIP only — no port conflict)
+# Expected output (TLS off, default ports):
+#   bind *:8080               ← REST API frontend
+#   bind 0.0.0.0:9000         ← stats dashboard
+#   bind *:3307               ← MariaDB load-balancer (LB port, backends are :3306)
+#   bind *:5673               ← RabbitMQ load-balancer (LB port, backends are :5672)
+#   bind *:8090               ← Swift load-balancer (LB port, backends are :8888)
 ```
 
 HAProxy will be started automatically by Pacemaker in Phase 5 when the VIP is

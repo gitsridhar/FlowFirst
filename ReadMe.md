@@ -272,6 +272,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [67](#scenario-67-iot-device-crud--flow-7-soft-delete-device) | IoT Device CRUD — Flow 7: Soft-Delete Device | CRUD Pipeline | `DELETE /api/devices/{id}`, `soft_delete_device()`, `status = decommissioned` |
 | [68](#scenario-68-notification-listener--receiving-and-printing-live-notifications) | Notification Listener — Receiving & Printing Live Notifications | Notifications | Enable `NOTIFICATIONS_ENABLED`, run `scripts/notification_listener.py`, filter by flow or event type |
 | [69](#scenario-69-database-writeread-demo-across-nodes-mariadb-galera) | Database Write/Read Demo Across Nodes | Galera | `scripts/db_replication_demo.py`: write through each node, read from every node, node-down catch-up |
+| [70](#scenario-70-zookeeper-coordination-demo-across-nodes) | ZooKeeper Coordination Demo Across Nodes | ZooKeeper | `scripts/zk_coordination_demo.py`: leader election & failover, dynamic config watches, service registry, atomic dedup |
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
 
@@ -8910,6 +8911,181 @@ For application code that should survive a node failure, use `src/db/db.py:get_d
 - **Rows are removed at the end** unless `--keep` is given, so a repeat run is clean. Cleanup runs through the first node in `--nodes` and Galera replicates the `DELETE`.
 - `vip` in `--nodes` is allowed but two labels can then hit the same server; duplicates by host address are dropped, labels are not resolved through HAProxy.
 - **Tested:** the argument handling, target resolution and table rendering (`tests/test_db_replication_demo.py`, no database needed). **Not tested against a real MariaDB/Galera cluster**: this was written on a workstation without MariaDB, so the SQL and the output sample above have not been run end to end. Run it once on a test cluster and correct this note when you have.
+
+---
+
+## Scenario 70: ZooKeeper Coordination Demo Across Nodes
+
+> **Goal:** demonstrate, in an isolated executable script (`scripts/zk_coordination_demo.py`), how Apache ZooKeeper coordinates distributed state across nodes in the FlowFirst cluster. It exercises the four core primitives used throughout the pipeline (leader election with failover, dynamic configuration hot-reloading via `DataWatch`, ephemeral service registry, and atomic deduplication barriers) directly against the ZooKeeper 3-node ensemble without requiring MariaDB, RabbitMQ, or the REST API.
+>
+> **Runs on:** node1, node2, or node3 (as `flowadmin` with the `.venv` active), or **node4** or a workstation as a client (needs network access to TCP 2181/2281 on `NODE1_IP`..`NODE3_IP` and the same `.env`).
+
+### What it does
+
+| Step | Primitive / Capability | Action Across Nodes | Code Reference |
+|---|---|---|---|
+| 1 | **Ensemble Status & Quorum Inspection** | Connects to `node1`, `node2`, and `node3` independently; queries `mntr` 4-letter words and Kazoo sessions to verify ensemble roles (`leader` / `follower`), latency, znode count, and synced followers. | `stage_ensemble_status()`, `get_node_status()` |
+| 2 | **Distributed Leader Election & Failover** | Simulates contender worker processes on distinct ensemble nodes competing under `/flowfirst/zk_demo/<run_id>/election`. Demonstrates sequential ephemeral znodes, standby follower queueing, active leader execution, and instant automatic leader handover when the leader steps down. | `stage_leader_election()`, `kazoo.recipe.election.Election` |
+| 3 | **Dynamic Runtime Config Propagation** | Registers `DataWatch` callbacks on multiple nodes watching `/flowfirst/zk_demo/<run_id>/config/threshold`. Writes config updates from one node and verifies instant sub-millisecond broadcast to all watching nodes without polling or process restart. | `stage_config_watches()`, `zk.DataWatch` |
+| 4 | **Ephemeral Service Registry & Auto-Cleanup** | Multiple worker instances register ephemeral znodes under `/flowfirst/zk_demo/<run_id>/registry`. A third node reads the live worker directory. When a worker process terminates or drops its session, ZooKeeper automatically purges its registration znode within seconds. | `stage_service_registry()`, `zk.create(..., ephemeral=True)` |
+| 5 | **Atomic Deduplication Barrier** | Simulates concurrent or re-delivered message processing across nodes under `/flowfirst/zk_demo/<run_id>/dedup/<msg_id>`. First arrival atomically succeeds (`create`), while duplicate arrivals on sibling nodes are safely rejected (`NodeExistsError`), preventing double-processing. | `stage_dedup_barrier()`, `zk.create(..., makepath=True)` |
+| 6 | **Result Summary & Cleanup** | Prints summary of all stages and recursively deletes demo znodes (`--keep` retains them for manual inspection with `zkCli.sh`). | `cmd_run()`, `delete_demo_tree()` |
+
+The demo uses its own isolated root namespace (`/flowfirst/zk_demo`), so production znodes (`/flowfirst/election`, `/flowfirst/config`, `/flowfirst/registry`, `/flowfirst/dedup`) are never touched. Connections honour `TLS_ZK_ENABLED=true` through [`src.tls.tls.zk_kwargs()`](src/tls/tls.py:100) and fail closed if TLS certificates or keys are missing or invalid.
+
+### Prerequisites
+
+- The ZooKeeper ensemble is installed and in quorum (`echo ruok | nc 127.0.0.1 2181` returns `imok` on nodes 1–3).
+- `.env` contains `NODE1_IP`, `NODE2_IP`, `NODE3_IP`, `ZK_CLIENT_PORT` (default 2181), and optionally `TLS_ZK_ENABLED=true` / `ZK_TLS_CLIENT_PORT=2281`.
+
+### A. Run the full demo
+
+```bash
+cd /opt/flowfirst && source .venv/bin/activate
+python3 scripts/zk_coordination_demo.py
+```
+
+Expected output shape:
+
+```text
+== FlowFirst ZooKeeper Coordination Demo ==
+run id   : run_b8f2a1
+ensemble : node1 (10.10.1.128:2181), node2 (10.10.1.129:2181), node3 (10.10.1.130:2181)
+client   : node1
+tls mode : OFF (plain TCP)
+
+[1] Inspect ZooKeeper Ensemble & Quorum State
+    node   endpoint           role      synced followers  avg latency  znodes
+    -----  -----------------  --------  ----------------  -----------  ------
+    node1  10.10.1.128:2181  leader    2                 0.1 ms       18
+    node2  10.10.1.129:2181  follower  n/a               0.1 ms       18
+    node3  10.10.1.130:2181  follower  n/a               0.1 ms       18
+
+[2] Multi-Node Leader Election & Standby Failover
+    stage                 active leader  standby queue  time (ms)  result
+    --------------------  -------------  -------------  ---------  ------------------------------------------
+    1. Initial Election   node1          none           2.4        PASS: Elected as Leader
+    2. Standby Queueing   node1          node2, node3   —          PASS: 3 contenders queued in sequence
+    3. Leader Failover    node2          node3          1.8        PASS: Instant handover to node2
+
+[3] Dynamic Runtime Config Propagation (DataWatch)
+    action                 written via  observed on  latency (ms)  status
+    ---------------------  -----------  -----------  ------------  --------------------------------------
+    Set threshold = 38.5   node1        all 3 nodes  1.2           PASS: Broadcast via DataWatch
+    Set threshold = 45.0   node3        all 3 nodes  0.9           PASS: Hot-reloaded without restart
+
+[4] Ephemeral Service Discovery & Auto-Cleanup
+    event                          query node  live workers  status
+    -----------------------------  ----------  ------------  ----------------------------------
+    Register 2 ephemeral workers   node3       node1, node2  PASS: Discovered across ensemble
+    Disconnect node1 session       node3       node2         PASS: Ephemeral auto-pruned
+
+[5] Atomic Deduplication Barrier Across Nodes
+    message id    delivery via  action                              decision                  status
+    ------------  ------------  ----------------------------------  ------------------------  ------------------------------
+    msg_a93f120c  node1         First arrival (Process 4 insert)    PROCEED                   PASS: First-seen accepted
+    msg_a93f120c  node2         Duplicate redelivery (Failover)     SKIP (Duplicate blocked)  PASS: Dedup barrier blocked insert
+    msg_a93f120c  node3         Duplicate redelivery (Node 3)       SKIP (Duplicate blocked)  PASS: Dedup barrier verified
+
+[6] Summary & Result
+    PASS: All ZooKeeper coordination primitives verified across cluster nodes.
+
+    Cleaned up 12 demo znode(s) (use --keep to retain for inspection).
+```
+
+### B. Run individual subcommands
+
+```bash
+# 1. Ensemble role and quorum check:
+python3 scripts/zk_coordination_demo.py status
+
+# 2. Leader election & failover test only:
+python3 scripts/zk_coordination_demo.py election
+
+# 3. Dynamic config broadcast test only:
+python3 scripts/zk_coordination_demo.py config
+
+# 4. Ephemeral service registry test only:
+python3 scripts/zk_coordination_demo.py registry
+
+# 5. Atomic deduplication barrier test only:
+python3 scripts/zk_coordination_demo.py dedup
+
+# 6. Clean up demo znodes (if run with --keep):
+python3 scripts/zk_coordination_demo.py cleanup --all
+```
+
+### C. Prove coordination during a node outage
+
+ZooKeeper maintains consensus and serves reads/writes as long as a strict majority (2 of 3 nodes) is online.
+
+```bash
+# Stop ZooKeeper on node3 (see Scenario 36)
+sudo systemctl stop zookeeper
+
+# Run coordination demo across remaining 2 nodes:
+python3 scripts/zk_coordination_demo.py run --nodes node1,node2
+
+# Restart node3 and verify automatic sync:
+sudo systemctl start zookeeper
+python3 scripts/zk_coordination_demo.py status
+```
+
+### D. Manual inspection with zkCli.sh
+
+Run the demo with `--keep` to leave the znodes in place:
+
+```bash
+python3 scripts/zk_coordination_demo.py run --keep
+# Note the run id printed, e.g., run_b8f2a1
+
+# Inspect through zkCli:
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181
+[zk: 127.0.0.1:2181(CONNECTED) 0] ls /flowfirst/zk_demo
+[zk: 127.0.0.1:2181(CONNECTED) 1] ls /flowfirst/zk_demo/run_b8f2a1/config
+[zk: 127.0.0.1:2181(CONNECTED) 2] get /flowfirst/zk_demo/run_b8f2a1/config/flow2_high_threshold
+```
+
+### How to use these patterns in your own code
+
+The demo isolates the four patterns implemented in [`src/zookeeper/zk.py`](src/zookeeper/zk.py:1):
+
+```python
+from kazoo.client import KazooClient
+from kazoo.recipe.election import Election
+from kazoo.exceptions import NodeExistsError
+
+# 1. Connect with TLS and timeouts configured
+zk = KazooClient(hosts="10.10.1.128:2181,10.10.1.129:2181,10.10.1.130:2181", timeout=10.0)
+zk.start()
+
+# 2. Leader Election: block until elected, run worker callback
+election = Election(zk, "/flowfirst/election/process2", identifier="node1")
+election.run(my_worker_callback)
+
+# 3. Dynamic Configuration Watch: instant live updates without polling
+@zk.DataWatch("/flowfirst/config/flow2_high_threshold")
+def on_config_change(data, stat, event=None):
+    if data:
+        new_val = float(data.decode().strip())
+        print(f"Hot-reloaded threshold to {new_val}")
+
+# 4. Ephemeral Service Registration: auto-deregisters on process exit or crash
+zk.create("/flowfirst/registry/process2/node1", b'{"status": "ready"}', ephemeral=True)
+
+# 5. Atomic Deduplication Barrier: insert only if first-seen
+try:
+    zk.create(f"/flowfirst/dedup/{message_id}", b"1", makepath=True)
+    insert_to_database(message)
+except NodeExistsError:
+    pass  # Duplicate delivery; skip insert safely
+```
+
+### Notes and limits
+
+- **Isolated namespace:** The demo operates exclusively under `/flowfirst/zk_demo/*`, ensuring running pipeline processes (`process1`–`process5`) and their election znodes under `/flowfirst/election` are unaffected.
+- **Fail-closed security:** When `TLS_ZK_ENABLED=true`, connections enforce mutual TLS validation and refuse to connect if client certificates or CA files are invalid or missing.
+- **Quorum requirement:** The ensemble requires at least $\lfloor N/2 \rfloor + 1$ (2 out of 3) active nodes to maintain leadership and commit state changes.
 
 ---
 

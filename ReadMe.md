@@ -295,7 +295,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 >
 > **Message safety:** see [Message Safety](#message-safety-publisher-confirms-and-the-dead-letter-queue) (publisher confirms, the dead-letter policy, replaying rejected messages; without the policy a rejected message is **discarded**).
 >
-> **Monitoring:** see [Monitoring and Alerting](#monitoring-and-alerting) (Prometheus `/metrics` on every process, alert rules, tested against a real Prometheus; no dashboard).
+> **Monitoring:** see [Monitoring and Alerting](#monitoring-and-alerting) (Prometheus `/metrics` on every process, alert rules, tested against a real Prometheus; optional Grafana dashboards: [Grafana Dashboards](#grafana-dashboards)).
 
 ---
 
@@ -970,6 +970,10 @@ python -c "from src.gt import gt; gt.monkey_patch(); print('gt.py OK, pool size:
 | `METRICS_ENABLED` | `false` | Each process serves Prometheus `/metrics` on `METRICS_PORT_BASE` + its number (9101–9105). See Monitoring and Alerting |
 | `METRICS_HOST` | `0.0.0.0` | Bind address of the metrics listener; use the node's own IP and firewall the ports |
 | `METRICS_PORT_BASE` | `9100` | Process N listens on this + N (1024–65530). `mysqld_exporter`'s default 9104 collides with DB Updater (Process 4) |
+| `GRAFANA_ADMIN_PASSWORD` | placeholder | Read only by `monitoring/setup_grafana.sh` on the monitoring host, never by the pipeline. Must be strong (the installer refuses a weak one); `generate_secrets.sh --write` fills it. See Grafana Dashboards |
+| `GRAFANA_HOST` / `GRAFANA_PORT` | `127.0.0.1` / `3000` | Where Grafana listens. `0.0.0.0`, `::` and blank are refused |
+| `GRAFANA_PROMETHEUS_URL` | `http://127.0.0.1:9090` | How the Grafana server reaches Prometheus |
+| `GRAFANA_TLS_ENABLED` | `false` | `true` serves HTTPS (TLS 1.2+) from `GRAFANA_TLS_CERT_FILE` / `GRAFANA_TLS_KEY_FILE`; a missing file stops the installer. Also `GRAFANA_ADMIN_USER` (default `admin`) and `GRAFANA_TLS_CA_FILE` (optional, health check only) |
 | `GT_CONSUMERS_PER_QUEUE` | `1` | Consumer greenthreads per queue in Processes 2–5, each with its own RabbitMQ connection. See Scenario 61 |
 | `GT_PREFETCH_COUNT` | `1` | Unacknowledged messages RabbitMQ hands one consumer at a time. See Scenario 61 |
 
@@ -1628,6 +1632,20 @@ Uncomment the `alerting:` block in `/etc/prometheus/prometheus.yml`, point it to
 #### Step 7e — Verify Prometheus UI & Targets
 
 Access the Prometheus Web UI at `http://<prometheus-ip>:9090` and navigate to **Status -> Targets**. Confirm all FlowFirst targets are in the `UP` state.
+
+#### Step 7f — (Optional) Install Grafana Dashboards
+
+Grafana adds two ready-made dashboards (**FlowFirst - Pipeline**, **FlowFirst - Infrastructure**) on top of Prometheus. It is a viewer only: alerting stays in Prometheus/Alertmanager and nothing in the pipeline depends on it. Run it on the Prometheus host, after Step 7e shows the targets `UP`:
+
+```bash
+cd /opt/flowfirst
+# .env: set GRAFANA_ADMIN_PASSWORD to a strong value (openssl rand -hex 16); GRAFANA_HOST defaults to 127.0.0.1
+sudo ./monitoring/setup_grafana.sh
+curl -s http://127.0.0.1:3000/api/health                      # {"database": "ok", ...}
+ssh -L 3000:127.0.0.1:3000 flowadmin@<monitoring-host>        # then open http://localhost:3000 -> Dashboards -> FlowFirst
+```
+
+All settings (bind address, TLS, Prometheus URL), what the installer changes, the panel guide, user management, backup and troubleshooting are in [Grafana Dashboards](#grafana-dashboards). Not yet run against a real Grafana; the chapter says what was checked.
 
 ---
 
@@ -11308,7 +11326,7 @@ API Gateway (Process 1) has three questions it can answer, and they use differen
 
 ## Monitoring and Alerting
 
-> **Status:** the `/metrics` listener was tested on one workstation: unit tests, a child process serving it over plain HTTP and over mutual TLS, and a real Prometheus (container) scraping it with a client certificate (target `up`) and without one (target `down`). The alert rules pass `promtool check rules` and 7 `promtool test rules` scenarios on synthetic series. The RabbitMQ metric names were checked against a real RabbitMQ 3 container. `monitoring/alertmanager.yml` passes `amtool check-config`. **Not tested:** a scrape of a running 4-node cluster, the Galera/MariaDB exporter names (written from the exporter's documentation, syntax-checked only), `node_exporter` names, live Alertmanager routing delivering a notification, and no dashboard is shipped.
+> **Status:** the `/metrics` listener was tested on one workstation: unit tests, a child process serving it over plain HTTP and over mutual TLS, and a real Prometheus (container) scraping it with a client certificate (target `up`) and without one (target `down`). The alert rules pass `promtool check rules` and 7 `promtool test rules` scenarios on synthetic series. The RabbitMQ metric names were checked against a real RabbitMQ 3 container. `monitoring/alertmanager.yml` passes `amtool check-config`. **Not tested:** a scrape of a running 4-node cluster, the Galera/MariaDB exporter names (written from the exporter's documentation, syntax-checked only), `node_exporter` names, live Alertmanager routing delivering a notification, and the Grafana dashboards (never loaded into a running Grafana; see *Grafana Dashboards* for what was checked).
 
 **What you get.** With `METRICS_ENABLED=true` each process serves `GET /metrics` in Prometheus text format on `METRICS_PORT_BASE` + its number: API Gateway (Process 1) on 9101, Transformer (Process 2) on 9102, … Remote Worker (Process 5) on 9105. It is a separate listener, not part of the REST API and **not behind HAProxy**, so Prometheus scrapes every node directly, including Remote Node 1. The processes already counted what they handled; the listener only exposes it. It is off by default and a listener that cannot start (port in use, bad certificate) is logged and skipped: the pipeline keeps running, and it never falls back to plaintext when TLS is on.
 
@@ -11458,8 +11476,190 @@ Run these queries in the Prometheus expression browser (`http://<prometheus-ip>:
 3. Failures are counted when the handler raises. A message lost *before* a handler runs (for example, an unroutable publish) shows as a 5xx, not as `failed`.
 4. `FlowFirstProcessDown` also fires for a process that is up but whose metrics port is blocked or whose client certificate was rejected: the cause is in the Prometheus target page (`lastError`).
 5. Dedup-skipped messages are counted, but there is no alert on them: failover re-deliveries make a non-zero value normal.
-6. There is no ZooKeeper, HAProxy or Swift alert, and no dashboard. The file receiver is a starting point: it records every alert but sends no page. Replace or supplement it with a real notification channel in `alertmanager.yml`.
+6. There is no ZooKeeper, HAProxy or Swift alert, and the optional Grafana dashboards ([Grafana Dashboards](#grafana-dashboards)) cover only what Prometheus already collects. The file receiver is a starting point: it records every alert but sends no page. Replace or supplement it with a real notification channel in `alertmanager.yml`.
 7. The listener has no request limits beyond a small connection pool and a 10 s socket timeout; do not expose it beyond the monitoring network.
+
+---
+
+## Grafana Dashboards
+
+> **Status: written and statically checked, never run against a real Grafana.** There was no Grafana, Docker or RHEL host where this was written. What *was* checked: both dashboards are valid JSON with unique panel ids and one datasource uid; all 40 queries in them parse in a real `promtool` (Prometheus 3.5.0); every `flowfirst_*` series, `event` and `process` label value they use exists in `src/metrics/metrics.py`/`process1.py`; every `job` label exists in `monitoring/prometheus.yml`; `setup_grafana.sh` passes `bash -n`; the secret handling in `generate_secrets.sh` was run on sample files; and `tests/test_grafana_setup.py` (15 tests) runs in `./scripts/ci_check.sh`. **Not checked:** the RPM install, the `grafana.ini` keys against a running Grafana, SELinux, how the panels look, and the `mysqld_exporter`/`node_exporter`/RabbitMQ series on a live cluster (they are the same names the alert rules already use, themselves untested on a live cluster; see *Monitoring and Alerting*). Expect to adjust a panel or two on first use.
+
+### What you get and where it fits
+
+```
+ FlowFirst processes (:9101-9105)  ┐
+ RabbitMQ (:15692), mysqld_exporter ├──scrape──▶ Prometheus (:9090) ──queries──▶ Grafana (:3000) ◀── your browser
+ (:9114), node_exporter (:9100)    ┘                  │
+                                                      └──rules──▶ Alertmanager (:9093)
+```
+
+Grafana is a **viewer on top of Prometheus**. It stores nothing about the pipeline, never talks to RabbitMQ, MariaDB, ZooKeeper or Swift, and is not read by any FlowFirst process. It does **not** raise alerts: the alert rules stay in Prometheus and Alertmanager (the *Firing alerts* table on the dashboard just displays what Prometheus reports). It is a single instance, **not behind HAProxy and not managed by Pacemaker**; if it is down, the pipeline, Prometheus and the alerts carry on and you only lose the pictures. Install it on the same host as Prometheus (or any host that can reach it).
+
+| File | Purpose |
+|---|---|
+| `monitoring/setup_grafana.sh` | The installer (this chapter's *Setup*) |
+| `monitoring/grafana/provisioning/datasources/flowfirst.yml` | The Prometheus datasource (uid `flowfirst-prometheus`, read-only in the UI) |
+| `monitoring/grafana/provisioning/dashboards/flowfirst.yml` | Tells Grafana to load every JSON file in `/var/lib/grafana/dashboards/flowfirst` into a folder named **FlowFirst** |
+| `monitoring/grafana/dashboards/flowfirst-pipeline.json` | Dashboard **FlowFirst - Pipeline** |
+| `monitoring/grafana/dashboards/flowfirst-infrastructure.json` | Dashboard **FlowFirst - Infrastructure** |
+| `tests/test_grafana_setup.py` | Static checks of all of the above |
+
+### Setup
+
+**Before you start** (all must already work; Grafana only draws what Prometheus holds):
+
+1. `METRICS_ENABLED=true` on every node and Prometheus installed with every target `UP` (*Phase 7*, Steps 7a-7e). For the **Infrastructure** dashboard also enable `rabbitmq_prometheus`, run `mysqld_exporter` on `:9114` and `node_exporter` on `:9100` (the `rabbitmq`, `mysqld` and `node` jobs in `monitoring/prometheus.yml`). Without them the *Pipeline* dashboard still works and the infrastructure panels say "No data".
+2. The host has `dnf`, `curl`, `openssl`, `python3`, outbound HTTPS to `rpm.grafana.com`, and this repo with its `.env` (the script reads `/opt/flowfirst/.env` or the repo's own `.env`).
+
+**Step 1 - settings in `.env`** on the monitoring host (literal values; no `${VAR}`):
+
+```bash
+cd /opt/flowfirst
+./scripts/generate_secrets.sh --write      # also replaces GRAFANA_ADMIN_PASSWORD, if the line is in .env (see note)
+# or, for just this value:  openssl rand -hex 16   and paste it as GRAFANA_ADMIN_PASSWORD=...
+grep '^GRAFANA_' .env | sed 's/^\(GRAFANA_ADMIN_PASSWORD=\).*/\1<hidden>/'
+```
+
+> `generate_secrets.sh --write` regenerates **all** the cluster passwords. Run it only before the first install (see *Phase 0*); on a running cluster set `GRAFANA_ADMIN_PASSWORD` by hand instead. If your `.env` came from an older template and has no `GRAFANA_*` lines, copy that block from `src/config/.env.example`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GRAFANA_ADMIN_PASSWORD` | placeholder | **Required.** The installer refuses an empty, short (`SECRET_MIN_LENGTH`) or well-known value, the same rule as the other secrets (`ALLOW_DEFAULT_SECRETS=true` downgrades it to a warning; dev only) |
+| `GRAFANA_ADMIN_USER` | `admin` | Admin login name (1-32 of `A-Z a-z 0-9 . _ -`) |
+| `GRAFANA_HOST` | `127.0.0.1` | Address Grafana binds to. `127.0.0.1` = reachable only via an SSH tunnel. Use the host's own IP for browsers on your admin network. `0.0.0.0`, `::` and blank are **refused** |
+| `GRAFANA_PORT` | `3000` | 1024-65535 |
+| `GRAFANA_PROMETHEUS_URL` | `http://127.0.0.1:9090` | How the Grafana *server* reaches Prometheus (for a separate host: `http://<prometheus-ip>:9090`) |
+| `GRAFANA_TLS_ENABLED` | `false` | `true` serves HTTPS, TLS 1.2 or newer, with the next two files. A missing, unreadable, expired or mismatched file stops the installer; there is no plain-text fallback |
+| `GRAFANA_TLS_CERT_FILE`, `GRAFANA_TLS_KEY_FILE` | blank | PEM server certificate (with chain) and its **unencrypted** key. The certificate's names must include what browsers type (use a *server* certificate: `./security/issue_cert.sh --name grafana --profile server --san "DNS:<host>,IP:<ip>"`, then copy `grafana.crt`/`grafana.key` to the host) |
+| `GRAFANA_TLS_CA_FILE` | blank | Optional; only lets the installer health-check the HTTPS listener (point it at `ca.crt`) |
+
+**Step 2 - install:**
+
+```bash
+sudo ./monitoring/setup_grafana.sh
+```
+
+What it does, in order (re-running is safe; it re-applies everything and restarts Grafana):
+
+1. Validates every setting and the TLS files, the dashboard JSON and the provisioning files **before** changing the system.
+2. Writes the Grafana RPM repository (`https://rpm.grafana.com`, `gpgcheck=1`, `repo_gpgcheck=1`, `sslverify=1`) and runs `dnf install -y grafana` (the open-source edition; the repository publishes the current stable release, so no version is pinned here).
+3. Stores the admin password and a generated **data-encryption key** as separate mode-640 files (`root:grafana`) in `/etc/grafana/secrets/`. `grafana.ini` references them with `$__file{...}`, so no secret is in `grafana.ini`, on a command line or in the journal. An existing key is never replaced.
+4. Writes `/etc/grafana/grafana.ini` (the RPM original is kept once as `grafana.ini.rpm-default`): bind address/port/TLS, `allow_sign_up = false`, `allow_org_create = false`, anonymous access off, `allow_embedding = false`, no Gravatar, no usage reporting, update checks or external snapshots; with TLS also `cookie_secure = true` and HSTS.
+5. Substitutes `GRAFANA_PROMETHEUS_URL` into the datasource file and installs it and both dashboards (stale dashboard files are removed first; the repo is the source of truth).
+6. Adds a systemd drop-in (`/etc/systemd/system/grafana-server.service.d/10-hardening.conf`: `NoNewPrivileges`, `PrivateTmp`, `ProtectHome`, kernel/cgroup protection, TCP/UDP/unix sockets only), enables and restarts `grafana-server`, then polls `/api/health` for up to 30 s and exits non-zero if the database is not `ok`.
+
+**Step 3 - make it reachable.** With the default `127.0.0.1` nothing is exposed; use a tunnel from your workstation:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 flowadmin@<monitoring-host>      # then browse to http://localhost:3000
+```
+
+To let browsers on the admin network connect directly, set `GRAFANA_HOST=<this host's IP>`, re-run the installer and open the port to **that network only** (Grafana has a login but is not a place to expose to the internet):
+
+```bash
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="<admin-network>/<prefix>" port port="3000" protocol="tcp" accept'
+sudo firewall-cmd --reload
+```
+
+If Prometheus is on **another** host, also allow this Grafana host to reach Prometheus (`9090/tcp`) and set `GRAFANA_PROMETHEUS_URL`. Prometheus has no login of its own in this setup, so keep `9090` limited to Grafana and your operators.
+
+**Step 4 - verify:**
+
+```bash
+systemctl status grafana-server --no-pager
+curl -s http://127.0.0.1:3000/api/health            # {"database": "ok", ...}   (add --cacert ca.crt and https:// with TLS)
+sudo journalctl -u grafana-server -n 50 --no-pager
+```
+
+In the browser: log in as `GRAFANA_ADMIN_USER`, open **Connections -> Data sources -> FlowFirst Prometheus** and press **Test** (expect "Successfully queried the Prometheus API"), then **Dashboards -> FlowFirst**. No data yet? Send some traffic:
+
+```bash
+./scripts/test_flows_and_inspect_db.sh
+```
+
+### Usage
+
+Both dashboards refresh every 30 s, default to the last 6 hours, and share the crosshair between panels. Hover a panel's **(i)** for what it measures. Panels show cluster-wide sums unless a variable narrows them.
+
+**FlowFirst - Pipeline**
+
+| Row | Panels | Read it as |
+|---|---|---|
+| Health at a glance | Scrape targets up · Stages with an active instance · Dead-letter messages · Failed messages (5 min) · API 5xx ratio · Soonest certificate expiry | All green is normal. Red/orange mirror the thresholds of the alerts of the same name |
+| | Firing alerts | The alerts Prometheus currently fires (empty = "No alerts firing") |
+| Throughput | Accepted by the API · Persisted · Throughput by stage and event · Failures by stage and flow | Accepted and Persisted should track each other with a short delay; a gap that keeps growing is a stuck stage |
+| REST API and queues | API responses by status class · Queue backlog · Queue consumers | A rising backlog or a queue with 0 consumers points at the stage that reads it |
+| Processes | Greenthreads per instance · Uptime · Publisher connections · Duplicates skipped · Certificate days remaining | Greenthreads of `0` = standby instance (normal for non-leaders); a falling uptime is a restart; duplicates after a failover are normal |
+
+Variables (top of the page): **Flow** (1-7, multi-select) and **Node**. They filter the throughput, failure, dedup and per-instance panels; the health row and the queue panels are always cluster-wide.
+
+**FlowFirst - Infrastructure**
+
+| Row | Panels |
+|---|---|
+| Health at a glance | Galera cluster size · Galera nodes not Synced · RabbitMQ nodes up · RabbitMQ resource alarms · Lowest free disk · Largest clock offset · and a *Scrape targets down* table for every job |
+| MariaDB Galera | `wsrep_cluster_size` and `wsrep_local_state` per node, flow-control pause, connections, queries per second |
+| RabbitMQ | Connections and channels, dead-letter queue depth |
+| Hosts | CPU, memory, load, filesystem use, clock offset (variable **Instance**) |
+
+**Typical questions**
+
+| Question | Where to look |
+|---|---|
+| Is the pipeline healthy right now? | *Pipeline*, top row, then *Firing alerts* |
+| Messages are accepted but not stored | *Pipeline*: Accepted vs Persisted, Queue backlog, Queue consumers, Greenthreads (is a stage on standby everywhere?) |
+| A message went missing | Dead-letter messages, Failures by stage and flow, then the process log; replay with `scripts/replay_dead_letters.py` |
+| Did a node restart / fail over? | Uptime per instance, Greenthreads per instance, Duplicates skipped |
+| Is the database cluster whole? | *Infrastructure*: Galera size and state |
+| A certificate is about to expire | *Pipeline*: Soonest certificate expiry, Certificate days remaining (Scenario 63 for renewal) |
+| Behaviour during a load test (Scenarios 61/62) | *Pipeline*, time range set to the test; watch Queue backlog and Throughput |
+
+To run your own query, use **Explore** (compass icon) with the FlowFirst Prometheus datasource; the *PromQL Query Guide* above lists ready-made expressions.
+
+### Operations
+
+- **Add or change a user.** *Administration -> Users and access -> Users -> New user*, role **Viewer** for people who only look. Self sign-up is off. Do not share the admin login.
+- **Change the admin password.** Log in, *Profile -> Change password*. `GRAFANA_ADMIN_PASSWORD` is applied only when Grafana's database is **first created**; later edits of `.env` do not change an existing login (and the installer rewrites the secret file, so keep `.env` and the real password in step, or treat `.env` as the initial value only). Rotating it later: change it in the UI, then update `.env`.
+- **Change a dashboard.** The dashboards are read-only in the UI on purpose (`allowUiUpdates: false`): edit the JSON under `monitoring/grafana/dashboards/`, commit it, and run `sudo ./monitoring/setup_grafana.sh` again (or copy the file to `/var/lib/grafana/dashboards/flowfirst/`; Grafana notices within 30 s). Keep the `flowfirst-prometheus` datasource uid. Run `./scripts/ci_check.sh` after editing; the test checks the series names against the code. A panel that exists only in the UI is lost when the script runs.
+- **Add a node.** Add its targets to `/etc/prometheus/prometheus.yml` (Scenarios 76/77); the dashboards pick it up through the `node`/`instance` labels without a change.
+- **Upgrade Grafana.** `sudo dnf upgrade grafana && sudo systemctl restart grafana-server`. Read the Grafana release notes first; if a panel type is removed the JSON must be adjusted.
+- **Back up.** Dashboards and datasource come from this repo, so there is nothing to restore for them. What is *not* in the repo: users, extra API keys and preferences in `/var/lib/grafana/grafana.db`, and the key `/etc/grafana/secrets/secret_key` that encrypts values stored in it. `scripts/backup_flowfirst.sh` does **not** include either. Stop Grafana (or use `sqlite3 .backup`) and copy both off the host, encrypted, if you care about the user list. Do not change `secret_key` after first start.
+- **Logs.** `journalctl -u grafana-server` and `/var/log/grafana/grafana.log`.
+- **Uninstall.** `sudo systemctl disable --now grafana-server && sudo dnf remove grafana`, then remove `/etc/grafana/secrets`, `/etc/yum.repos.d/grafana.repo` and the systemd drop-in directory. Nothing in FlowFirst depends on it.
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| Installer: `GRAFANA_ADMIN_PASSWORD is shorter than ...` / `... is a well-known sample/default value` | Set a strong value in `.env` (`openssl rand -hex 16`) |
+| Installer: `GRAFANA_HOST must be a specific address` | You set `0.0.0.0`, `::` or blank. Use `127.0.0.1` or the host IP |
+| Installer: `GRAFANA_TLS_ENABLED=true but ... is missing or unreadable` / `do not belong together` / `has expired` | Fix the PEM files; there is deliberately no fallback to HTTP |
+| `dnf` cannot reach `rpm.grafana.com` | Air-gapped host: mirror the repository internally and edit `/etc/yum.repos.d/grafana.repo` (`baseurl`), or install the RPM from your own repository and run the script again; keep `gpgcheck` on |
+| Health check `FAILED`, port in use | Another service has `GRAFANA_PORT`; `sudo ss -tlnp \| grep :3000`, change the port |
+| Health check `FAILED`, nothing in the journal about the port, SELinux enforcing | `sudo ausearch -m avc -ts recent`. On a non-default port you may need `sudo semanage port -a -t grafana_port_t -p tcp <port>`. Not tested here |
+| Datasource **Test** fails | `GRAFANA_PROMETHEUS_URL` wrong, or a firewall between the hosts; from the Grafana host: `curl -s <url>/-/healthy`. Fix `.env`, re-run the installer |
+| Every panel says "No data" | Prometheus has no samples: check *Status -> Targets* in Prometheus, and that the time range is not before the first scrape |
+| Only *Infrastructure* panels are empty | The `rabbitmq`, `mysqld` or `node` jobs are missing or down (they need their own exporters) |
+| Can log in, cannot edit a dashboard | By design (see *Operations*) |
+| `admin` password from `.env` is rejected | The Grafana database existed before; the value in `.env` only applies at first creation. Reset it: *Profile -> Change password*, or `grafana cli admin reset-admin-password --help` on the host |
+| Browser warns about the certificate | TLS on with a certificate the browser does not trust; install `ca.crt` as trusted on the workstation (do not click through the warning on a production host) |
+
+### Security notes
+
+- Binds to `127.0.0.1` by default; the installer refuses all-interface binds. Open the port to a named admin network only.
+- Login required; sign-up, anonymous access, embedding, usage reporting and external snapshots are off. HTTPS (TLS 1.2+) is optional and fails closed. There is no `skip_verify`/insecure option anywhere.
+- Secrets live in mode-640 files, never in `grafana.ini`, the process arguments, the journal or the dashboards. `tests/test_grafana_setup.py` fails if a dashboard contains a password, secret or URL.
+- Grafana holds **no** credentials for RabbitMQ, MariaDB, ZooKeeper or Swift, and the Prometheus datasource has none (Prometheus is unauthenticated here): anyone who can log in to Grafana can run any PromQL query, but only against metrics (counters, queue depths, certificate expiry), never message content. Give most people the **Viewer** role.
+- Grafana's own alerting is not configured; do not create alert rules there that duplicate Prometheus rules.
+
+### Limits
+
+1. Never run against a real Grafana (see the status at the top of this chapter).
+2. One Grafana instance, no failover. A second one on another host can use the same repo files; each keeps its own users.
+3. Panels use the same metrics as the alerts, so they inherit the limits listed under *PromQL Query Guide*. For example *Stages with an active instance* and *Firing alerts* need the five processes to be scraped; per-flow panels show only flows that have produced a sample.
+4. There is no ZooKeeper, HAProxy or Swift panel, because no exporter for them is part of this stack.
+5. No Grafana-side alert delivery. A real paging channel is still configured in `alertmanager.yml`.
 
 ---
 
@@ -11707,7 +11907,7 @@ If you set `TLS_CRL_FILE`, also schedule `security/refresh_crl.sh` + `install_ce
 
 1. **Sandbox.** `sudo ./systemd/install_services.sh /opt/flowfirst` installs the hardening drop-in with the units (Phase 4, Step 4c); restart the processes and check `systemd-analyze security flowfirst-process1`. `preflight_check.py` warns when a unit lacks the drop-in.
 2. **Health probe.** HAProxy keeps probing `GET /health`, which no longer touches ZooKeeper (chapter *Health, Readiness and Dependencies*). Anything of yours that read `zk_config` or `zk_registered_workers` from `/health` must move to `/zk/config` and `/zk/health`. Do not point HAProxy at `/ready`.
-3. **Monitoring.** Set `METRICS_ENABLED=true`, `METRICS_HOST=<node ip>` and open ports 9101 to 9105 to Prometheus only; use `monitoring/prometheus.yml` and `monitoring/*.rules.yml`, then enable `rabbitmq_prometheus`, `mysqld_exporter` (on 9114) and `node_exporter` (chapter *Monitoring and Alerting*). Send a test message to `flowfirst_dead_letters` and confirm `FlowFirstDeadLetters` fires.
+3. **Monitoring.** Set `METRICS_ENABLED=true`, `METRICS_HOST=<node ip>` and open ports 9101 to 9105 to Prometheus only; use `monitoring/prometheus.yml` and `monitoring/*.rules.yml`, then enable `rabbitmq_prometheus`, `mysqld_exporter` (on 9114) and `node_exporter` (chapter *Monitoring and Alerting*). Send a test message to `flowfirst_dead_letters` and confirm `FlowFirstDeadLetters` fires. Optionally add dashboards with `sudo ./monitoring/setup_grafana.sh` (Phase 7f; chapter *Grafana Dashboards*).
 4. **Backups.** Schedule `backup_flowfirst.sh` and rehearse `restore_flowfirst.sh --verify` (chapter *Backup and Restore*).
 
 ### R8. Measure it (Scenarios 61 and 62)
@@ -11741,10 +11941,11 @@ The only benchmark in this repository (one RabbitMQ container, 2 vCPU, ReadMe K0
 | | `systemd-analyze security flowfirst-process1` shows the sandbox; all five units active | saved output |
 | | `curl http://<node>:8082/health` answers while ZooKeeper is briefly stopped on a test node; `/ready` shows `zookeeper: disconnected` | two curl outputs |
 | | Prometheus targets `up` on every node; the test dead-letter alert fired and was routed to a person | target page, alert |
+| | (if Grafana is installed) both FlowFirst dashboards show data, and the *Health at a glance* row agrees with `/api/v1/targets`; the admin password is not the generated install value you pasted into a ticket | two screenshots |
 | | CRL refresh scheduled; `list_certs.sh` shows the CRL `nextUpdate` more than 7 days away (if `TLS_CRL_FILE` is set) | saved output |
 
 ### R10. What this run-book does not cover
 
-Still open: no point-in-time database recovery; no dashboard; no ZooKeeper, HAProxy or Swift alerts; the file-receiver Alertmanager setup records alerts to a log file but sends no page (add a real receiver in `alertmanager.yml`); live Alertmanager routing has not been tested; Swift objects are now backed up but the swift backup part has not been tested against a real Swift cluster; Swift cannot require client certificates at its proxy; RabbitMQ and ZooKeeper do not honour the CRL; `MARIADB_SST_METHOD=mariabackup` with `MARIADB_SST_ENCRYPT=true` is implemented but not tested on a real cluster; `HAPROXY_MAX_BODY_BYTES` is in the template but not tested against a live HAProxy; no per-client rate limiting; the GitHub Actions workflow has never been run; and **nothing here has been run on a real four-node cluster, on RHEL 9, with SELinux enforcing, or under Pacemaker**. The chapters above state what was tested and how.
+Still open: no point-in-time database recovery; the Grafana dashboards have never been loaded into a running Grafana (their queries are only syntax-checked, see *Grafana Dashboards*); no ZooKeeper, HAProxy or Swift alerts; the file-receiver Alertmanager setup records alerts to a log file but sends no page (add a real receiver in `alertmanager.yml`); live Alertmanager routing has not been tested; Swift objects are now backed up but the swift backup part has not been tested against a real Swift cluster; Swift cannot require client certificates at its proxy; RabbitMQ and ZooKeeper do not honour the CRL; `MARIADB_SST_METHOD=mariabackup` with `MARIADB_SST_ENCRYPT=true` is implemented but not tested on a real cluster; `HAPROXY_MAX_BODY_BYTES` is in the template but not tested against a live HAProxy; no per-client rate limiting; the GitHub Actions workflow has never been run; and **nothing here has been run on a real four-node cluster, on RHEL 9, with SELinux enforcing, or under Pacemaker**. The chapters above state what was tested and how.
 
 Sridhar

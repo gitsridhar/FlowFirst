@@ -1,0 +1,16 @@
+# Grafana datasource provisioning for FlowFirst. Installed by monitoring/setup_grafana.sh, which replaces
+# __PROMETHEUS_URL__ with GRAFANA_PROMETHEUS_URL from .env (default http://127.0.0.1:9090).
+# The uid is fixed: the dashboards in ../../dashboards refer to it. Do not change it without changing them.
+apiVersion: 1
+
+datasources:
+  - name: FlowFirst Prometheus
+    uid: flowfirst-prometheus
+    type: prometheus
+    access: proxy                  # the Grafana server queries Prometheus, never the browser
+    url: __PROMETHEUS_URL__
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s            # must equal scrape_interval in prometheus.yml

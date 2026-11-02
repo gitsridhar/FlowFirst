@@ -8,7 +8,8 @@ set -euo pipefail
 #   ./scripts/generate_secrets.sh --write      replace the values IN .env (backup saved as .env.bak, mode 600)
 #   ./scripts/generate_secrets.sh --write --file /path/.env
 #
-# Generates fresh values for: RABBITMQ_PASSWORD, MARIADB_PASSWORD, SWIFT_KEY, HAPROXY_STATS_PASS.
+# Generates fresh values for: RABBITMQ_PASSWORD, MARIADB_PASSWORD, SWIFT_KEY, HAPROXY_STATS_PASS, and
+# GRAFANA_ADMIN_PASSWORD when the .env already has that line.
 # Values are 32 hex characters from `openssl rand` (letters and digits only, safe in .env, SQL and haproxy.cfg).
 #
 # SWIFT_HASH_PATH_PREFIX and SWIFT_HASH_PATH_SUFFIX are pre-set in the per-node .env files
@@ -67,6 +68,13 @@ for i in "${!KEYS[@]}"; do
         echo "${k}=${v}" >> "${ENV_FILE}"
     fi
 done
+
+# Optional secret: GRAFANA_ADMIN_PASSWORD (monitoring/setup_grafana.sh) is replaced only when the file already has the
+# line (it is in .env.example). It is never appended, so a .env without Grafana settings is left as it is.
+if grep -q "^GRAFANA_ADMIN_PASSWORD=" "${ENV_FILE}"; then
+    sed "s|^GRAFANA_ADMIN_PASSWORD=.*|GRAFANA_ADMIN_PASSWORD=$(gen)|" "${ENV_FILE}" > "${ENV_FILE}.new" && mv "${ENV_FILE}.new" "${ENV_FILE}"
+    echo "  GRAFANA_ADMIN_PASSWORD: replaced"
+fi
 
 # SWIFT_HASH_PATH_* — only overwrite if still a placeholder (starts with "changeme").
 # Pre-built .env.*node* files already have real values; leave them alone.

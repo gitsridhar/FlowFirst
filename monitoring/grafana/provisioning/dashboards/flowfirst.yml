@@ -1,0 +1,14 @@
+# Grafana dashboard provider for FlowFirst. Installed by monitoring/setup_grafana.sh.
+# The JSON files are copied to /var/lib/grafana/dashboards/flowfirst and re-read every 30 s.
+apiVersion: 1
+
+providers:
+  - name: flowfirst
+    orgId: 1
+    folder: FlowFirst
+    type: file
+    disableDeletion: true          # a dashboard removed from the repo is not deleted by mistake
+    allowUiUpdates: false          # edit the JSON in the repo and re-run setup_grafana.sh; UI edits are not persisted
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/flowfirst

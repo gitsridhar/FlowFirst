@@ -274,6 +274,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [69](#scenario-69-database-writeread-demo-across-nodes-mariadb-galera) | Database Write/Read Demo Across Nodes | Galera | `scripts/db_replication_demo.py`: write through each node, read from every node, node-down catch-up |
 | [70](#scenario-70-zookeeper-coordination-demo-across-nodes) | ZooKeeper Coordination Demo Across Nodes | ZooKeeper | `scripts/zk_coordination_demo.py`: leader election & failover, dynamic config watches, service registry, atomic dedup |
 | [71](#scenario-71-rabbitmq-queue-demo-across-nodes) | RabbitMQ Queue Demo Across Nodes | RabbitMQ | `scripts/rabbitmq_queue_demo.py`: work queue, competing consumers, fanout exchange, redelivery after a consumer crash |
+| [72](#scenario-72-greenthread-eventlet-demo-locally-and-across-nodes) | Greenthread (eventlet) Demo Locally and Across Nodes | Greenthreads | `scripts/greenthread_demo.py`: cooperative scheduling, many waits on one OS thread, `restart_on_error`, probing all nodes at once, a consumer + publisher greenthread per RabbitMQ node |
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
 
@@ -9257,6 +9258,186 @@ Rules that apply in this project (see `AGENTS.md`): one connection per thread or
 - **Tested:** target resolution, object naming (demo objects never collide with the pipeline queues or the dead-letter policy), queue arguments, table rendering, argument handling and the "broker unreachable" path (`tests/test_rabbitmq_queue_demo.py`, no broker needed). **Not tested against a real RabbitMQ cluster**: it was written on a workstation without RabbitMQ, so the broker interaction and the output sample above have not been run end to end. Run it once on a test cluster and correct this note when you have.
 - The demo talks to each node directly and bypasses HAProxy (`:5673`) on purpose; real clients should use `config.get_connection()` or the HAProxy port.
 - The redelivery stage simulates a crashed consumer by closing the connection with an unacknowledged message. It does not kill a broker node; for that see Scenario 13.
+
+---
+
+## Scenario 72: Greenthread (eventlet) Demo Locally and Across Nodes
+
+> **Goal:** show, with a small piece of code you can read, how the greenthread helpers in `src/gt/gt.py` are used, first on one machine and then across the cluster nodes. The script is `scripts/greenthread_demo.py`. The pipeline processes (P1–P5) use exactly these building blocks (Scenarios 39–43 observe them in a running cluster); this scenario lets you see them in isolation, without the REST API, HAProxy or a pipeline process.
+>
+> **Runs on:** the three *local* stages run anywhere the `.venv` is installed (a workstation is fine, no cluster needed). The two *cluster* stages run on node1, node2, node3 (as `flowadmin` with the `.venv` active) or node4 / a workstation as a client (needs TCP to `NODE1_IP`..`NODE3_IP`: RabbitMQ 5672 (5671 with TLS), ZooKeeper 2181 (2281 with TLS), MariaDB 3306, and the same `.env`).
+
+### The idea in five lines
+
+- A **greenthread** is a task scheduled by eventlet inside **one** operating-system thread. Thousands are cheap; they share memory, so plain `dict`/`list` updates need no lock.
+- Scheduling is **cooperative**: a greenthread runs until it blocks (network, `time.sleep`) or yields (`gt.sleep(0)`). Nothing pre-empts it, so a loop that never blocks or yields starves all the others.
+- `gt.monkey_patch()` makes the standard library (`socket`, `time`, `threading`, `select`) cooperative, so unmodified libraries (pika, kazoo, pymysql, `http.server`) wait without blocking the whole process. It must run **before** any of those are imported.
+- `gt.spawn()`, `gt.spawn_consumers()` and `gt.periodic()` start *named* greenthreads (visible in `GET /gt/status`); `restart_on_error=True` re-spawns a worker that raised.
+- A `pika.BlockingConnection` is **not** greenthread-safe: every greenthread that publishes or consumes opens its own.
+
+### What it does
+
+| Stage | What it shows | What happens | Code |
+|---|---|---|---|
+| 1 `interleave` | **Cooperative scheduling** (local) | Three greenthreads each record three steps. With `gt.sleep(0)` after every step they take turns (`A1 B1 C1 A2 …`); without it the first runs to the end before the next starts (`A1 A2 A3 B1 …`). | `run_interleave()`, `stage_interleave()` |
+| 2 `concurrency` | **Many waits on one thread** (local) | `--tasks` greenthreads each call the standard `time.sleep(--delay)`. They finish in about *one* delay, not *tasks × delay*, while a `gt.periodic()` heartbeat keeps ticking. Defaults: 20 tasks × 1 s. | `stage_concurrency()` |
+| 3 `restart` | **Crash handling** (local) | A worker that raises on its first run: with `restart_on_error=False` it stays down (1 run), with `True` `gt` re-spawns it after 2 s (2 runs). | `stage_restart()` |
+| 4 `probe` | **Greenthreads across the nodes** | One greenthread per *(node, service)* opens a TCP connection to RabbitMQ, ZooKeeper and MariaDB on node1–node3 (9 probes at once in an `eventlet.GreenPool`), then the same probes one after the other for comparison. | `stage_probe()`, `probe_tcp()` |
+| 5 `consume` | **Consumers and publishers across the nodes** | Per RabbitMQ node: one *consumer* greenthread and one *publisher* greenthread, all in this one OS thread, each with its **own** connection. Publishers use confirms and `mandatory=True` and together publish `--count` messages (default 30) through node1, node2 and node3; consumers (`prefetch_count=1`, ack after the work) share them. | `stage_consume()` |
+
+Safety properties of the demo:
+
+- **Own namespace.** The consume stage uses one queue, `flowfirst_demo_gt.<run id>.work`. It does not match the dead-letter policy pattern `^flow[123]_` and is not in `ALL_QUEUES`, and the script deliberately does **not** call `config.setup_queues()`, so the nine pipeline queues are never touched. The queue carries `x-expires` (30 minutes) and is deleted at the end of the run.
+- **Read-only towards ZooKeeper and MariaDB.** The `probe` stage only opens and closes a TCP connection; it sends nothing.
+- **Queue type.** The demo queue uses `RABBITMQ_QUEUE_TYPE` from `.env` (or `--queue-type classic|quorum`).
+- **TLS and secrets.** `TLS_RABBITMQ_ENABLED=true` is honoured through `src.tls.tls.client_context()` and fails closed. The password is never printed, and errors print only the exception type. Logs go to the console only (`LOG_DIR` defaults to empty for this script) at `WARNING` unless you set `LOG_LEVEL`.
+
+### Prerequisites
+
+- Local stages: `pip install --require-hashes -r requirements.txt` in the `.venv` (eventlet is a pipeline dependency already).
+- Cluster stages: RabbitMQ cluster running on nodes 1–3 (Scenario 13), `.env` with `NODE1_IP`..`NODE3_IP`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`.
+
+### A. Run the local stages (no cluster)
+
+```bash
+cd /opt/flowfirst && source .venv/bin/activate      # or the .venv of your workstation checkout
+python3 scripts/greenthread_demo.py local
+python3 scripts/greenthread_demo.py concurrency --tasks 200 --delay 0.5
+```
+
+Output (captured from a real run of `local --tasks 50 --delay 0.5` on a workstation; the timings differ per machine, the shape does not):
+
+```text
+== FlowFirst Greenthread Demo (local stages) ==
+client     : node1
+eventlet   : 0.40.4, monkey-patched: yes
+
+[1] Cooperative scheduling: greenthreads switch only where they yield
+    variant           order in which the steps ran  result
+    ----------------  ----------------------------  -----------------------------------------------
+    with gt.sleep(0)  A1 B1 C1 A2 B2 C2 A3 B3 C3    PASS: took turns
+    no yield          A1 A2 A3 B1 B2 B3 C1 C2 C3    PASS: first one ran to the end (others starved)
+
+[2] Concurrency on ONE OS thread: waits overlap, a periodic greenthread keeps ticking
+    metric                                           value
+    -----------------------------------------------  --------------------------------------
+    time.sleep is cooperative (monkey-patched)       yes
+    50 tasks x time.sleep(0.5) one after the other   25.00 s (calculated)
+    50 tasks as greenthreads, measured               0.50 s (50/50 finished)
+    heartbeat ticks (every 0.05 s) during that time  10
+    operating-system threads used                    1 (all greenthreads share this thread)
+    result                                           PASS: waits overlap
+
+[3] Crash handling: gt.spawn(restart_on_error=...)
+    greenthread     restart_on_error  runs  result
+    --------------  ----------------  ----  -----------------------------------------------------------
+    demo_plain      False             1     PASS: crashed once, stayed down
+    demo_restarted  True              2     PASS: crashed, re-spawned after gt's 2 s delay (2.0 s total)
+
+[4] Summary & Result
+    PASS: greenthreads verified.
+```
+
+`--tasks` accepts 1–900 (the `gt` pool holds `GT_POOL_SIZE`=1000 greenthreads by default; the heartbeat needs a slot too).
+
+### B. Run the cluster stages (across the nodes)
+
+```bash
+python3 scripts/greenthread_demo.py probe
+python3 scripts/greenthread_demo.py consume --count 60
+python3 scripts/greenthread_demo.py                       # everything: local + cluster
+python3 scripts/greenthread_demo.py run --nodes node1,node2 --queue-type quorum
+```
+
+Expected output shape for the cluster stages (illustrative: the layout is real, the numbers will differ; this sample was composed from the code, not captured from a cluster):
+
+```text
+[4] Across the nodes: probe RabbitMQ, ZooKeeper and MariaDB on every node at once
+    node   service    endpoint           status     connect (ms)  result
+    -----  ---------  -----------------  ---------  ------------  ------------------------------------------------------
+    node1  rabbitmq   10.10.1.128:5672   reachable  2             PASS
+    node1  zookeeper  10.10.1.128:2181   reachable  1             PASS
+    node1  mariadb    10.10.1.128:3306   reachable  1             PASS
+    ...
+    TOTAL  all        9 probes           9 reachable  -             PASS: 9 greenthreads took 0.01 s; one by one 0.02 s
+
+[5] Across the nodes: a consumer and a publisher greenthread per RabbitMQ node
+    node   published  consumed  share  result
+    -----  ---------  --------  -----  -------------------------------------------------------------------
+    node1  20         21        35%    PASS: consuming
+    node2  20         19        32%    PASS: consuming
+    node3  20         20        33%    PASS: consuming
+    TOTAL  60         60/60     -      PASS: each message handled exactly once in 1.1 s (one consumer would need about 3.00 s)
+```
+
+How to read it:
+
+- **`probe`:** on a healthy LAN both timings are tiny because a connect takes about a millisecond, so the gap is small. The point is the *shape*: the probe time of the greenthread version is about that of the **slowest** probe, the one-by-one version is the **sum**. Make it visible by stopping a service (e.g. `sudo systemctl stop mariadb` on node3): the three-greenthread run waits for one 2 s timeout, the sequential run for the same one on top of the others, and `node3 mariadb` shows `unreachable (...)` / `down`. The stage passes while a majority (2 of 3) of every service is reachable.
+- **`consume`:** the *published* column shows which node each message entered through (each publisher greenthread sends every third message); the *consumed* column shows which node's consumer handled it. The share depends on speed, not strict round-robin (`prefetch_count=1`), and a consumer with 0 messages is not an error as long as the TOTAL line passes. The simulated work is `gt.sleep(0.05)` per message, so three consumers handle 60 messages in about a third of the time one would need, all inside a single process.
+
+The exit code is 0 on success, 1 if a stage failed, 2 for a usage error (e.g. `--tasks 0`).
+
+### C. Prove it with a node down
+
+```bash
+sudo systemctl stop rabbitmq-server                                   # on node3 (Scenario 13)
+python3 scripts/greenthread_demo.py probe                              # node3 rabbitmq: down; stage still PASSES (2 of 3 up)
+python3 scripts/greenthread_demo.py consume --nodes node1,node2        # runs against the remaining brokers
+sudo systemctl start rabbitmq-server                                   # on node3
+```
+
+With `--queue-type classic` the demo queue lives on the node that declared it (the first node in `--nodes`); declare it on a surviving node, as the commands above do. `quorum` queues survive the loss of a node.
+
+### How to use these patterns in your own code
+
+A pipeline entry point (compare `src/application/process2.py`):
+
+```python
+from src.gt import gt
+gt.monkey_patch()              # FIRST, before pika / kazoo / pymysql / socket / threading are imported
+
+import logging
+from src.config.config import setup_queues
+log = logging.getLogger("flowfirst.pN")
+
+def consume_flow1():
+    conn = gt.get_rmq_connection_with_retry("p2-flow1")   # this greenthread's OWN connection
+    ch = conn.channel()
+    setup_queues(ch)                                       # declare the queues (durable) before use
+    ch.basic_qos(prefetch_count=1)
+    ch.basic_consume(queue="flow1_p1_to_p2", on_message_callback=handle)
+    while not gt.is_stopping():
+        conn.process_data_events(time_limit=1)
+        gt.sleep(0)                                        # mandatory: lets the sibling greenthreads run
+
+def main():
+    gt.register_signal_handlers()                          # SIGTERM/SIGINT -> gt.stop_event
+    gt.spawn_consumers("p2_flow1_consumer", consume_flow1, 2)   # 2 copies, auto-restarted on error
+    gt.periodic("p2_zk_health", report_health, 30)         # runs every 30 s, survives exceptions
+    gt.start_metrics_reporter("transformer")               # throughput lines in the log every GT_METRICS_INTERVAL_S
+    gt.wait_all()
+```
+
+Where the real processes use each helper:
+
+| Helper | Meaning | Used in |
+|---|---|---|
+| `gt.monkey_patch()` | cooperative stdlib | first line of every `process*.py` |
+| `gt.spawn_consumers(name, fn, n)` | `n` consumer greenthreads, `restart_on_error=True` | P2, P3, P4, P5 (`GT_CONSUMERS_PER_QUEUE` per queue) |
+| `gt.spawn(name, fn, restart_on_error=True)` | one named worker | P1 HTTP server and RabbitMQ heartbeat, P4 dedup reaper |
+| `gt.periodic(name, fn, s)` | every `s` seconds | ZooKeeper health reporters (all processes) |
+| `eventlet.GreenPool` | bounded pool for many short tasks | P1 request handling (`API_REQUEST_POOL_SIZE`), the demo's `probe` stage |
+| `gt.metrics_counter` / `gt.start_metrics_reporter()` | throughput counters | all processes, Scenario 43 |
+
+Rules that apply in this project (see `AGENTS.md`): `gt.monkey_patch()` first; one connection per greenthread; `gt.sleep(0)` in every consumer loop; never run a blocking C-extension call or a CPU-heavy loop without yielding (it stalls every greenthread in the process).
+
+### Notes and limits
+
+- **Tested:** the helpers, the table rendering, the argument handling, the `interleave`, `restart` and `concurrency` stages, and the `consume` stage against an in-memory fake broker (`tests/test_greenthread_demo.py`, no cluster needed; the module only patches when run as a script, so importing it never patches pytest). The three local stages were also run end to end on a workstation, and the cluster stages were run with no cluster to confirm they fail cleanly (exit code 1, no host or password in the output). **Not tested against a real cluster:** the `probe` and `consume` output samples above were composed from the code. Run them once on a test cluster and correct this note when you have.
+- The `consume` stage talks to each RabbitMQ node directly and bypasses HAProxy (`:5673`) on purpose; real clients should use `config.get_connection()` or the HAProxy port.
+- `probe` only shows that a TCP port accepts connections; it does not check cluster health (use Scenarios 13, 34 and the Galera checks for that).
+- On macOS eventlet 0.40.x needs `EVENTLET_HUB=selects`; the script sets it itself. Linux (RHEL 9) uses epoll and is unaffected.
+- eventlet is in maintenance mode upstream (it prints a deprecation notice on import). FlowFirst still depends on it; the notice is harmless but is the reason to treat any future migration (e.g. to `asyncio`) as a project of its own.
 
 ---
 

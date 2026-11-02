@@ -273,6 +273,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [68](#scenario-68-notification-listener--receiving-and-printing-live-notifications) | Notification Listener — Receiving & Printing Live Notifications | Notifications | Enable `NOTIFICATIONS_ENABLED`, run `scripts/notification_listener.py`, filter by flow or event type |
 | [69](#scenario-69-database-writeread-demo-across-nodes-mariadb-galera) | Database Write/Read Demo Across Nodes | Galera | `scripts/db_replication_demo.py`: write through each node, read from every node, node-down catch-up |
 | [70](#scenario-70-zookeeper-coordination-demo-across-nodes) | ZooKeeper Coordination Demo Across Nodes | ZooKeeper | `scripts/zk_coordination_demo.py`: leader election & failover, dynamic config watches, service registry, atomic dedup |
+| [71](#scenario-71-rabbitmq-queue-demo-across-nodes) | RabbitMQ Queue Demo Across Nodes | RabbitMQ | `scripts/rabbitmq_queue_demo.py`: work queue, competing consumers, fanout exchange, redelivery after a consumer crash |
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
 
@@ -9086,6 +9087,176 @@ except NodeExistsError:
 - **Isolated namespace:** The demo operates exclusively under `/flowfirst/zk_demo/*`, ensuring running pipeline processes (`process1`–`process5`) and their election znodes under `/flowfirst/election` are unaffected.
 - **Fail-closed security:** When `TLS_ZK_ENABLED=true`, connections enforce mutual TLS validation and refuse to connect if client certificates or CA files are invalid or missing.
 - **Quorum requirement:** The ensemble requires at least $\lfloor N/2 \rfloor + 1$ (2 out of 3) active nodes to maintain leadership and commit state changes.
+
+
+---
+
+## Scenario 71: RabbitMQ Queue Demo Across Nodes
+
+> **Goal:** show, with a small piece of code you can read, how to use RabbitMQ queues from several cluster nodes. The script is `scripts/rabbitmq_queue_demo.py`. It opens one connection **per broker node** (node1, node2, node3; no HAProxy, no REST API, no pipeline process), so you see exactly which node publishes and which node consumes. For the real pipeline path see Scenarios 2 and 28.
+>
+> **Runs on:** node1, node2, node3 (as `flowadmin` with the `.venv` active), or node4 / a workstation as a client (needs TCP 5672, or 5671 with TLS, to `NODE1_IP`..`NODE3_IP`, and the same `.env`).
+
+### What it does
+
+| Stage | Pattern | What happens across the nodes | Code |
+|---|---|---|---|
+| 1 `status` | Connectivity | Connects to each broker on its own and prints the RabbitMQ version and cluster name. | `stage_status()` |
+| 2 `work` | **Work queue** | Messages are published round-robin **through node1, node2, node3** to one durable queue; all are read back **through node3**. Every publish uses publisher confirms and `mandatory=True`. | `stage_work_queue()`, `publish()` |
+| 3 `compete` | **Competing consumers** | One consumer per node (each thread owns its connection) on the **same** queue, `prefetch_count=1`, manual ack after the work. Each message is handled by exactly one consumer. | `stage_competing_consumers()` |
+| 4 `fanout` | **Publish/subscribe** | A durable fanout exchange; one queue per node (each declared through its own node) is bound to it. One publish through node1 puts a copy into every queue. | `stage_fanout()` |
+| 5 `redeliver` | **At-least-once delivery** | Consumer A (node1) takes a message and drops its connection without acknowledging; consumer B (node2) receives it again with `redelivered=True`, acknowledges it, and the queue is empty. | `stage_redelivery()` |
+
+Safety properties of the demo:
+
+- **Own namespace.** Every object is named `flowfirst_demo.<run id>.*`. That never matches the dead-letter policy pattern `^flow[123]_` and is not in `ALL_QUEUES`, so the nine pipeline queues and `flowfirst_dead_letters` are never touched. The script deliberately does **not** call `config.setup_queues()`.
+- **Self-cleaning.** The demo queues are deleted at the end of a run (`--keep` retains them) and carry `x-expires` (30 minutes), so a run killed halfway cannot leave queues behind.
+- **Queue type.** Demo queues use `RABBITMQ_QUEUE_TYPE` from `.env` (or `--queue-type classic|quorum`). With `classic`, a queue lives on the node that declared it and other nodes reach it through the cluster; with `quorum` it is replicated (see *Queue replication* and `scripts/migrate_queue_type.py`).
+- **TLS and secrets.** `TLS_RABBITMQ_ENABLED=true` is honoured through `src.tls.tls.client_context()` and fails closed. The password is never printed, and errors print only the exception type.
+
+### Prerequisites
+
+- RabbitMQ cluster running on nodes 1–3 (`sudo rabbitmqctl cluster_status` lists all three, Scenario 13).
+- `.env` has `NODE1_IP`..`NODE3_IP`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD` (and optionally `TLS_RABBITMQ_ENABLED`, `RABBITMQ_QUEUE_TYPE`).
+
+### A. Run the full demo
+
+```bash
+cd /opt/flowfirst && source .venv/bin/activate
+python3 scripts/rabbitmq_queue_demo.py
+```
+
+Expected output shape (illustrative: the layout is real, the numbers will differ; this sample was composed from the code, not captured from a cluster):
+
+```text
+== FlowFirst RabbitMQ Queue Demo ==
+run id     : 3f9c1a7e
+brokers    : node1 (10.10.1.128:5672), node2 (10.10.1.129:5672), node3 (10.10.1.130:5672)
+client     : node1
+queue type : classic  (a classic queue lives on the node that declared it)
+tls mode   : OFF (plain TCP)
+
+[1] Broker nodes reachable one by one
+    node   endpoint           status     connect (ms)  rabbitmq  cluster name
+    -----  -----------------  ---------  ------------  --------  ---------------
+    node1  10.10.1.128:5672   reachable  6             3.13.x    rabbit@node1
+    node2  10.10.1.129:5672   reachable  4             3.13.x    rabbit@node1
+    node3  10.10.1.130:5672   reachable  4             3.13.x    rabbit@node1
+
+[2] Work queue: publish through every node, consume through one
+    seq  published via  confirmed  consumed via  result
+    ---  -------------  ---------  ------------  ---------------
+    1    node1          yes        node3         PASS: delivered
+    2    node2          yes        node3         PASS: delivered
+    3    node3          yes        node3         PASS: delivered
+    ...
+
+[3] Competing consumers: one per node, same queue
+    consumer node  processed  share  result
+    -------------  ---------  -----  ----------------------------------------
+    node1          4          33%    PASS: consuming
+    node2          4          33%    PASS: consuming
+    node3          4          33%    PASS: consuming
+    TOTAL          12/12      -      PASS: each message handled exactly once
+
+[4] Publish/subscribe: fanout exchange, one queue per node
+    node   queue      published via  received  result
+    -----  ---------  -------------  --------  -------------------
+    node1  events.n1  node1          yes       PASS: copy received
+    node2  events.n2  node1          yes       PASS: copy received
+    node3  events.n3  node1          yes       PASS: copy received
+
+[5] Redelivery after a consumer dies without ack
+    step                    node   redelivered  result
+    ----------------------  -----  -----------  ----------------------------------
+    1. publish              node1  -            PASS: confirmed by broker
+    2. consumer A takes it  node1  no           PASS: delivered, NOT acknowledged
+    3. consumer B takes it  node2  yes          PASS: broker redelivered it
+    4. after ack            node2  -            PASS: queue empty
+
+[6] Summary & Result
+    PASS: RabbitMQ queues verified across cluster nodes.
+
+    Cleaned up 7 demo object(s) (use --keep to retain them).
+```
+
+The exit code is 0 on success, 1 if a stage failed, 2 for a usage error.
+
+### B. Run one stage
+
+```bash
+python3 scripts/rabbitmq_queue_demo.py status
+python3 scripts/rabbitmq_queue_demo.py work --count 9          # 9 messages through the three nodes
+python3 scripts/rabbitmq_queue_demo.py compete --count 30      # watch the share between the consumers
+python3 scripts/rabbitmq_queue_demo.py fanout
+python3 scripts/rabbitmq_queue_demo.py redeliver
+python3 scripts/rabbitmq_queue_demo.py run --queue-type quorum # replicated demo queues
+```
+
+In the competing-consumers stage a fast consumer may take more than its third; with `prefetch_count=1` the work is shared by speed, not strictly round-robin. A consumer with `0` messages is not an error as long as the TOTAL line passes.
+
+### C. Look at the queues while it runs
+
+```bash
+python3 scripts/rabbitmq_queue_demo.py run --keep      # prints the run id
+sudo rabbitmqctl list_queues name type messages consumers | grep flowfirst_demo
+sudo rabbitmqctl list_exchanges name type | grep flowfirst_demo
+# Management UI: http://<node-ip>:15672 -> Queues (filter "flowfirst_demo")
+python3 scripts/rabbitmq_queue_demo.py cleanup --run-id <run id>
+```
+
+### D. Prove it works with a node down
+
+A RabbitMQ cluster keeps serving the nodes that are up (with `pause_minority`, as long as a majority of 2 of 3 is up). Stop the broker on node3 (Scenario 13) and run the demo against the remaining nodes:
+
+```bash
+sudo systemctl stop rabbitmq-server                          # on node3
+python3 scripts/rabbitmq_queue_demo.py run --nodes node1,node2
+python3 scripts/rabbitmq_queue_demo.py status                # node3 shows "unreachable (...)", exit code 1
+sudo systemctl start rabbitmq-server                         # on node3
+```
+
+With `--queue-type classic`, a demo queue declared on a node that is then stopped is unavailable until that node returns; with `quorum` the queue survives the loss of one node. That difference is the reason to choose `RABBITMQ_QUEUE_TYPE=quorum` for production queues.
+
+### How to use these patterns in your own code
+
+```python
+import json, pika
+from src.config.config import get_connection, queue_arguments
+
+conn = get_connection()                 # multi-node failover list from NODE1..3_IP, TLS aware
+ch = conn.channel()
+ch.confirm_delivery()                   # publish blocks until the broker took the message, raises otherwise
+
+# Publish: durable queue, persistent message, mandatory so an unroutable message is an error, not a silent drop
+ch.queue_declare(queue="my_queue", durable=True, arguments=queue_arguments())
+ch.basic_publish(exchange="", routing_key="my_queue", body=json.dumps({"id": "m1"}).encode(),
+                 properties=pika.BasicProperties(delivery_mode=2), mandatory=True)
+
+# Consume: limit unacknowledged messages, acknowledge only after the work succeeded
+ch.basic_qos(prefetch_count=1)
+def on_message(c, method, props, body):
+    try:
+        handle(json.loads(body))
+        c.basic_ack(delivery_tag=method.delivery_tag)
+    except Exception:
+        c.basic_nack(delivery_tag=method.delivery_tag, requeue=False)   # dead-lettered by the flowfirst-dlx policy
+ch.basic_consume(queue="my_queue", on_message_callback=on_message)
+while True:
+    conn.process_data_events(time_limit=1)
+
+# Fan-out: every bound queue gets a copy
+ch.exchange_declare(exchange="events", exchange_type="fanout", durable=True)
+ch.queue_bind(queue="my_queue", exchange="events")
+```
+
+Rules that apply in this project (see `AGENTS.md`): one connection per thread or greenthread (never share a `BlockingConnection`), `mandatory=True` plus publisher confirms on every publish, `nack` with `requeue=False` (never `requeue=True`), no `x-dead-letter-*` queue arguments on pipeline queues (use the policy), and inside the pipeline processes publish through `gt` greenthreads with `gt.sleep(0)` in the consumer loop. The demo script itself uses plain threads because it is a standalone tool, not a pipeline process.
+
+### Notes and limits
+
+- **Tested:** target resolution, object naming (demo objects never collide with the pipeline queues or the dead-letter policy), queue arguments, table rendering, argument handling and the "broker unreachable" path (`tests/test_rabbitmq_queue_demo.py`, no broker needed). **Not tested against a real RabbitMQ cluster**: it was written on a workstation without RabbitMQ, so the broker interaction and the output sample above have not been run end to end. Run it once on a test cluster and correct this note when you have.
+- The demo talks to each node directly and bypasses HAProxy (`:5673`) on purpose; real clients should use `config.get_connection()` or the HAProxy port.
+- The redelivery stage simulates a crashed consumer by closing the connection with an unacknowledged message. It does not kill a broker node; for that see Scenario 13.
 
 ---
 

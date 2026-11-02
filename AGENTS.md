@@ -292,6 +292,26 @@ sudo ./security/enable_swift_tls.sh
 > Once `TLS_API_ENABLED=true`, external clients need a client certificate:
 > `curl --cacert ca.crt --cert admin-client.crt --key admin-client.key https://<VIP>:8080/health`
 
+### Phase 7 — Prometheus & Monitoring Stack (optional)
+```bash
+# Step 7a — Enable metrics in .env on all nodes (restart processes after):
+#   METRICS_ENABLED=true
+#   METRICS_HOST=<this-node-ip>
+# Open firewall ports 9101-9105 to the Prometheus server:
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="<prometheus-ip>" port port="9101-9105" protocol="tcp" accept'
+sudo firewall-cmd --reload
+
+# Step 7b — Install Prometheus on monitoring host / dedicated node:
+sudo ./monitoring/setup_prometheus.sh
+
+# Step 7c — Update node IPs in /etc/prometheus/prometheus.yml and hot-reload:
+sudo promtool check config /etc/prometheus/prometheus.yml
+curl -s -X POST http://localhost:9090/-/reload
+
+# Step 7d — (Optional) Install Alertmanager:
+sudo ./monitoring/setup_alertmanager.sh
+```
+
 ### Post-Install Verification
 ```bash
 # Source .env variables into shell first:

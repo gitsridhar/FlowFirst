@@ -1568,6 +1568,67 @@ sudo ./security/enable_rabbitmq_tls.sh               # then the zookeeper, maria
 ./security/verify_tls.sh                             # PASS/FAIL per endpoint
 ```
 
+### Phase 7 (optional): Install & Configure Prometheus Monitoring
+
+FlowFirst includes built-in Prometheus text-format `/metrics` endpoints for all five pipeline processes (ports 9101–9105) and production alert rules. Prometheus can be installed on a dedicated monitoring server or on one of the cluster nodes.
+
+#### Step 7a — Enable Metrics on all cluster nodes (mgmtnode1–3 and remotenode1)
+
+Add or update in `.env` on each node (restart processes afterwards):
+```bash
+METRICS_ENABLED=true
+METRICS_HOST=<this-node-ip>      # binds to this node's IP (e.g. 192.168.122.11)
+METRICS_PORT_BASE=9100
+```
+
+Open firewall ports 9101–9105 for Prometheus scraping:
+```bash
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="<prometheus-ip>" port port="9101-9105" protocol="tcp" accept'
+sudo firewall-cmd --reload
+```
+
+#### Step 7b — Install Prometheus Server
+
+Run the automated Prometheus installer on your monitoring node (or mgmtnode1):
+```bash
+cd /opt/flowfirst
+sudo ./monitoring/setup_prometheus.sh
+```
+
+This single command:
+1. Resolves and downloads the latest official Prometheus release from GitHub
+2. Installs `prometheus` and `promtool` binaries to `/usr/local/bin`
+3. Creates the `prometheus` system user, `/etc/prometheus`, and `/var/lib/prometheus`
+4. Installs `/etc/prometheus/prometheus.yml`, `flowfirst.rules.yml`, and `infrastructure.rules.yml`
+5. Validates configuration and alert rules syntax with `promtool`
+6. Installs and starts the `prometheus.service` systemd unit on port 9090 (with `--web.enable-lifecycle`)
+
+#### Step 7c — Configure Scrape Targets & Hot-Reload
+
+Edit `/etc/prometheus/prometheus.yml` to set your actual node IPs:
+```bash
+sudo vi /etc/prometheus/prometheus.yml
+```
+
+Validate and hot-reload Prometheus without restarting the service:
+```bash
+promtool check config /etc/prometheus/prometheus.yml
+curl -s -X POST http://localhost:9090/-/reload
+```
+
+#### Step 7d — (Optional) Install Alertmanager & File Receiver
+
+```bash
+sudo ./monitoring/setup_alertmanager.sh
+# Open port 9093 if Prometheus is on a different host:
+sudo firewall-cmd --permanent --add-port=9093/tcp && sudo firewall-cmd --reload
+```
+Uncomment the `alerting:` block in `/etc/prometheus/prometheus.yml`, point it to `<alertmanager-ip>:9093`, and reload Prometheus (`curl -s -X POST http://localhost:9090/-/reload`).
+
+#### Step 7e — Verify Prometheus UI & Targets
+
+Access the Prometheus Web UI at `http://<prometheus-ip>:9090` and navigate to **Status -> Targets**. Confirm all FlowFirst targets are in the `UP` state.
+
 ---
 
 ## Verification & Real-World Usage Scenarios
@@ -11276,11 +11337,75 @@ sudo python3 scripts/preflight_check.py        # the "metrics" line: PASS with m
 
 With `TLS_API_ENABLED=true` the listener reuses the API server certificate and `TLS_API_CLIENT_AUTH`, so Prometheus needs a client certificate signed by the FlowFirst CA (`security/issue_cert.sh`, see Scenario 63) and `server_name` must match a name in that node's `-api` certificate. Without TLS, anyone who can reach the port can read the counters: firewall it. The systemd sandbox allows this listener (it only needs TCP).
 
-**Prometheus.** `monitoring/prometheus.yml` is a sample scrape configuration (replace the `<…>` placeholders): the five FlowFirst targets per node, plus the infrastructure exporters the alerts rely on. Those are **not part of FlowFirst**: RabbitMQ's built-in plugin (`rabbitmq-plugins enable rabbitmq_prometheus`, port 15692; per-queue series come from `/metrics/detailed?family=queue_coarse_metrics&family=queue_consumer_count`), `mysqld_exporter` on the Galera nodes (run it on 9114, because its default 9104 is DB Updater (Process 4)'s metrics port), and `node_exporter`. ZooKeeper is not scraped: the repo's `zoo.cfg` does not enable a Prometheus metrics provider.
+### Prometheus Server Setup & Configuration
 
-**Alerts.** `monitoring/flowfirst.rules.yml` (FlowFirst's own series and the RabbitMQ queue series) and `monitoring/infrastructure.rules.yml` (Galera, RabbitMQ alarms, disk, clock). Thresholds are starting points; tune them to your traffic.
+**1. Install Prometheus Server (on a dedicated host or mgmtnode1):**
 
-**Alertmanager.** `monitoring/alertmanager.yml` routes all alerts to the file receiver: a small Python webhook (`monitoring/alertmanager-file-receiver.py`) that appends each call as a JSON line to `/var/log/flowfirst/alerts.log`. Run it as a systemd service alongside Alertmanager. Install both with `sudo ./monitoring/setup_alertmanager.sh` (downloads the latest release from GitHub, creates the `alertmanager` user, installs two systemd units). Wire it into Prometheus by uncommenting the `alerting:` block in `monitoring/prometheus.yml` and replacing `<alertmanager-ip>`.
+Run the automated installer script `monitoring/setup_prometheus.sh`:
+
+```bash
+sudo ./monitoring/setup_prometheus.sh
+```
+
+What the script sets up:
+- Downloads official Prometheus release binary (`prometheus` and `promtool` installed to `/usr/local/bin`)
+- Creates dedicated system user `prometheus` and directories `/etc/prometheus` and `/var/lib/prometheus`
+- Installs `/etc/prometheus/prometheus.yml` along with `flowfirst.rules.yml` and `infrastructure.rules.yml`
+- Validates syntax with `promtool check config`
+- Installs and enables `prometheus.service` systemd unit running with `--web.enable-lifecycle` on port 9090
+
+**2. Configure Scrape Targets:**
+
+`monitoring/prometheus.yml` is pre-configured to scrape the FlowFirst pipeline and infrastructure components. Edit `/etc/prometheus/prometheus.yml` to replace placeholder IPs with your cluster node addresses:
+
+| Job Name | Port | Description |
+|---|---|---|
+| `flowfirst` | `9101`–`9104` (Mgmt Nodes 1–3), `9105` (Remote Node 1) | Built-in process metrics (`/metrics`) |
+| `rabbitmq` | `15692` | RabbitMQ broker health (`rabbitmq_prometheus` plugin) |
+| `rabbitmq_queues` | `15692` (`/metrics/detailed`) | Per-queue depth and consumer counts |
+| `mysqld` | `9114` | MariaDB / Galera metrics (`mysqld_exporter` on port 9114) |
+| `node` | `9100` | Host OS metrics (`node_exporter` on all nodes) |
+
+**3. Hot-Reloading Configuration (Zero Downtime):**
+
+When updating scrape targets or alert rules, validate and reload Prometheus without restarting:
+
+```bash
+# Validate config syntax before applying:
+promtool check config /etc/prometheus/prometheus.yml
+
+# Trigger hot reload via lifecycle API:
+curl -s -X POST http://localhost:9090/-/reload
+```
+
+**4. Scraping with Mutual TLS (when TLS_API_ENABLED=true):**
+
+If TLS is enabled across your cluster:
+1. Issue a client certificate for Prometheus:
+   ```bash
+   ./security/issue_cert.sh prometheus-client --client
+   ```
+2. Copy `ca.crt`, `prometheus-client.crt`, and `prometheus-client.key` to `/etc/prometheus/flowfirst/` on the Prometheus server (mode 640, owner `prometheus:prometheus`).
+3. Set `scheme: https` and ensure `tls_config` in `/etc/prometheus/prometheus.yml` points to those files.
+
+### Alerts and Rules Validation
+
+Alert definitions are split into two files:
+- `monitoring/flowfirst.rules.yml` — FlowFirst process health, throughput, error rates, stalling, dead-letter depth, and certificate expiration.
+- `monitoring/infrastructure.rules.yml` — Galera cluster size, node sync state, RabbitMQ resource alarms, node disk space, and clock skew.
+
+Verify and test alert rules offline:
+```bash
+# Check syntax of all rule files:
+promtool check rules monitoring/*.rules.yml
+
+# Run synthetic unit test scenarios:
+cd monitoring/tests && promtool test rules flowfirst.test.yml
+```
+
+### Alertmanager Integration
+
+`monitoring/alertmanager.yml` routes all alerts to the file receiver: a small Python webhook (`monitoring/alertmanager-file-receiver.py`) that appends each call as a JSON line to `/var/log/flowfirst/alerts.log`. Run it as a systemd service alongside Alertmanager. Install both with `sudo ./monitoring/setup_alertmanager.sh` (downloads the latest release from GitHub, creates the `alertmanager` user, installs two systemd units). Wire it into Prometheus by uncommenting the `alerting:` block in `monitoring/prometheus.yml` and replacing `<alertmanager-ip>`.
 
 ```bash
 # Install on one cluster node (or a dedicated monitoring host):
@@ -11309,6 +11434,23 @@ To replace the file receiver with a real notification channel (email, Slack, Pag
 | `GaleraClusterSizeLow`, `GaleraNodeNotSynced`, `RabbitMq…`, `NodeDiskFillingUp`, `NodeClockSkew` | see the file | the description in the alert |
 
 Check the rules without a cluster: `promtool check rules monitoring/*.rules.yml` and, from `monitoring/tests/`, `promtool test rules flowfirst.test.yml`.
+
+### PromQL Query Guide for FlowFirst Operators
+
+Run these queries in the Prometheus expression browser (`http://<prometheus-ip>:9090/graph`):
+
+| Purpose | PromQL Expression |
+|---|---|
+| **Process Status (Up/Down)** | `flowfirst_up` (1 = up, 0 = down) |
+| **Active Leader Instances** | `flowfirst_greenthreads > 0` (greenthreads running on elected leader; 0 on standby) |
+| **Cluster Ingestion Rate** | `sum(rate(flowfirst_messages_total{process="api_gateway",event="published"}[5m]))` |
+| **Message Throughput by Flow** | `sum by (flow, event) (rate(flowfirst_messages_total[5m]))` |
+| **Message Failure Rate** | `sum by (flow, process) (rate(flowfirst_messages_total{event="failed"}[5m]))` |
+| **HTTP Error Ratio (5xx)** | `sum(rate(flowfirst_http_responses_total{class="5xx"}[5m])) / sum(rate(flowfirst_http_responses_total[5m]))` |
+| **Dead-Letter Backlog** | `rabbitmq_detailed_queue_messages_ready{queue="flowfirst_dead_letters"}` |
+| **Queue Backlog (Flow 1–7)** | `sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"flow[1-7]_.*"})` |
+| **TLS Certificate Days Remaining** | `min by (instance, cert) (flowfirst_tls_cert_expiry_seconds) / 86400` |
+| **Open Publisher Connections** | `flowfirst_publish_connections_open` |
 
 **Limits (read these).**
 1. A counter restarts at 0 when its process restarts (Prometheus' `increase()` and `rate()` handle that). The counters are per process instance, not per cluster: `sum by (flow, event)` across nodes gives the cluster view.

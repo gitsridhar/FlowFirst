@@ -279,6 +279,10 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [74](#scenario-74-haproxy-load-balancing-demo-across-nodes) | HAProxy Load-Balancing Demo Across Nodes | HAProxy | `scripts/haproxy_lb_demo.py`: VIP vs node ports, HAProxy's own backend state, round-robin on REST/MariaDB/RabbitMQ/Swift, live `watch` during a node outage |
 | [75](#scenario-75-pacemaker-cluster-demo-across-nodes) | Pacemaker Cluster Demo Across Nodes | Pacemaker | `scripts/pacemaker_cluster_demo.py`: quorum/DC, resource placement vs the real interfaces and systemd on every node, `failover` (VIP holder to standby) and `ban` (one pipeline instance) with automatic restore, live `watch` |
 
+> **Which node do the demos (Scenarios 69–75) run on?** Log in to **node1** and run them there; the few exceptions (stopping a service on node3, starting `failover` from node2/node3, node4 cannot run the Pacemaker demo) are listed in [Where to run the demos](#where-to-run-the-demos-scenarios-6975).
+
+
+
 
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
@@ -8784,9 +8788,31 @@ sudo rabbitmqctl delete_queue flowfirst.notifications.listener
 
 ---
 
+## Where to run the demos (Scenarios 69–75)
+
+Every demo script runs from **one terminal on one node**, and talks to the other nodes over the network. **Default: log in to node1 as `flowadmin`, then `cd /opt/flowfirst && source .venv/bin/activate`, and run the command there.** You never have to start a demo on node2 or node3 (except `failover` in Scenario 75, see below). Each command block in Scenarios 69–75 carries an `# On nodeX` comment or a heading note; if a block has none, it runs on node1.
+
+| Scenario | Script | Run it on | Needs a second terminal on another node? | Cannot run on |
+|---|---|---|---|---|
+| [69](#scenario-69-database-writeread-demo-across-nodes-mariadb-galera) Galera | `db_replication_demo.py` | **node1** | Only in C (stop/start MariaDB on **node3**) | – |
+| [70](#scenario-70-zookeeper-coordination-demo-across-nodes) ZooKeeper | `zk_coordination_demo.py` | **node1** (`zkCli.sh` also on node1) | Only in C (stop/start ZooKeeper on **node3**) | – |
+| [71](#scenario-71-rabbitmq-queue-demo-across-nodes) RabbitMQ | `rabbitmq_queue_demo.py` | **node1** (`rabbitmqctl` also on node1) | Only in D (stop/start RabbitMQ on **node3**) | – |
+| [72](#scenario-72-greenthread-eventlet-demo-locally-and-across-nodes) Greenthreads | `greenthread_demo.py` | **node1** (the local stages also run on a workstation) | Only in C (stop/start RabbitMQ on **node3**) | – |
+| [73](#scenario-73-swift-object-storage-demo-across-nodes) Swift | `swift_object_demo.py` | **node1** | Only in D (stop/start the Swift proxy on **node3**) | – |
+| [74](#scenario-74-haproxy-load-balancing-demo-across-nodes) HAProxy | `haproxy_lb_demo.py` | **node1** (any node works: it talks to the VIP, wherever the VIP is) | In D, terminal 2 runs `pcs resource ban/clear` on node1 or node2 (cluster-wide) | – |
+| [75](#scenario-75-pacemaker-cluster-demo-across-nodes) Pacemaker | `pacemaker_cluster_demo.py` | **node1**; start `failover` from **node2 or node3** when node1 holds the VIP | No (`ban --node node3` names a target, you do not log in to it) | **node4 and workstations** (no Pacemaker there) |
+
+- **node4** runs no MariaDB, RabbitMQ, ZooKeeper, Swift or Pacemaker. It can run demos 69–74 only as a plain client over the network, and the commands that touch a local service (`rabbitmqctl`, `zkCli.sh -server 127.0.0.1`, `swift-get-nodes`, `pcs`, `crm_mon`) do not work there.
+- The commands that **stop a service** (`systemctl stop ...`) always target **node3**, so node1 and node2 keep the quorum (2 of 3). Start the service again on node3 before you continue.
+- A `--node node3` / `--nodes node1,node2` option names the **server the demo talks to**. It does not mean you must be logged in to that node.
+
+---
+
 ## Scenario 69: Database Write/Read Demo Across Nodes (MariaDB Galera)
 
 > **Goal:** show, with a small piece of code you can read, that a row written through **any** MariaDB Galera node can be read from **every** node. The script is `scripts/db_replication_demo.py`. It talks to MariaDB directly (no REST API, no RabbitMQ, no pipeline process), so it isolates the database layer. For the full pipeline path see Scenarios 2 and 3.
+>
+> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/db_replication_demo.py ...` command there.** The only steps that run elsewhere are the stop/start of MariaDB on **node3** in C, and the plain-SQL commands in E (any machine with a `mariadb` client).
 >
 > **Runs on:** node1, node2 or node3 (as `flowadmin`, in `/opt/flowfirst` with the venv active), or **node4** or a workstation as a client (it needs only TCP 3306 to the three Galera nodes and the same `.env`). Node 4 runs no MariaDB, so it can only act as a client.
 
@@ -8807,9 +8833,10 @@ The demo uses its **own table**, so `processed_messages`, `devices` and the pipe
 - `.env` holds `MARIADB_USER`, `MARIADB_PASSWORD`, `MARIADB_DB`, `NODE1_IP`..`NODE3_IP`. The script refuses to start with a weak or empty password (the same rule as the pipeline).
 - The MariaDB user may `CREATE TABLE`, `INSERT`, `SELECT`, `DELETE` in `MARIADB_DB`. The pipeline user created by `bootstrap_galera.sh` has `ALL PRIVILEGES` on that database.
 
-### A. Run the full demo
+### A. Run the full demo (on **node1**)
 
 ```bash
+# On node1
 cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/db_replication_demo.py
 ```
@@ -8848,10 +8875,12 @@ Exit code is `0` on PASS, `1` if any row did not appear within `--timeout` secon
 
 > **Why the `id` values jump (1, 5, 9 …):** Galera sets `auto_increment_increment` to the cluster size and gives each node its own `auto_increment_offset`, so two nodes never generate the same id while both accept writes. The gaps are normal. Identify a row by `entry_id` (a UUID), not by `id`.
 
-### B. Write on one node, read on another (manual)
+### B. Write on one node, read on another (manual; run on **node1**)
+
+`--node` chooses which database server is written to or read from; the command itself always runs on node1.
 
 ```bash
-# Write through node2 only. Prints a run id.
+# On node1: write through node2 only. Prints a run id.
 python3 scripts/db_replication_demo.py write --node node2 --message "written via node2"
 
 # Read it back from node3 only, then from all three:
@@ -8863,28 +8892,36 @@ python3 scripts/db_replication_demo.py read --node all
 
 ### C. Prove it with a node down
 
-Galera keeps accepting writes with two of three nodes. Stop MariaDB on node3 (see Scenario 14), then from node1:
+Galera keeps accepting writes with two of three nodes. This needs two terminals: **node3** (the node you stop) and **node1** (where the demo runs).
 
 ```bash
+# On node3: stop MariaDB (see Scenario 14)
+sudo systemctl stop mariadb
+
+# On node1:
 python3 scripts/db_replication_demo.py run --nodes node1,node2 --keep      # works: quorum is 2 of 3
 python3 scripts/db_replication_demo.py read --node node3                   # ERROR: cannot connect (exit 1)
 
-# On node3: sudo systemctl start mariadb   (wait for Synced), then:
+# On node3: start it again and wait for Synced
+sudo systemctl start mariadb
+
+# On node1:
 python3 scripts/db_replication_demo.py read --node node3 --run-id <run id> # the rows written while it was down are here
 ```
 
 The last command shows the node catching up through IST (Scenario 5) with no manual copy.
 
-### D. Clean up
+### D. Clean up (on **node1**)
 
 ```bash
 python3 scripts/db_replication_demo.py cleanup           # delete every demo row
 python3 scripts/db_replication_demo.py cleanup --drop    # drop the table (replicated to all nodes)
 ```
 
-### E. The same thing in plain SQL
+### E. The same thing in plain SQL (run on **node1**, or any machine with a `mariadb` client that can reach the nodes)
 
 ```bash
+set -a && source /opt/flowfirst/.env && set +a
 # Write on node1 ...
 mariadb -h ${NODE1_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "INSERT INTO replication_demo (run_id, entry_id, written_via, message) VALUES ('manual', UUID(), 'node1', 'by hand');"
@@ -8925,6 +8962,8 @@ For application code that should survive a node failure, use `src/db/db.py:get_d
 
 > **Goal:** demonstrate, in an isolated executable script (`scripts/zk_coordination_demo.py`), how Apache ZooKeeper coordinates distributed state across nodes in the FlowFirst cluster. It exercises the four core primitives used throughout the pipeline (leader election with failover, dynamic configuration hot-reloading via `DataWatch`, ephemeral service registry, and atomic deduplication barriers) directly against the ZooKeeper 3-node ensemble without requiring MariaDB, RabbitMQ, or the REST API.
 >
+> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/zk_coordination_demo.py ...` command and the `zkCli.sh` session there.** The only step that runs elsewhere is the stop/start of ZooKeeper on **node3** in C.
+>
 > **Runs on:** node1, node2, or node3 (as `flowadmin` with the `.venv` active), or **node4** or a workstation as a client (needs network access to TCP 2181/2281 on `NODE1_IP`..`NODE3_IP` and the same `.env`).
 
 ### What it does
@@ -8945,9 +8984,10 @@ The demo uses its own isolated root namespace (`/flowfirst/zk_demo`), so product
 - The ZooKeeper ensemble is installed and in quorum (`echo ruok | nc 127.0.0.1 2181` returns `imok` on nodes 1–3).
 - `.env` contains `NODE1_IP`, `NODE2_IP`, `NODE3_IP`, `ZK_CLIENT_PORT` (default 2181), and optionally `TLS_ZK_ENABLED=true` / `ZK_TLS_CLIENT_PORT=2281`.
 
-### A. Run the full demo
+### A. Run the full demo (on **node1**)
 
 ```bash
+# On node1
 cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/zk_coordination_demo.py
 ```
@@ -9000,7 +9040,7 @@ tls mode : OFF (plain TCP)
     Cleaned up 12 demo znode(s) (use --keep to retain for inspection).
 ```
 
-### B. Run individual subcommands
+### B. Run individual subcommands (on **node1**)
 
 ```bash
 # 1. Ensemble role and quorum check:
@@ -9024,25 +9064,28 @@ python3 scripts/zk_coordination_demo.py cleanup --all
 
 ### C. Prove coordination during a node outage
 
-ZooKeeper maintains consensus and serves reads/writes as long as a strict majority (2 of 3 nodes) is online.
+ZooKeeper maintains consensus and serves reads/writes as long as a strict majority (2 of 3 nodes) is online. This needs two terminals: **node3** (the node you stop) and **node1** (where the demo runs).
 
 ```bash
-# Stop ZooKeeper on node3 (see Scenario 36)
+# On node3: stop ZooKeeper (see Scenario 36)
 sudo systemctl stop zookeeper
 
-# Run coordination demo across remaining 2 nodes:
+# On node1: run the coordination demo across the remaining 2 nodes
 python3 scripts/zk_coordination_demo.py run --nodes node1,node2
 
-# Restart node3 and verify automatic sync:
+# On node3: restart ZooKeeper
 sudo systemctl start zookeeper
+
+# On node1: verify automatic sync
 python3 scripts/zk_coordination_demo.py status
 ```
 
 ### D. Manual inspection with zkCli.sh
 
-Run the demo with `--keep` to leave the znodes in place:
+Run the demo with `--keep` to leave the znodes in place. Everything here runs on **node1**: `zkCli.sh -server 127.0.0.1:2181` talks to the ZooKeeper server on the machine you are logged in to, so it works only on node1–node3.
 
 ```bash
+# On node1
 python3 scripts/zk_coordination_demo.py run --keep
 # Note the run id printed, e.g., run_b8f2a1
 
@@ -9101,6 +9144,8 @@ except NodeExistsError:
 
 > **Goal:** show, with a small piece of code you can read, how to use RabbitMQ queues from several cluster nodes. The script is `scripts/rabbitmq_queue_demo.py`. It opens one connection **per broker node** (node1, node2, node3; no HAProxy, no REST API, no pipeline process), so you see exactly which node publishes and which node consumes. For the real pipeline path see Scenarios 2 and 28.
 >
+> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/rabbitmq_queue_demo.py ...` command and the `rabbitmqctl` commands there.** The only step that runs elsewhere is the stop/start of RabbitMQ on **node3** in D.
+>
 > **Runs on:** node1, node2, node3 (as `flowadmin` with the `.venv` active), or node4 / a workstation as a client (needs TCP 5672, or 5671 with TLS, to `NODE1_IP`..`NODE3_IP`, and the same `.env`).
 
 ### What it does
@@ -9125,9 +9170,10 @@ Safety properties of the demo:
 - RabbitMQ cluster running on nodes 1–3 (`sudo rabbitmqctl cluster_status` lists all three, Scenario 13).
 - `.env` has `NODE1_IP`..`NODE3_IP`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD` (and optionally `TLS_RABBITMQ_ENABLED`, `RABBITMQ_QUEUE_TYPE`).
 
-### A. Run the full demo
+### A. Run the full demo (on **node1**)
 
 ```bash
+# On node1
 cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/rabbitmq_queue_demo.py
 ```
@@ -9188,7 +9234,7 @@ tls mode   : OFF (plain TCP)
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error.
 
-### B. Run one stage
+### B. Run one stage (on **node1**)
 
 ```bash
 python3 scripts/rabbitmq_queue_demo.py status
@@ -9201,9 +9247,10 @@ python3 scripts/rabbitmq_queue_demo.py run --queue-type quorum # replicated demo
 
 In the competing-consumers stage a fast consumer may take more than its third; with `prefetch_count=1` the work is shared by speed, not strictly round-robin. A consumer with `0` messages is not an error as long as the TOTAL line passes.
 
-### C. Look at the queues while it runs
+### C. Look at the queues while it runs (on **node1**; `rabbitmqctl` talks to the local broker, so it works only on node1–node3)
 
 ```bash
+# On node1
 python3 scripts/rabbitmq_queue_demo.py run --keep      # prints the run id
 sudo rabbitmqctl list_queues name type messages consumers | grep flowfirst_demo
 sudo rabbitmqctl list_exchanges name type | grep flowfirst_demo
@@ -9213,13 +9260,18 @@ python3 scripts/rabbitmq_queue_demo.py cleanup --run-id <run id>
 
 ### D. Prove it works with a node down
 
-A RabbitMQ cluster keeps serving the nodes that are up (with `pause_minority`, as long as a majority of 2 of 3 is up). Stop the broker on node3 (Scenario 13) and run the demo against the remaining nodes:
+A RabbitMQ cluster keeps serving the nodes that are up (with `pause_minority`, as long as a majority of 2 of 3 is up). Stop the broker on node3 (Scenario 13) and run the demo against the remaining nodes. This needs two terminals: **node3** (the node you stop) and **node1** (where the demo runs).
 
 ```bash
-sudo systemctl stop rabbitmq-server                          # on node3
+# On node3
+sudo systemctl stop rabbitmq-server
+
+# On node1
 python3 scripts/rabbitmq_queue_demo.py run --nodes node1,node2
 python3 scripts/rabbitmq_queue_demo.py status                # node3 shows "unreachable (...)", exit code 1
-sudo systemctl start rabbitmq-server                         # on node3
+
+# On node3
+sudo systemctl start rabbitmq-server
 ```
 
 With `--queue-type classic`, a demo queue declared on a node that is then stopped is unavailable until that node returns; with `quorum` the queue survives the loss of one node. That difference is the reason to choose `RABBITMQ_QUEUE_TYPE=quorum` for production queues.
@@ -9270,6 +9322,8 @@ Rules that apply in this project (see `AGENTS.md`): one connection per thread or
 
 > **Goal:** show, with a small piece of code you can read, how the greenthread helpers in `src/gt/gt.py` are used, first on one machine and then across the cluster nodes. The script is `scripts/greenthread_demo.py`. The pipeline processes (P1–P5) use exactly these building blocks (Scenarios 39–43 observe them in a running cluster); this scenario lets you see them in isolation, without the REST API, HAProxy or a pipeline process.
 >
+> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/greenthread_demo.py ...` command there.** The three *local* stages need no cluster at all and also run on a workstation. The only step that runs elsewhere is the stop/start of RabbitMQ on **node3** in C.
+>
 > **Runs on:** the three *local* stages run anywhere the `.venv` is installed (a workstation is fine, no cluster needed). The two *cluster* stages run on node1, node2, node3 (as `flowadmin` with the `.venv` active) or node4 / a workstation as a client (needs TCP to `NODE1_IP`..`NODE3_IP`: RabbitMQ 5672 (5671 with TLS), ZooKeeper 2181 (2281 with TLS), MariaDB 3306, and the same `.env`).
 
 ### The idea in five lines
@@ -9302,9 +9356,10 @@ Safety properties of the demo:
 - Local stages: `pip install --require-hashes -r requirements.txt` in the `.venv` (eventlet is a pipeline dependency already).
 - Cluster stages: RabbitMQ cluster running on nodes 1–3 (Scenario 13), `.env` with `NODE1_IP`..`NODE3_IP`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`.
 
-### A. Run the local stages (no cluster)
+### A. Run the local stages (on **node1**, or on a workstation: no cluster needed)
 
 ```bash
+# On node1
 cd /opt/flowfirst && source .venv/bin/activate      # or the .venv of your workstation checkout
 python3 scripts/greenthread_demo.py local
 python3 scripts/greenthread_demo.py concurrency --tasks 200 --delay 0.5
@@ -9345,9 +9400,10 @@ eventlet   : 0.40.4, monkey-patched: yes
 
 `--tasks` accepts 1–900 (the `gt` pool holds `GT_POOL_SIZE`=1000 greenthreads by default; the heartbeat needs a slot too).
 
-### B. Run the cluster stages (across the nodes)
+### B. Run the cluster stages (on **node1**; they connect to all three nodes)
 
 ```bash
+# On node1
 python3 scripts/greenthread_demo.py probe
 python3 scripts/greenthread_demo.py consume --count 60
 python3 scripts/greenthread_demo.py                       # everything: local + cluster
@@ -9382,13 +9438,18 @@ How to read it:
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error (e.g. `--tasks 0`).
 
-### C. Prove it with a node down
+### C. Prove it with a node down (two terminals: **node3** and **node1**)
 
 ```bash
-sudo systemctl stop rabbitmq-server                                   # on node3 (Scenario 13)
+# On node3 (Scenario 13)
+sudo systemctl stop rabbitmq-server
+
+# On node1
 python3 scripts/greenthread_demo.py probe                              # node3 rabbitmq: down; stage still PASSES (2 of 3 up)
 python3 scripts/greenthread_demo.py consume --nodes node1,node2        # runs against the remaining brokers
-sudo systemctl start rabbitmq-server                                   # on node3
+
+# On node3
+sudo systemctl start rabbitmq-server
 ```
 
 With `--queue-type classic` the demo queue lives on the node that declared it (the first node in `--nodes`); declare it on a surviving node, as the commands above do. `quorum` queues survive the loss of a node.
@@ -9450,6 +9511,8 @@ Rules that apply in this project (see `AGENTS.md`): `gt.monkey_patch()` first; o
 
 > **Goal:** show, with a small piece of code you can read, how to use OpenStack Swift object storage from several cluster nodes. The script is `scripts/swift_object_demo.py`. It opens one `python-swiftclient` connection **per Swift proxy** (node1, node2, node3; no REST API, no pipeline process), so you see exactly which node handles each write, read, listing and delete. It also calls the FlowFirst helpers in `src/swift/swift_storage.py` through the load-balanced VIP, exactly as DB Updater (Process 4) does. For the pipeline path see Scenarios 2, 44 and 50; for the cluster itself see Scenarios 52 to 58.
 >
+> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/swift_object_demo.py ...` command there.** The only step that runs elsewhere is the stop/start of the Swift proxy on **node3** in D.
+>
 > **Runs on:** node1, node2, node3 (as `flowadmin` with the `.venv` active), or node4 / a workstation as a client (needs TCP 8888 to `NODE1_IP`..`NODE3_IP` for the proxies, TCP 8090 to the VIP for the `helpers` stage, and the same `.env`).
 
 ### What it does
@@ -9477,9 +9540,10 @@ Safety properties of the demo:
 - `.env` has `NODE1_IP`..`NODE3_IP`, `SWIFT_USER`, `SWIFT_KEY` and `SWIFT_AUTH_URL` (and optionally `TLS_SWIFT_ENABLED`, `SWIFT_PROXY_PORT` if you changed it from 8888).
 - The tempauth user from `.env` is the account admin (`.admin`), which is what allows creating containers.
 
-### A. Run the full demo
+### A. Run the full demo (on **node1**)
 
 ```bash
+# On node1
 cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/swift_object_demo.py
 ```
@@ -9543,9 +9607,10 @@ tls mode   : OFF (plain HTTP)
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error (bad `--nodes`, missing `SWIFT_USER`/`SWIFT_KEY`). The account totals in stage 1 are the same on every node because the account database is replicated; small differences right after a write are normal until the replicators and updaters catch up.
 
-### B. Run one stage
+### B. Run one stage (on **node1**)
 
 ```bash
+# On node1
 python3 scripts/swift_object_demo.py status
 python3 scripts/swift_object_demo.py write
 python3 scripts/swift_object_demo.py list
@@ -9556,9 +9621,10 @@ python3 scripts/swift_object_demo.py status --nodes node1,node2,vip   # include 
 
 `--nodes` accepts `node1`, `node2`, `node3`, `vip` (the address in `SWIFT_AUTH_URL`), `host[:port]`, or a full auth URL. The scheme (`http` or `https`) follows `TLS_SWIFT_ENABLED`.
 
-### C. Look at the objects while it runs
+### C. Look at the objects while it runs (on **node1**; `swift-get-nodes` works on node1–node3)
 
 ```bash
+# On node1
 python3 scripts/swift_object_demo.py write --keep          # prints the run id
 set -a && source /opt/flowfirst/.env && set +a
 # Log in at node1 and list the demo container with plain curl (what python-swiftclient does underneath):
@@ -9575,11 +9641,18 @@ python3 scripts/swift_object_demo.py cleanup --run-id <run id>
 
 Swift needs 2 of 3 replicas to accept a write, so the demo keeps working against the two remaining proxies (Scenario 53 explains the catch-up in detail). Stop the Swift proxy on node3 and run the demo against the other two nodes:
 
+This needs two terminals: **node3** (the node you stop) and **node1** (where the demo runs).
+
 ```bash
-sudo systemctl stop openstack-swift-proxy                      # on node3
+# On node3
+sudo systemctl stop openstack-swift-proxy
+
+# On node1
 python3 scripts/swift_object_demo.py run --nodes node1,node2   # PASS: writes still succeed on 2 of 3 replicas
 python3 scripts/swift_object_demo.py status                    # node3 shows "unreachable (...)", exit code 0 (2 of 3 up)
-sudo systemctl start openstack-swift-proxy                     # on node3
+
+# On node3
+sudo systemctl start openstack-swift-proxy
 ```
 
 `status` reports success while a majority of the listed proxies answer, so one node down is still exit code 0 and all three down is exit code 1. Stopping only the *proxy* leaves the account, container and object servers on node3 running, so node3 still holds replicas; to stop replica storage as well, stop all four `openstack-swift-*` units (Scenario 53). If a `write` read-back fails for a few seconds right after a node returns, that is the replicator catching up; the demo waits for it up to `--timeout`.
@@ -9626,6 +9699,8 @@ Rules that apply in this project (see `AGENTS.md`): build the connection only th
 
 > **Goal:** show, with a small piece of code you can read, that HAProxy is in front of the cluster and what it does there. The script is `scripts/haproxy_lb_demo.py`. It talks to the Virtual IP (VIP) like a real client, talks to every node directly, and reads HAProxy's own counters from the stats page, then compares the three: which node answered, how the requests were shared, which servers HAProxy thinks are up, and what changes when a node is taken out. It covers all four load-balanced services (REST API, MariaDB, RabbitMQ, Swift). It is a demonstration, not a load test (Scenario 61 is). For the HAProxy installation see Phase 3; for the stats page see Scenario 9; for the VIP moving between nodes see Scenarios 8 and 15; for the log lines see Scenario 48.
 >
+> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/haproxy_lb_demo.py ...` command there.** The demo only talks to the VIP and to the nodes over the network, so it does not matter which node the VIP is currently on. In D, terminal 1 and terminal 2 are both on node1 (terminal 2 can also be node2 or node3, because `pcs` acts cluster-wide).
+>
 > **Runs on:** node1, node2, node3, node4 or a workstation that can reach the VIP (REST `8080`, stats `9000`, MariaDB `3307`, RabbitMQ `5673`, Swift `8090`). The per-node checks in `status` and `api` also need the node addresses (API Gateway `8082`, MariaDB `3306`, RabbitMQ `5672`, Swift `8888`), and `.env` is the same as on the cluster nodes.
 
 ### What HAProxy does here (so the output makes sense)
@@ -9668,9 +9743,11 @@ Safety properties of the demo:
 - The server names in HAProxy are `NODE1_NAME`..`NODE3_NAME` (default `node1`..`node3`). The demo matches HAProxy's server lines to nodes by those names, and they must equal `NODE_NAME` on each node, which is what API Gateway (Process 1) reports as `"node"`.
 - Python 3 with the `.venv` active (`cd /opt/flowfirst && source .venv/bin/activate`).
 
-### A. Run the full demo
+### A. Run the full demo (on **node1**)
 
 ```bash
+# On node1
+cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/haproxy_lb_demo.py
 python3 scripts/haproxy_lb_demo.py run --requests 30     # a longer run gives a clearer distribution
 ```
@@ -9731,9 +9808,10 @@ stats page : credentials set
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error. If the stats password is not set, stage 2 prints `SKIP` and stages 4 to 6 report only that the connections were made (`no HAProxy counters`), because without the counters there is no evidence of the distribution.
 
-### B. Run one stage
+### B. Run one stage (on **node1**)
 
 ```bash
+# On node1
 python3 scripts/haproxy_lb_demo.py status
 python3 scripts/haproxy_lb_demo.py backends
 python3 scripts/haproxy_lb_demo.py api --requests 30
@@ -9746,9 +9824,10 @@ python3 scripts/haproxy_lb_demo.py api --vip 10.10.1.129 --api-port 8082    # ai
 
 The last line is a useful contrast: with no HAProxy in the path every request lands on one node and the stage fails the balance check, which is the problem the load balancer removes. Every port can be overridden (`--api-port`, `--stats-port`, `--mariadb-port`, `--rabbitmq-port`, `--swift-port`); the defaults come from `.env`.
 
-### C. The same facts by hand
+### C. The same facts by hand (on **node1**; the last command, `socat` on the runtime socket, must run on the VIP holder)
 
 ```bash
+# On node1
 set -a && source /opt/flowfirst/.env && set +a
 # Which node answers? Six requests through the VIP; "node" names the answering node (expect node1,node2,node3,node1,node2,node3)
 for i in 1 2 3 4 5 6; do curl -s http://${FLOWFIRST_VIP}:8080/health | jq -r .node; done
@@ -9763,15 +9842,17 @@ echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | cut -d, -f1,2,8,18 
 
 ### D. Prove HAProxy reacts: take a node out and bring it back
 
-Terminal 1 watches the API through the VIP:
+Use two terminals. Terminal 1 watches the API through the VIP:
 
 ```bash
+# Terminal 1, on node1
 python3 scripts/haproxy_lb_demo.py watch --seconds 90
 ```
 
-Terminal 2 stops API Gateway (Process 1) on one node, as in Scenario 11 (`pcs resource ban/clear` acts cluster-wide):
+Terminal 2 stops API Gateway (Process 1) on node3, as in Scenario 11. `pcs resource ban/clear` acts cluster-wide, so run it on node1 (or node2); you do not log in to node3:
 
 ```bash
+# Terminal 2, on node1 (or node2)
 sudo pcs resource ban flowfirst-p1-res-clone node3
 # ...wait about 10 s and watch terminal 1...
 sudo pcs resource clear flowfirst-p1-res-clone
@@ -9815,6 +9896,8 @@ Rules that apply in this project (see `AGENTS.md`): API Gateway (Process 1) list
 
 > **Goal:** show, with a small piece of code you can read, what Pacemaker does for FlowFirst and that it does it on every node. The script is `scripts/pacemaker_cluster_demo.py`. It asks Pacemaker what it believes (`crm_mon`), asks each of node1–node3 what is really true (`systemctl`, `ip addr` over `ssh`), and compares the two: which node is the Designated Controller, whether there is quorum, where the VIP, HAProxy and the four pipeline clones run, and whether the services on each node match. Two optional stages then **cause a real failure on purpose** (standby of the VIP holder, ban of one pipeline instance), time Pacemaker's reaction and put everything back. It is a demonstration, not a fencing or quorum test (Scenarios 16–26 are). For the cluster set-up see Phase 5; for the manual commands see Scenarios 8, 10, 11 and 15; for the log lines see Scenario 49.
 >
+> **Short answer: log in to node1 and run every command in this scenario there**, with one exception: start `failover` (B) from node2 or node3 when node1 holds the VIP.
+>
 > **Runs on:** **node1, node2 or node3** (it runs `sudo -n crm_mon` and `sudo -n pcs` on the machine it runs on) with the FlowFirst `.env`, passwordless `sudo` there and passwordless `ssh` to the other two nodes (the Phase 0 set-up; on those nodes it only runs `systemctl is-active` and `ip addr show`, which need no `sudo`). **node4 cannot run it**: it is not a cluster member and has no Pacemaker. A workstation cannot run it either, because it needs the cluster tools.
 
 ### What Pacemaker does here (so the output makes sense)
@@ -9856,9 +9939,10 @@ Safety properties of the demo:
 - `.env` has `FLOWFIRST_VIP`, `NODE1_IP`..`NODE3_IP`, and `NODE1_NAME`..`NODE3_NAME` only if the Pacemaker node names differ from `node1`..`node3` (they must equal the names shown by `sudo pcs status`, and `NODE_NAME` in `.env` on each node must equal that node's Pacemaker name so the demo reads the local node without `ssh`).
 - Python 3 with the `.venv` active (`cd /opt/flowfirst && source .venv/bin/activate`).
 
-### A. Run the read-only demo
+### A. Run the read-only demo (run on **node1**; node2 or node3 also work, node4 and workstations do not)
 
 ```bash
+# On node1
 python3 scripts/pacemaker_cluster_demo.py
 ```
 
@@ -9907,9 +9991,12 @@ run on     : node1   (ssh as flowadmin)
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error. A node left in `standby` (Scenario 8) makes stage 1 print `NOTE: online but runs nothing` and the run exit 1; that is intended, because the cluster is not fully active. Single stages: `python3 scripts/pacemaker_cluster_demo.py cluster|resources|vip|services`.
 
-### B. Failover: the VIP and HAProxy move to another node
+### B. Failover: the VIP and HAProxy move to another node (run on **node2 or node3**, not on the VIP holder)
+
+The demo puts the **VIP holder** (normally node1) into standby. Run it from a node that is **not** the holder, so the node you are logged in to stays active for the whole test. Find the holder first with `sudo crm_resource --resource flowfirst-vip --locate`, then log in to one of the other two nodes.
 
 ```bash
+# On node2 (or node3), while node1 holds the VIP
 python3 scripts/pacemaker_cluster_demo.py failover --yes
 ```
 
@@ -9929,9 +10016,10 @@ python3 scripts/pacemaker_cluster_demo.py failover --yes
 
 (Illustrative; the timings in this sample are invented. Measure yours.) A few failed requests while the VIP moves are normal: the old HAProxy is gone and the new one is not listening yet. The pipeline itself keeps working because the clones on node2 and node3 are untouched; the clones on node1 stop while it is in standby and restart on `unstandby`. With `--wait` you set how long the demo waits for Pacemaker (default 90 s).
 
-### C. Ban one pipeline instance from one node
+### C. Ban one pipeline instance from one node (run on **node1**; the ban targets node3 but the command does not run there)
 
 ```bash
+# On node1 (--node only names the node whose instance is banned; you do not need to log in to node3)
 python3 scripts/pacemaker_cluster_demo.py ban --yes --process 2 --node node3
 ```
 
@@ -9948,19 +10036,19 @@ python3 scripts/pacemaker_cluster_demo.py ban --yes --process 2 --node node3
 
 This is the same operation as Scenario 11, with the checks written in code: only the targeted instance stops, the other two nodes keep processing, and the VIP is unaffected. `--process 1` is the API Gateway, `4` the DB Updater; leader election (Scenario 70) hands the work to a surviving instance if the banned one was the leader.
 
-### D. Watch Pacemaker react live
+### D. Watch Pacemaker react live (two terminals, **both on node1**, or terminal 2 on node2/node3)
 
 ```bash
-# Terminal 1
+# Terminal 1 (on node1): the demo, watching
 python3 scripts/pacemaker_cluster_demo.py watch --seconds 120
-# Terminal 2: cause the event yourself, then undo it
+# Terminal 2 (on node1, node2 or node3; pcs acts cluster-wide): cause the event yourself, then undo it
 sudo pcs node standby node1
 sudo pcs node unstandby node1
 ```
 
 Each line shows the VIP holder, the DC, active nodes (`3/3`), whether a request through the VIP worked, and the instance count of each clone (`3 3 3 3` normally). The line where Pacemaker changes anything ends with `<-- Pacemaker changed a placement`. `watch` exits 1 if any request failed, which is expected during a failover. Do not run `watch` while the `failover` or `ban` stage is also changing the cluster.
 
-### E. The same facts by hand
+### E. The same facts by hand (run on **node1, node2 or node3**)
 
 ```bash
 sudo crm_mon -1Ar                                          # the view the demo parses (add --output-as=xml for the raw form)

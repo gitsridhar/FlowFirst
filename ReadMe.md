@@ -271,6 +271,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [66](#scenario-66-iot-device-crud--flow-6-update-device-with-remote-edge-sync) | IoT Device CRUD — Flow 6: Update Device with Remote Edge-Sync | CRUD Pipeline | `PUT /api/devices/{id}`, dual-publish P3→P4+P5, edge_sync_token, remote return path |
 | [67](#scenario-67-iot-device-crud--flow-7-soft-delete-device) | IoT Device CRUD — Flow 7: Soft-Delete Device | CRUD Pipeline | `DELETE /api/devices/{id}`, `soft_delete_device()`, `status = decommissioned` |
 | [68](#scenario-68-notification-listener--receiving-and-printing-live-notifications) | Notification Listener — Receiving & Printing Live Notifications | Notifications | Enable `NOTIFICATIONS_ENABLED`, run `scripts/notification_listener.py`, filter by flow or event type |
+| [69](#scenario-69-database-writeread-demo-across-nodes-mariadb-galera) | Database Write/Read Demo Across Nodes | Galera | `scripts/db_replication_demo.py`: write through each node, read from every node, node-down catch-up |
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
 
@@ -8772,6 +8773,143 @@ sudo rabbitmqctl delete_queue flowfirst.notifications.listener
 - TLS between the listener and RabbitMQ. If `TLS_RABBITMQ_ENABLED=true` on the cluster, the listener needs a client certificate. Add `pika.SSLOptions` with the FlowFirst pipeline certificate (`TLS_CLIENT_CERT` / `TLS_CLIENT_KEY`) — see `src/config/config.py` `get_connection()` for the exact pattern.
 - Authentication / authorisation between the listener and the REST API (the listener bypasses the API entirely).
 - Guaranteeing delivery when the listener is offline. Envelopes published while no queue is bound to the exchange are silently dropped by RabbitMQ. Start the listener (so the queue exists and is bound) before traffic begins if you need every notification.
+
+---
+
+## Scenario 69: Database Write/Read Demo Across Nodes (MariaDB Galera)
+
+> **Goal:** show, with a small piece of code you can read, that a row written through **any** MariaDB Galera node can be read from **every** node. The script is `scripts/db_replication_demo.py`. It talks to MariaDB directly (no REST API, no RabbitMQ, no pipeline process), so it isolates the database layer. For the full pipeline path see Scenarios 2 and 3.
+>
+> **Runs on:** node1, node2 or node3 (as `flowadmin`, in `/opt/flowfirst` with the venv active), or **node4** or a workstation as a client (it needs only TCP 3306 to the three Galera nodes and the same `.env`). Node 4 runs no MariaDB, so it can only act as a client.
+
+### What it does
+
+| Step | Action | Code |
+|---|---|---|
+| 1 | Create table `replication_demo` once, on the first node. Galera replicates the DDL to the others. | `ensure_table()` |
+| 2 | `INSERT` one row **through each node** (`NODE1_IP`, `NODE2_IP`, `NODE3_IP`), each over its own connection. The row records which server took the write and which machine the client ran on. | `write_entry()` |
+| 3 | `SELECT` the rows back **from each node**, polling until all arrive, and print how long it took. | `read_entries()`, `wait_until_visible()` |
+| 4 | Print PASS or FAIL, then delete its own rows (`--keep` leaves them). | `cmd_run()` |
+
+The demo uses its **own table**, so `processed_messages`, `devices` and the pipeline are never touched. Connections go to one specific node with **no failover to another node** (unlike `src/db/db.py:get_db_connection()`), because the point is to know exactly which node answered. They use `autocommit=True`, parameterised SQL and `src.tls.tls.mysql_ssl()`, so `TLS_MARIADB_ENABLED=true` works unchanged and still fails closed. The password is never printed.
+
+### Prerequisites
+
+- The Galera cluster is up (`./mariadb-galera/check_galera_status.sh` shows `wsrep_cluster_size = 3`, `Synced`).
+- `.env` holds `MARIADB_USER`, `MARIADB_PASSWORD`, `MARIADB_DB`, `NODE1_IP`..`NODE3_IP`. The script refuses to start with a weak or empty password (the same rule as the pipeline).
+- The MariaDB user may `CREATE TABLE`, `INSERT`, `SELECT`, `DELETE` in `MARIADB_DB`. The pipeline user created by `bootstrap_galera.sh` has `ALL PRIVILEGES` on that database.
+
+### A. Run the full demo
+
+```bash
+cd /opt/flowfirst && source .venv/bin/activate
+python3 scripts/db_replication_demo.py
+```
+
+Expected shape of the output (ids, times and server names will differ):
+
+```text
+== FlowFirst Galera write/read demo ==
+run id : 5c1f0a7e-...
+nodes  : node1 (10.10.1.128), node2 (10.10.1.129), node3 (10.10.1.130)
+client : node1
+
+[1] Create the demo table on the first node (replicated to the others by Galera)
+    table `replication_demo` is ready
+
+[2] Write one row through EACH node
+    wrote id=1      via node1  (server node1)
+    wrote id=5      via node2  (server node2)
+    wrote id=9      via node3  (server node3)
+
+[3] Read the rows back from EVERY node
+
+    -- node1 (10.10.1.128) server=node1 wsrep=node1 cluster_size=3 -- 3/3 rows, visible after 0 ms
+    id  written via  server  client  message                    written at
+    --  -----------  ------  ------  -------------------------  ---------------
+    1   node1        node1   node1   hello from node1 via node1 14:02:11.120344
+    5   node2        node2   node1   hello from node1 via node2 14:02:11.131920
+    9   node3        node3   node1   hello from node1 via node3 14:02:11.143077
+    ... the same three rows are printed for node2 and node3 ...
+
+[4] Result
+    PASS: all 3 rows written through 3 different nodes are readable on every node.
+```
+
+Exit code is `0` on PASS, `1` if any row did not appear within `--timeout` seconds (default 10), `2` for a usage or configuration error.
+
+> **Why the `id` values jump (1, 5, 9 …):** Galera sets `auto_increment_increment` to the cluster size and gives each node its own `auto_increment_offset`, so two nodes never generate the same id while both accept writes. The gaps are normal. Identify a row by `entry_id` (a UUID), not by `id`.
+
+### B. Write on one node, read on another (manual)
+
+```bash
+# Write through node2 only. Prints a run id.
+python3 scripts/db_replication_demo.py write --node node2 --message "written via node2"
+
+# Read it back from node3 only, then from all three:
+python3 scripts/db_replication_demo.py read --node node3 --run-id <run id from the write>
+python3 scripts/db_replication_demo.py read --node all
+```
+
+`--node` accepts `node1`, `node2`, `node3`, `vip` (HAProxy at `MARIADB_HOST`: the write lands on whichever node HAProxy picks, and the `server` column shows which) or a literal IP.
+
+### C. Prove it with a node down
+
+Galera keeps accepting writes with two of three nodes. Stop MariaDB on node3 (see Scenario 14), then from node1:
+
+```bash
+python3 scripts/db_replication_demo.py run --nodes node1,node2 --keep      # works: quorum is 2 of 3
+python3 scripts/db_replication_demo.py read --node node3                   # ERROR: cannot connect (exit 1)
+
+# On node3: sudo systemctl start mariadb   (wait for Synced), then:
+python3 scripts/db_replication_demo.py read --node node3 --run-id <run id> # the rows written while it was down are here
+```
+
+The last command shows the node catching up through IST (Scenario 5) with no manual copy.
+
+### D. Clean up
+
+```bash
+python3 scripts/db_replication_demo.py cleanup           # delete every demo row
+python3 scripts/db_replication_demo.py cleanup --drop    # drop the table (replicated to all nodes)
+```
+
+### E. The same thing in plain SQL
+
+```bash
+# Write on node1 ...
+mariadb -h ${NODE1_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
+  -e "INSERT INTO replication_demo (run_id, entry_id, written_via, message) VALUES ('manual', UUID(), 'node1', 'by hand');"
+# ... read on node3
+mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
+  -e "SELECT id, entry_id, written_via, message FROM replication_demo WHERE run_id = 'manual';"
+```
+
+### How to read it in your own code
+
+The core of the demo is two small functions, short enough to copy:
+
+```python
+conn = pymysql.connect(host=node_ip, port=MARIADB_PORT, user=MARIADB_USER, password=MARIADB_PASSWORD,
+                       database=MARIADB_DB, cursorclass=DictCursor, autocommit=True,
+                       connect_timeout=5, ssl=mysql_ssl())
+with conn.cursor() as cur:
+    cur.execute("INSERT INTO replication_demo (run_id, entry_id, written_via, message) VALUES (%s, %s, %s, %s)",
+                (run_id, entry_id, "node2", "hello"))          # parameters, never string formatting
+...
+with other_conn.cursor() as cur:                                # a connection to a DIFFERENT node
+    cur.execute("SELECT * FROM replication_demo WHERE entry_id = %s", (entry_id,))
+    row = cur.fetchone()
+```
+
+For application code that should survive a node failure, use `src/db/db.py:get_db_connection()` (tries the VIP then every node) and keep its deadlock retry (errors 1213/1205 are expected under multi-master writes); do not add a second retry loop around it.
+
+### Notes and limits
+
+- **Read-your-write across nodes.** Galera is *virtually* synchronous: a commit is certified on all nodes before it returns, but a *different* node applies it a moment later. The demo polls (`wait_until_visible`) and prints the wait, normally a few milliseconds. For code that must read its own write from another node, set `wsrep_sync_wait=1` on that session, or read from the node you wrote to.
+- **Rows are removed at the end** unless `--keep` is given, so a repeat run is clean. Cleanup runs through the first node in `--nodes` and Galera replicates the `DELETE`.
+- `vip` in `--nodes` is allowed but two labels can then hit the same server; duplicates by host address are dropped, labels are not resolved through HAProxy.
+- **Tested:** the argument handling, target resolution and table rendering (`tests/test_db_replication_demo.py`, no database needed). **Not tested against a real MariaDB/Galera cluster**: this was written on a workstation without MariaDB, so the SQL and the output sample above have not been run end to end. Run it once on a test cluster and correct this note when you have.
 
 ---
 

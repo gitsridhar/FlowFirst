@@ -14,6 +14,7 @@
 #   <node>-zookeeper   peer    ZooKeeper on node1..3 (clients + quorum + leader election)
 #   <node>-swift       server  Swift proxy on node1..3
 #   <node>-pipeline    client  identity of Processes 1-4 on node1..3, and of HAProxy towards its backends
+#   Extra core nodes (EXTRA_NODES, e.g. extramgmtnode1) get the same six certificates as node1..3.
 #   node4-pipeline     client  identity of Remote Worker (Process 5) on the remote node4 (it only ever connects out)
 #   admin-client       client  operator / test identity for the external API (mutual TLS)
 # More external API users: ./security/issue_cert.sh --name <user> --profile client --cn "<user>"
@@ -52,8 +53,12 @@ issue() {   # issue NAME PROFILE CN [SAN]
 echo "Issuing certificates into ${ISSUED_DIR} ..."
 issue flowfirst-vip server "flowfirst-vip" "DNS:${VIP_DNS},DNS:localhost,IP:${FLOWFIRST_VIP},IP:127.0.0.1"
 
-for i in 1 2 3; do
-    nm="$(node_name "$i")"; ip="$(node_ip "$i")"
+CORE_NAMES=(); CORE_IPS=()
+for i in 1 2 3; do CORE_NAMES+=("$(node_name "$i")"); CORE_IPS+=("$(node_ip "$i")"); done
+for i in "${!EXTRA_NAMES[@]}"; do CORE_NAMES+=("${EXTRA_NAMES[$i]}"); CORE_IPS+=("${EXTRA_IPS[$i]}"); done
+
+for i in "${!CORE_NAMES[@]}"; do
+    nm="${CORE_NAMES[$i]}"; ip="${CORE_IPS[$i]}"
     san="DNS:${nm},DNS:localhost,IP:${ip},IP:127.0.0.1"
     # MARIADB_HOST / RABBITMQ_HOST point at the VIP, so those two brokers must also be valid for the VIP name.
     vipsan="${san},DNS:${VIP_DNS},IP:${FLOWFIRST_VIP}"

@@ -64,6 +64,38 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+# Extra full core nodes (Scenario 76): EXTRA_NODES=extramgmtnode1:<ip>,extramgmtnode2:<ip>,...
+# Blank (default) = the classic three-node cluster. Names must be extramgmtnode<N>; an invalid
+# entry stops the process at start-up (fail closed) instead of silently dropping a node.
+_EXTRA_NODE_NAME_RE = re.compile(r"^extramgmtnode[0-9]+$")
+_IPV4_RE = re.compile(r"^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$")
+
+
+def parse_extra_nodes(raw: str) -> list:
+    """Parse 'name:ip,name:ip' into [(name, ip), ...]. Raises ValueError on any bad or duplicate entry."""
+    nodes = []
+    seen_names, seen_ips = set(), set()
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, sep, ip = item.partition(":")
+        name, ip = name.strip(), ip.strip()
+        if not sep or not _EXTRA_NODE_NAME_RE.match(name) or not _IPV4_RE.match(ip):
+            raise ValueError("EXTRA_NODES entries must look like extramgmtnode<N>:<IPv4>")
+        if name in seen_names or ip in seen_ips:
+            raise ValueError("EXTRA_NODES contains a duplicate name or IP")
+        seen_names.add(name)
+        seen_ips.add(ip)
+        nodes.append((name, ip))
+    return nodes
+
+
+EXTRA_NODES = _str_env("EXTRA_NODES", "")
+EXTRA_NODE_LIST = parse_extra_nodes(EXTRA_NODES)
+EXTRA_NODE_IPS = [ip for _, ip in EXTRA_NODE_LIST]
+
+
 # TLS settings (security/ creates the certificates; src/tls/tls.py builds the contexts).
 # Every switch defaults to off so that nothing changes until it is turned on. When a switch is on and a
 # file is missing or unreadable the process refuses to start: it never falls back to plaintext.
@@ -201,7 +233,7 @@ _rmq_port = RABBITMQ_TLS_PORT if TLS_RABBITMQ_ENABLED else RABBITMQ_PORT
 if _raw_rmq_hosts:
     RABBITMQ_HOSTS = _raw_rmq_hosts
 else:
-    RABBITMQ_HOSTS = f"{NODE1_IP}:{_rmq_port},{NODE2_IP}:{_rmq_port},{NODE3_IP}:{_rmq_port}"
+    RABBITMQ_HOSTS = ",".join(f"{ip}:{_rmq_port}" for ip in [NODE1_IP, NODE2_IP, NODE3_IP] + EXTRA_NODE_IPS)
 
 # MariaDB Connection Settings
 MARIADB_PORT = _int_env("MARIADB_PORT", 3306)
@@ -215,7 +247,7 @@ _raw_mariadb_hosts = os.getenv("MARIADB_HOSTS", "").strip()
 if _raw_mariadb_hosts:
     MARIADB_HOSTS = _raw_mariadb_hosts
 else:
-    MARIADB_HOSTS = f"{NODE1_IP},{NODE2_IP},{NODE3_IP}"
+    MARIADB_HOSTS = ",".join([NODE1_IP, NODE2_IP, NODE3_IP] + EXTRA_NODE_IPS)
 
 # Swift Object Storage Connection Settings
 # Swift is a native 3-node cluster (swift/setup_swift.sh) behind HAProxy on the VIP
@@ -367,7 +399,7 @@ _zk_port          = ZK_TLS_CLIENT_PORT if TLS_ZK_ENABLED else ZK_CLIENT_PORT
 if _raw_zk_hosts:
     ZK_HOSTS = _raw_zk_hosts
 else:
-    ZK_HOSTS = f"{NODE1_IP}:{_zk_port},{NODE2_IP}:{_zk_port},{NODE3_IP}:{_zk_port}"
+    ZK_HOSTS = ",".join(f"{ip}:{_zk_port}" for ip in [NODE1_IP, NODE2_IP, NODE3_IP] + EXTRA_NODE_IPS)
 ZK_TIMEOUT        = float(os.getenv("ZK_TIMEOUT", "10"))
 ZK_DEDUP_TTL_MS   = int(os.getenv("ZK_DEDUP_TTL_MS", "300000"))
 

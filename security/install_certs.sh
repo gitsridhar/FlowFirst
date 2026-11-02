@@ -5,6 +5,7 @@
 #
 #   ./security/install_certs.sh                 all nodes over ssh (needs passwordless ssh + sudo)
 #   ./security/install_certs.sh --node 2        one node (1-4)
+#   ./security/install_certs.sh --node extramgmtnode1   one extra core node (listed in EXTRA_NODES)
 #   ./security/install_certs.sh --crl-only      only refresh ca.crl on the nodes
 #   ./security/install_certs.sh --stage DIR     do not use ssh; write the per-node trees to DIR/<nodeN>/ for review
 #
@@ -32,11 +33,11 @@ while [[ $# -gt 0 ]]; do
         --node)     ONLY_NODE="${2:-}"; shift 2 ;;
         --crl-only) CRL_ONLY=1; shift ;;
         --stage)    STAGE_ROOT="${2:-}"; shift 2 ;;
-        -h|--help)  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "Unknown option '$1'." ;;
     esac
 done
-[[ -z "${ONLY_NODE}" || "${ONLY_NODE}" =~ ^[1-4]$ ]] || die "--node must be 1, 2, 3 or 4."
+[[ -z "${ONLY_NODE}" || "${ONLY_NODE}" =~ ^[1-4]$ || "${ONLY_NODE}" =~ ^extramgmtnode[0-9]+$ ]] || die "--node must be 1, 2, 3, 4 or an extramgmtnode<N> listed in EXTRA_NODES."
 [[ "${TLS_DIR}" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "TLS_DIR must be an absolute path of safe characters."
 [[ -z "${SSH_USER}" || "${SSH_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "Invalid PKI_SSH_USER."
 require_ca
@@ -53,7 +54,8 @@ add() {   # add SRC REL OWNER MODE
 }
 
 stage_node() {   # stage_node N
-    local n="$1" nm; nm="$(node_name "$n")"
+    local n="$1" nm
+    if [[ "${n}" =~ ^[1-4]$ ]]; then nm="$(node_name "$n")"; else nm="${n}"; fi
     local I="${ISSUED_DIR}"
     STAGE="$2"; MANIFEST=""
     rm -rf "${STAGE}"; mkdir -p "${STAGE}"
@@ -62,7 +64,7 @@ stage_node() {   # stage_node N
     if [[ ${CRL_ONLY} -eq 1 ]]; then return; fi
     add "${I}/${nm}-pipeline/${nm}-pipeline.crt" pipeline/pipeline.crt flowuser 644
     add "${I}/${nm}-pipeline/${nm}-pipeline.key" pipeline/pipeline.key flowuser 600
-    if [[ "${n}" != "4" ]]; then
+    if [[ "${n}" != "4" ]]; then   # node1-3 and the extra core nodes; node4 is the remote worker
         add "${I}/${nm}-api/${nm}-api.crt"             api/api.crt              flowuser  644
         add "${I}/${nm}-api/${nm}-api.key"             api/api.key              flowuser  600
         add "${I}/flowfirst-vip/flowfirst-vip.pem"     haproxy/vip.pem          haproxy   600
@@ -96,11 +98,17 @@ remote_script() {   # reads MANIFEST
 }
 
 WORK="$(mktemp -d)"; trap 'rm -rf "${WORK}"' EXIT
-nodes="1 2 3 4"; [[ -n "${ONLY_NODE}" ]] && nodes="${ONLY_NODE}"
+nodes="1 2 3 4 ${EXTRA_NAMES[*]-}"; [[ -n "${ONLY_NODE}" ]] && nodes="${ONLY_NODE}"
 
 for n in ${nodes}; do
-    nm="$(node_name "$n")"; ip="$(node_ip "$n")"
-    [[ -n "${ip}" && ! "${ip}" =~ ^\$\{ ]] || die "NODE${n}_IP is not set in ${_env_file}."
+    if [[ "${n}" =~ ^[1-4]$ ]]; then
+        nm="$(node_name "$n")"; ip="$(node_ip "$n")"
+        [[ -n "${ip}" && ! "${ip}" =~ ^\$\{ ]] || die "NODE${n}_IP is not set in ${_env_file}."
+    else
+        nm="${n}"; ip=""
+        for i in "${!EXTRA_NAMES[@]}"; do [[ "${EXTRA_NAMES[$i]}" == "${n}" ]] && ip="${EXTRA_IPS[$i]}"; done
+        [[ -n "${ip}" ]] || die "${n} is not listed in EXTRA_NODES in ${_env_file}."
+    fi
     if [[ -n "${STAGE_ROOT}" ]]; then
         mkdir -p "${STAGE_ROOT}"; stage_node "$n" "${STAGE_ROOT}/${nm}"
         remote_script > "${STAGE_ROOT}/${nm}.install.sh"

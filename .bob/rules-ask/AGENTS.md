@@ -11,6 +11,7 @@ It owns the global `GreenPool`, named greenthread registry, `stop_event`, metric
 ## `config.py` does runtime construction of host lists
 `RABBITMQ_HOSTS` and `MARIADB_HOSTS` are built from `NODE1_IP..NODE3_IP` at import time unless
 the env vars are explicitly set. Reading `RABBITMQ_HOST` alone misses the multi-node failover path.
+`EXTRA_NODES` (extra full core nodes, ReadMe Scenario 76) is appended to those lists when set.
 
 ## ZooKeeper `/flowfirst` tree does not exist until the first process connects
 Setup scripts only install ZooKeeper. The znode tree (`/flowfirst/election`, `/flowfirst/config`,

@@ -47,6 +47,13 @@ if [ -n "${MARIADB_HOSTS:-}" ]; then
     CLUSTER_ADDRESSES="${MARIADB_HOSTS}"
 else
     CLUSTER_ADDRESSES="${NODE1_IP},${NODE2_IP},${NODE3_IP}"
+    # Extra core nodes (ReadMe Scenario 76) are cluster members too
+    # shellcheck disable=SC1091
+    source "${ROOT_DIR}/scripts/extra_nodes_lib.sh"
+    extra_nodes_load || exit 1
+    if [ "${EXTRA_COUNT}" -gt 0 ]; then
+        CLUSTER_ADDRESSES="${CLUSTER_ADDRESSES},$(extra_ips_csv)"
+    fi
 fi
 
 echo "=================================================================="

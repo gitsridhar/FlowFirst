@@ -28,6 +28,7 @@ This project implements an enterprise-grade, high-availability, distributed inte
 - **Node 2 (`node2`)**: `${NODE2_IP}` (Galera Node 2 / API Node 2 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
 - **Node 3 (`node3`)**: `${NODE3_IP}` (Galera Node 3 / API Node 3 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
 - **Virtual IP (VIP)**: `${FLOWFIRST_VIP}` (Managed by Pacemaker across Nodes 1–3)
+- **Extra core nodes (`extramgmtnode1`, `extramgmtnode2`, …)**: optional, none by default. Each is a *full* core node (Galera, RabbitMQ, ZooKeeper, Swift, HAProxy, Pacemaker, Processes 1–4), listed in `EXTRA_NODES` in `.env`; see [Scenario 76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-)
 - **Remote Node 4 (`node4`)**: `${NODE4_IP}` (Dedicated Remote Worker running **`process5` only**; acts strictly as a lightweight client connecting to the RabbitMQ pool, ZooKeeper ensemble, and Swift storage with no local broker/database daemons)
 
 > 📐 **[View diagram: Multi-Node Cluster Architecture & Network Topology](docs/diagrams.md#1-multi-node-cluster-architecture--network-topology)**
@@ -278,6 +279,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [73](#scenario-73-swift-object-storage-demo-across-nodes) | Swift Object Storage Demo Across Nodes | Swift | `scripts/swift_object_demo.py`: write through each proxy node, read from every node, container listing, object lifecycle, the `swift_storage.py` helpers via the VIP |
 | [74](#scenario-74-haproxy-load-balancing-demo-across-nodes) | HAProxy Load-Balancing Demo Across Nodes | HAProxy | `scripts/haproxy_lb_demo.py`: VIP vs node ports, HAProxy's own backend state, round-robin on REST/MariaDB/RabbitMQ/Swift, live `watch` during a node outage |
 | [75](#scenario-75-pacemaker-cluster-demo-across-nodes) | Pacemaker Cluster Demo Across Nodes | Pacemaker | `scripts/pacemaker_cluster_demo.py`: quorum/DC, resource placement vs the real interfaces and systemd on every node, `failover` (VIP holder to standby) and `ban` (one pipeline instance) with automatic restore, live `watch` |
+| [76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-) | Add an Extra Core Node (`extramgmtnode1`, `extramgmtnode2`, …) | Cluster scaling | `EXTRA_NODES` in `.env`, `scripts/add_extra_node.sh` (10 resumable steps), ZooKeeper rolling restart, Galera join, RabbitMQ `join_cluster`, Swift ring expansion, HAProxy backends, Pacemaker `clone-max`, TLS certificates, verification, rollback
 
 > **Which node do the demos (Scenarios 69–75) run on?** Log in to **node1** and run them there; the few exceptions (stopping a service on node3, starting `failover` from node2/node3, node4 cannot run the Pacemaker demo) are listed in [Where to run the demos](#where-to-run-the-demos-scenarios-6975).
 
@@ -1102,7 +1104,7 @@ curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass:
   http://${FLOWFIRST_VIP}:8090/auth/v1.0 | grep -i x-auth-token
 ```
 
-> **Changing the ring later** (adding a node or device, changing weights) is **not** automatic. Build the new ring on one node with `swift-ring-builder` and copy the resulting `*.ring.gz` files to `/etc/swift/` on every node, then restart the Swift services. Do not re-run `setup_swift.sh` for that: it keeps the existing rings.
+> **Changing the ring later** (adding a node or device, changing weights) is **not** automatic. Build the new ring on one node with `swift-ring-builder` and copy the resulting `*.ring.gz` files to `/etc/swift/` on every node, then restart the Swift services. Do not re-run `setup_swift.sh` for that: it keeps the existing rings. To add a whole extra core node, use `swift/add_ring_node.sh` ([Scenario 76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-)).
 
 ---
 
@@ -10072,6 +10074,339 @@ Project rules (see `AGENTS.md`): never start `haproxy.service` or `flowfirst-pro
 - **No fencing is demonstrated.** `stonith-enabled=false`, so a node that is really dead or cut off is never fenced and a split-brain protection test is outside this demo (Scenarios 22–24 describe what happens). Standby is a clean, cooperative stop; a power failure behaves differently (longer detection time: the Corosync token timeout).
 - `ban` leaves a `cli-ban-…` constraint if the restore fails; `pcs constraint` shows it and `sudo pcs resource clear <clone>` removes it. If an earlier manual test left a constraint or fail count, the demo's pre-start check refuses with a message to run `sudo crm_resource -C`.
 - The demo uses `crm_mon` output of the local node, so run it on a node that is a cluster member; on a node that has lost quorum the result is the minority view.
+
+---
+
+
+## Scenario 76: Add an Extra Core Node (`extramgmtnode1`, `extramgmtnode2`, …)
+
+> **Status:** the scripts and the `EXTRA_NODES` handling are covered by unit tests (`tests/test_config.py`, `tests/test_extra_nodes.py`: parser, host lists, HAProxy rendering, orchestrator plan). **The procedure has not been run on a real cluster.** Run it on a test cluster first and correct this note, as the [Production Rollout Run-Book](#production-rollout-run-book) asks for every procedure.
+
+### What this is, and what it is not
+
+This scenario adds a **fourth full core node** next to `node1`, `node2` and `node3`. The new node runs everything a core node runs:
+
+| Component | On the extra node | Notes |
+|---|---|---|
+| MariaDB Galera | yes | joins the existing cluster (IST/SST) |
+| RabbitMQ | yes | joins the existing cluster (`rabbit@extramgmtnode1`) |
+| ZooKeeper | yes | `myid` = 3 + N → **4** for `extramgmtnode1`; ensemble grows from 3 to 4 voters |
+| Swift (proxy, account, container, object) | yes | zone 3 + N → **4**; still 3 replicas |
+| HAProxy + VIP | yes | Pacemaker may place the VIP on it |
+| Pacemaker / Corosync | yes | full member |
+| Processes 1–4 | yes | clones, `clone-max` becomes 4 |
+| Process 5 | **no** | stays on the remote worker `node4` |
+
+`node4` is **not** touched and is **not** an extra node: it remains the remote worker (Process 5 only). Names follow a fixed pattern so more nodes can be added later: the next ones are `extramgmtnode2`, `extramgmtnode3`, … (IDs never repeat: ZooKeeper `myid` 5, 6, …; Swift zones 5, 6, …). Repeat this scenario once per node.
+
+**One setting drives everything** (blank by default, so nothing changes until you set it):
+
+```ini
+# .env — identical on EVERY node, including node4 (literal value, no ${VAR})
+EXTRA_NODES=extramgmtnode1:10.10.1.132
+# later:  EXTRA_NODES=extramgmtnode1:10.10.1.132,extramgmtnode2:10.10.1.133
+```
+
+`src/config/config.py` appends the extra IPs to `RABBITMQ_HOSTS`, `MARIADB_HOSTS` and `ZK_HOSTS` (these three **stay blank** in `.env`). Entries are validated strictly (`extramgmtnode<N>:<IPv4>`, no duplicates); an invalid value stops every process at start-up and every script at once, instead of silently dropping a node.
+
+### Read this before you start: an even number of voters
+
+With four core nodes, **ZooKeeper has 4 voters and needs 3 for quorum**, and Pacemaker/Corosync has 4 votes and needs 3. A 4-node cluster therefore tolerates **one** failure, exactly like the 3-node cluster, but a 2/2 network split leaves **no** majority: both halves stop (RabbitMQ `pause_minority` also pauses both). That is safe (no split brain) but it is not more available than three nodes. Plan to add **`extramgmtnode2`** (5 voters, tolerates two failures) if availability is the reason for adding nodes. Galera behaves the same way (quorum = more than half of the nodes).
+
+### Prerequisites
+
+| # | Check | How |
+|---|---|---|
+| 1 | A RHEL 9.6 host with a **static IP** on the cluster network, same subnet as node1–3 | `ip -4 addr` |
+| 2 | **Host name equals the node name**: RabbitMQ is named `rabbit@<short hostname>` | `sudo hostnamectl set-hostname extramgmtnode1` |
+| 3 | The user `flowadmin` with SSH key login **and passwordless sudo**, same as on node1–3 (Phase 0) | `ssh flowadmin@<ip> sudo true` from node1 |
+| 4 | Clock in sync (RabbitMQ and Galera refuse or misbehave otherwise) | `sudo dnf install -y chrony && sudo systemctl enable --now chronyd && chronyc tracking` |
+| 5 | Same OS packages as the others: `git python3 python3-pip` | Phase 0b |
+| 6 | **Healthy existing cluster**: Galera `wsrep_cluster_size=3` Synced, ZooKeeper has a leader, RabbitMQ shows 3 running nodes, `pcs status` all Online | the verification commands of Phases 1, 1b, 2, 5 |
+| 7 | A recent backup (`scripts/backup_flowfirst.sh`) | [Backup](#production-rollout-run-book) |
+| 8 | A maintenance window. Existing nodes are changed **one at a time** (ZooKeeper restart, HAProxy reload) but the API stays up | — |
+| 9 | Firewall allows the new IP to reach node1–3 on the ports in Phases 1–5, and vice versa | `firewalld` is opened by the scripts on each host |
+
+The variable names below use the example IP `10.10.1.132`; replace it with yours. Do **not** reuse the IP of a decommissioned host for a different name.
+
+### Fast path: one command
+
+Everything below can be driven from node1 by one orchestrator. Do steps A–D by hand first, then:
+
+```bash
+cd /opt/flowfirst
+./scripts/add_extra_node.sh extramgmtnode1 --plan      # prints the 10 steps, changes nothing
+./scripts/add_extra_node.sh extramgmtnode1 --dry-run   # prints every remote command, runs none
+./scripts/add_extra_node.sh extramgmtnode1             # runs the steps in order; stops at the first failure
+./scripts/add_extra_node.sh extramgmtnode1 --from 5    # resume after you fixed step 5
+./scripts/add_extra_node.sh extramgmtnode1 --only 7    # run a single step
+```
+
+It stops at the first failing step and tells you the command to resume. The manual steps A–J below are exactly what it does; read them once so you know what is happening to the cluster.
+
+### Step A — Name the node (node1)
+
+Edit `/opt/flowfirst/.env` **on node1 only** and set `EXTRA_NODES` (other nodes get it in step C):
+
+```bash
+cd /opt/flowfirst
+sudo sed -i 's|^EXTRA_NODES=.*|EXTRA_NODES=extramgmtnode1:10.10.1.132|' .env
+grep '^EXTRA_NODES=' .env
+```
+
+Also append `extramgmtnode1-pipeline` to `ADMIN_TRUSTED_PROXY_CNS` (needed once TLS is on; harmless before):
+
+```bash
+grep '^ADMIN_TRUSTED_PROXY_CNS=' .env
+# e.g.  ADMIN_TRUSTED_PROXY_CNS=node1-pipeline,node2-pipeline,node3-pipeline,extramgmtnode1-pipeline
+```
+
+Check the value is accepted: `./scripts/add_extra_node.sh extramgmtnode1 --plan` (an invalid entry prints `ERROR: EXTRA_NODES entry #1 is invalid`, never the bad text).
+
+### Step B — Prepare the new host (on `extramgmtnode1`)
+
+Repeat Phase 0 / 0a / 0b / 1c of the installation procedure on the new host:
+
+```bash
+sudo dnf install -y chrony git python3 python3-pip && sudo systemctl enable --now chronyd && sudo chronyc makestep
+sudo git clone <repo-url> /opt/flowfirst && sudo chown -R $USER:$USER /opt/flowfirst
+cd /opt/flowfirst && python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip && pip install --require-hashes -r requirements.txt
+echo "flowuser soft nofile 65536" | sudo tee -a /etc/security/limits.d/flowfirst.conf
+echo "flowuser hard nofile 65536" | sudo tee -a /etc/security/limits.d/flowfirst.conf
+```
+
+The repository must be at the **same commit** as on the other nodes (`git -C /opt/flowfirst rev-parse HEAD`). Step 1 of the orchestrator runs `git pull --ff-only` everywhere.
+
+### Step C — Distribute `.env`
+
+Only `NODE_NAME` and `CURRENT_NODE_IP` differ per node; everything else, secrets included, is identical.
+
+```bash
+# On node1: push EXTRA_NODES + ADMIN_TRUSTED_PROXY_CNS to node2, node3, node4, and the whole .env to the new node
+./scripts/add_extra_node.sh extramgmtnode1 --only 2
+```
+
+By hand instead: copy `.env` from node1 to the new host (`scp`), then on the new host
+
+```bash
+sed -i 's|^NODE_NAME=.*|NODE_NAME=extramgmtnode1|; s|^CURRENT_NODE_IP=.*|CURRENT_NODE_IP=10.10.1.132|' /opt/flowfirst/.env
+chmod 600 /opt/flowfirst/.env
+```
+
+`RABBITMQ_HOSTS`, `MARIADB_HOSTS` and `ZK_HOSTS` must still be blank. Already-running processes read `.env` only at start; they pick up the new node at their next restart (step J).
+
+### Step D — Confirm the generated lists
+
+```bash
+cd /opt/flowfirst && .venv/bin/python - <<'PY'
+from src.config import config
+print(config.EXTRA_NODE_LIST); print(config.RABBITMQ_HOSTS); print(config.MARIADB_HOSTS); print(config.ZK_HOSTS)
+PY
+```
+
+Each list must end with the new IP.
+
+### Step E — ZooKeeper (ensemble 3 → 4 voters)
+
+ZooKeeper has no automatic membership change here: every member's `zoo.cfg` needs the line `server.4=<ip>:2888:3888`, and the members are restarted one at a time. The order matters:
+
+1. **Followers first, one at a time.** On each node: `cd /opt/flowfirst && sudo ./zookeeper/setup_zookeeper.sh`. This rewrites `zoo.cfg` (with the new `server.4` line) and restarts ZooKeeper. After each one wait for `echo ruok | nc 127.0.0.1 2181` → `imok`. Find the leader with `echo srvr | nc 127.0.0.1 2181 | grep Mode` and **do it last**.
+2. **The new node.** On `extramgmtnode1`: `sudo ./zookeeper/setup_zookeeper.sh` (writes `myid=4`, installs Java and ZooKeeper, opens 2181/2888/3888).
+3. **The old leader last**, same command. Followers + new node (3 of 4) elect the new leader.
+
+```bash
+# on every node afterwards
+echo mntr | nc 127.0.0.1 2181 | grep -E "zk_server_state|zk_synced_followers|zk_quorum_size"   # followers: 3 on the leader
+grep '^server\.' /opt/zookeeper/conf/zoo.cfg                                                     # server.1 … server.4
+```
+
+> A restart of a ZooKeeper member drops its client sessions; the processes reconnect by themselves and leader election re-runs. That is why this is done one node at a time. If a node does not return `imok` within a minute, stop and read `journalctl -u zookeeper -n 100` before touching the next one.
+
+### Step F — MariaDB Galera
+
+On `extramgmtnode1` (the script now includes the extra nodes in `wsrep_cluster_address`):
+
+```bash
+cd /opt/flowfirst
+sudo ./mariadb-galera/setup_galera_node.sh
+sudo systemctl enable --now mariadb        # joins the cluster; a state transfer copies the data
+```
+
+Never run `bootstrap_galera.sh` here (it would start a second, separate cluster). Watch `journalctl -u mariadb -f` until it says the node is synced, then on any node:
+
+```bash
+./mariadb-galera/check_galera_status.sh
+sudo mariadb -e "SHOW STATUS LIKE 'wsrep_cluster_size'; SHOW STATUS LIKE 'wsrep_local_state_comment'"   # 4 / Synced
+```
+
+SST with `rsync` blocks the donor node for the duration of the copy; with a large database use `MARIADB_SST_METHOD=mariabackup` (it must be set in `.env` before the join). The existing nodes' `wsrep_cluster_address` is only read at their next restart, so **no restart is needed now**; re-run `setup_galera_node.sh` on each of them at their next maintenance so the file matches. A 4-node Galera cluster is fine, see the quorum remark above.
+
+### Step G — RabbitMQ
+
+The install script only installs; it does not cluster. So there are two commands on `extramgmtnode1`:
+
+```bash
+cd /opt/flowfirst
+sudo ./scripts/install_rabbitmq_rhel9.sh              # installs, enables management, creates the pipeline user (skipped if it exists)
+sudo ./scripts/join_rabbitmq_cluster.sh --dry-run     # shows each action
+sudo ./scripts/join_rabbitmq_cluster.sh               # joins rabbit@node1
+```
+
+`join_rabbitmq_cluster.sh` checks that the short hostname equals `NODE_NAME`, makes all nodes resolvable in `/etc/hosts`, opens 5672/5671/25672/4369, **copies the Erlang cookie from node1 over SSH without printing it**, then runs `stop_app → reset → join_cluster → start_app`. It is safe to re-run (it exits at once if the node is already a member). `reset` wipes only the new node's own empty state.
+
+With `RABBITMQ_QUEUE_TYPE=quorum` it also runs `rabbitmq-queues grow rabbit@extramgmtnode1 all --queue-pattern '^flow[123]_'`. Classic queues are not replicated; nothing to do.
+
+```bash
+sudo rabbitmqctl cluster_status         # 4 nodes under "Running Nodes"
+sudo rabbitmqctl list_policies          # flowfirst-dlx must be listed (policies are cluster-wide)
+sudo rabbitmqctl list_users             # the pipeline user must exist (users are cluster-wide)
+```
+
+Do **not** change the partition handling: `pause_minority` is already set by the install script.
+
+### Step H — Swift
+
+Swift keeps its rings: `setup_swift.sh` deliberately never rebuilds an existing ring, so the new node must be **added to the rings on one node and the rings copied everywhere**. The script refuses to run on the new node before it has the rings.
+
+```bash
+# On node1
+cd /opt/flowfirst
+sudo ./swift/add_ring_node.sh --check      # which extra nodes are missing from the rings
+sudo ./swift/add_ring_node.sh --push       # add devices (zone 4), rebalance, copy builders + rings to node2, node3, extra nodes
+
+# On extramgmtnode1 (needs /etc/swift/*.ring.gz from the step above)
+sudo ./swift/setup_swift.sh
+
+# On node1, node2, node3 (memcached server list, rsync allow-list and firewall now include the new IP; rings are kept)
+sudo ./swift/setup_swift.sh
+```
+
+Verify that all rings are identical:
+
+```bash
+(cd /etc/swift && sudo md5sum account.ring.gz container.ring.gz object.ring.gz)    # same on every node
+sudo swift-ring-builder /etc/swift/object.builder                                  # 4 devices, zone 4 present
+```
+
+Replica count stays at `SWIFT_REPLICAS=3`: with four zones each object is stored on three of the four nodes. Swift's `min_part_hours` limits how many partitions move per rebalance; the replicators then copy the data in the background (hours for a large store). Run `add_ring_node.sh --push` again an hour later to move more; every run is safe to repeat. Watch progress with `swift-recon --replication` or `journalctl -u openstack-swift-object-replicator`.
+
+### Step I — HAProxy (config only; never start the service)
+
+HAProxy is owned by Pacemaker. Generate the config on **every** core node so each backend lists the new node, and validate it:
+
+```bash
+cd /opt/flowfirst
+sudo ./haproxy/setup_haproxy.sh          # on node1, node2, node3 AND extramgmtnode1
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+```
+
+Review without installing anything: `HAPROXY_RENDER_ONLY=1 ./haproxy/setup_haproxy.sh | grep extramgmtnode1` shows one `server extramgmtnode1 …` line in each of the four backends (`flowfirst_api_back`, `mariadb_galera_back`, `rabbitmq_amqp_back`, `swift_back`). With TLS on the API/Swift lines carry `verify required … verifyhost extramgmtnode1` like the other nodes. With `EXTRA_NODES` blank the generated file is byte-identical to before.
+
+On the node that currently holds the VIP, pick up the change with `sudo systemctl reload haproxy` (a reload, not a start). On the other nodes HAProxy is stopped by Pacemaker and reads the file when it is started.
+
+Confirm the new backends turn green on the stats page `http://<VIP>:9000/` after step J.
+
+### Step J — Processes and Pacemaker
+
+On `extramgmtnode1`:
+
+```bash
+cd /opt/flowfirst
+sudo ./systemd/install_services.sh /opt/flowfirst
+sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4   # Pacemaker owns them
+sudo ./pacemaker/setup_multinode_cluster.sh --prepare-node       # pcs, corosync, pcsd:2224, hacluster password, /etc/hosts
+```
+
+Do **not** use `--remote` (that installs Process 5, which belongs to node4).
+
+On node1:
+
+```bash
+sudo ./pacemaker/add_extra_node.sh extramgmtnode1 --dry-run
+sudo ./pacemaker/add_extra_node.sh extramgmtnode1
+```
+
+It runs `pcs host auth`, `pcs cluster node add … --start --enable`, and raises `clone-max` of `flowfirst-p1-res-clone` … `flowfirst-p4-res-clone` to 4. It is idempotent. The VIP/HAProxy group is not touched.
+
+Do not re-run `configure_multinode_resources.sh` for this; it deletes and recreates every resource. (If you ever do, it now creates the clones with `clone-max=3+EXTRA_COUNT` by itself.)
+
+Finally, restart the existing processes **one node at a time** so they use the new host lists (the API stays up on the other nodes): `sudo pcs resource restart flowfirst-p1-res-clone` restarts all instances; to go slowly use `sudo pcs node standby <node>` / `unstandby <node>` per node and wait for `pcs status` to show everything Started.
+
+### Step K — TLS (only if TLS is enabled in the cluster)
+
+On the admin host (the CA key never leaves it):
+
+```bash
+./security/issue_all.sh                                  # skips what exists; issues the six extramgmtnode1-* certificates
+./security/install_certs.sh --node extramgmtnode1        # or --stage DIR to review first
+```
+
+Then on the new node run the same `enable_*_tls.sh` scripts as in Scenario 63 (`enable_rabbitmq_tls.sh`, `enable_zookeeper_tls.sh`, `enable_mariadb_tls.sh`, `enable_swift_tls.sh`) **before** it joins the cluster (steps E–H), and make sure `TLS_*_ENABLED` in `.env` match the other nodes. A certificate that is already revoked or a CRL past `nextUpdate` blocks the new node like any other (see *CRL lifetime*). Repeat step I afterwards on every node (HAProxy needs the CN `extramgmtnode1-pipeline` in `ADMIN_TRUSTED_PROXY_CNS`, set in step A) and `./security/verify_tls.sh` now also tests the new node.
+
+### Verify (all of these must pass)
+
+| # | Check | Command | Expect |
+|---|---|---|---|
+| 1 | Config | `.venv/bin/python scripts/preflight_check.py` on every node | `PASS extra nodes: 1 extra core node(s)`, no FAIL |
+| 2 | Galera | `sudo mariadb -e "SHOW STATUS LIKE 'wsrep_cluster_size'"` | `4`, state `Synced` on every node |
+| 3 | ZooKeeper | `echo mntr \| nc 127.0.0.1 2181 \| grep -E "zk_server_state\|zk_synced_followers"` | one leader; `zk_synced_followers` = 3 |
+| 4 | RabbitMQ | `sudo rabbitmqctl cluster_status` | 4 running nodes, no partitions |
+| 5 | Swift | `md5sum` of the three rings on all nodes; `curl -s -o /dev/null -w '%{http_code}' http://<new-ip>:8888/healthcheck` | identical sums; `200` |
+| 6 | HAProxy | `echo "show servers state" \| sudo socat stdio /run/haproxy/admin.sock` or the stats page | `extramgmtnode1` UP in all four backends |
+| 7 | Pacemaker | `sudo pcs status` | `extramgmtnode1` Online, `flowfirst-p1-res` … `p4-res` Started on 4 nodes |
+| 8 | API on the new node | `curl -s http://<new-ip>:8082/health` | `{"status":…}` |
+| 9 | End to end through the VIP | `./scripts/test_flows_and_inspect_db.sh` | all flows complete, rows in `processed_messages` |
+| 10 | Failover | `sudo pcs node standby extramgmtnode1`, repeat check 9, `sudo pcs node unstandby extramgmtnode1` | flows keep working, node returns |
+
+### Adding `extramgmtnode2`, `extramgmtnode3`, …
+
+Append to the list, never reorder or reuse a name:
+
+```ini
+EXTRA_NODES=extramgmtnode1:10.10.1.132,extramgmtnode2:10.10.1.133
+```
+
+then repeat this scenario for the new name (`./scripts/add_extra_node.sh extramgmtnode2`). ZooKeeper `myid` and Swift zone are `3 + N` (5 for `extramgmtnode2`), `clone-max` becomes `3 + number of extra nodes`. The orchestrator restarts ZooKeeper members of the already-added extras too, since their `zoo.cfg` changes as well.
+
+### Rollback (before you finish step J)
+
+Undo in reverse order and only for the part that already ran:
+
+| Done | Undo |
+|---|---|
+| Pacemaker | `sudo pcs cluster node remove extramgmtnode1`; `sudo pcs resource update flowfirst-p<N>-res-clone clone-max=3` for N = 1–4 |
+| HAProxy | remove `EXTRA_NODES` from `.env` on node1–3, re-run `sudo ./haproxy/setup_haproxy.sh` (the file is regenerated without the extra lines), reload on the VIP holder |
+| Swift | `sudo swift-ring-builder /etc/swift/<ring>.builder remove --ip 10.10.1.132 …`, rebalance, copy the rings; wait until `swift-recon --replication` shows the data moved **before** stopping the node |
+| RabbitMQ | on the new node `sudo rabbitmqctl stop_app && sudo rabbitmqctl reset`; or from node1 `sudo rabbitmqctl forget_cluster_node rabbit@extramgmtnode1` (node stopped) |
+| Galera | `sudo systemctl stop mariadb` on the new node; the cluster continues with 3 |
+| ZooKeeper | remove the `server.4` line on every member and restart them one at a time (followers first, leader last) |
+| `.env` | remove `EXTRA_NODES` and the extra CN from `ADMIN_TRUSTED_PROXY_CNS` on every node, restart the processes |
+
+A removed node's ZooKeeper id and Swift zone must **not** be reused for a different machine.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `ERROR: EXTRA_NODES entry #1 is invalid` | name must be exactly `extramgmtnode<N>`, IP a dotted IPv4, no spaces inside an entry, no duplicates |
+| `setup_zookeeper.sh`: *CURRENT_NODE_IP does not match any of…* | `CURRENT_NODE_IP` on the new node differs from its entry in `EXTRA_NODES` (step C) |
+| ZooKeeper new node never reaches `imok` with leader | the old leader has not been restarted yet (step E.3) |
+| `join_rabbitmq_cluster.sh`: short hostname is … but NODE_NAME is … | `sudo hostnamectl set-hostname extramgmtnode1`, restart `rabbitmq-server`, re-run |
+| `join_cluster` → `incompatible_feature_flags` / `cookie` error | different RabbitMQ versions or a wrong cookie; install the same version, re-run (the script re-copies the cookie) |
+| `setup_swift.sh`: *must receive the existing rings BEFORE Swift is set up here* | run `swift/add_ring_node.sh --push` on node1 first (step H) |
+| Swift tokens fail intermittently via the VIP | memcached server list differs between nodes; re-run `setup_swift.sh` on every node |
+| `cannot reach … :2224` in `pacemaker/add_extra_node.sh` | `--prepare-node` was not run on the new node, or firewalld blocks 2224/tcp |
+| New node stays `OFFLINE` in `pcs status` | `/etc/hosts` lacks the other nodes, or Corosync UDP 5404/5405 blocked |
+| `preflight_check.py`: *ADMIN_TRUSTED_PROXY_CNS lacks extramgmtnode1-pipeline* | add it on every node (step A/C) |
+
+### Notes and limits
+
+- **Not tested on a real cluster:** the ZooKeeper rolling restart order, SST/IST timing, the `rabbitmqctl join_cluster` sequence, `swift-ring-builder` output matching (the script greps its table with a regular expression; if `--check` reports a node as missing although it is in the ring, compare `swift-ring-builder /etc/swift/object.builder` with `in_ring()` in `swift/add_ring_node.sh`), `pcs cluster node add`, and the orchestrator's remote commands. The tested parts are the parser, the config lists, the HAProxy rendering, the TLS options of the extra backends and the orchestrator's plan and failure handling.
+- `scripts/db_replication_demo.py`, `zk_coordination_demo.py`, `rabbitmq_queue_demo.py` and the other demo scripts (Scenarios 69–75) still default to `node1,node2,node3`; pass the new node with their node-list option or leave it out.
+- `monitoring/prometheus.yml` lists metric endpoints of node1–3; add `extramgmtnode1:9101` … `:9104` (`METRICS_PORT_BASE` + process number) when `METRICS_ENABLED=true`.
+- The backup scripts cover state, not nodes; nothing needs changing, but take a fresh backup after the node is in.
+- Node removal is manual (the rollback table above); there is no script, on purpose.
 
 ---
 

@@ -59,6 +59,20 @@ def check_env_file(path, env):
     say("FAIL" if filled else "PASS", "host lists blank", (", ".join(filled) + " must be blank (built from NODE*_IP)") if filled else "RABBITMQ_HOSTS, MARIADB_HOSTS blank")
     ips = [env.get("NODE%d_IP" % i, "") for i in (1, 2, 3, 4)]
     say("FAIL" if (not all(ips) or "127.0.0.1" in ips) else "PASS", "node addresses", "NODE1..4_IP set" if all(ips) and "127.0.0.1" not in ips else "NODE*_IP missing or 127.0.0.1")
+    extra = (env.get("EXTRA_NODES") or "").strip()
+    if extra:
+        import re
+        items = [i.strip().partition(":") for i in extra.split(",") if i.strip()]
+        names = [n for n, _, _ in items]
+        ok = all(re.match(r"^extramgmtnode[0-9]+$", n) and re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", ip) for n, _, ip in items)
+        if not ok or len(set(names)) != len(names):
+            say("FAIL", "extra nodes", "EXTRA_NODES must be extramgmtnode<N>:<IPv4>,... without duplicates")
+        else:
+            cns = [c.strip() for c in (env.get("ADMIN_TRUSTED_PROXY_CNS") or "").split(",")]
+            missing = [n for n in names if n + "-pipeline" not in cns]
+            say("FAIL" if missing else "PASS", "extra nodes",
+                ("ADMIN_TRUSTED_PROXY_CNS lacks " + ", ".join(m + "-pipeline" for m in missing)) if missing
+                else "%d extra core node(s): %s" % (len(names), ", ".join(names)))
     for k in ("NODE_NAME", "CURRENT_NODE_IP"):
         say("PASS" if env.get(k) else "FAIL", k, "set" if env.get(k) else "missing (differs per node)")
 

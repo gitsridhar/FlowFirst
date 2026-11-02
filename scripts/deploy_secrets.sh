@@ -13,7 +13,8 @@ set -euo pipefail
 #      (RABBITMQ_PASSWORD, MARIADB_PASSWORD, SWIFT_KEY, HAPROXY_STATS_PASS).
 #      SWIFT_HASH_PATH_PREFIX / SUFFIX are already set in the .env file and are
 #      left untouched.
-#   2. Pushes the resulting .env to nodes 2, 3 and 4 over SSH (as flowadmin).
+#   2. Pushes the resulting .env to nodes 2, 3 and 4 over SSH (as flowadmin), and to every
+#      extramgmtnode<N> listed in EXTRA_NODES (ReadMe Scenario 76).
 #   3. Patches NODE_NAME and CURRENT_NODE_IP on each remote node so the two
 #      per-node values stay correct after the copy.
 #
@@ -47,6 +48,11 @@ NODE3_IP="$(_get NODE3_IP)"
 NODE4_IP="$(_get NODE4_IP)"
 SSH_USER="${DEPLOY_SSH_USER:-flowadmin}"
 
+# Extra core nodes: the parser validates every entry before anything is pushed
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/extra_nodes_lib.sh"
+extra_nodes_load "$(_get EXTRA_NODES)" || exit 1
+
 for _var in NODE2_IP NODE3_IP NODE4_IP; do
     [[ -n "${!_var}" ]] || { echo "ERROR: ${_var} is not set in ${ENV_FILE}."; exit 1; }
 done
@@ -55,6 +61,9 @@ echo "=================================================================="
 echo " FlowFirst — generate secrets and deploy .env to all nodes"
 echo " This node (node1): secrets will be generated here"
 echo " Targets: ${NODE2_IP} (node2)  ${NODE3_IP} (node3)  ${NODE4_IP} (node4)"
+for _i in "${!EXTRA_NAMES[@]}"; do
+    echo "          ${EXTRA_IPS[$_i]} (${EXTRA_NAMES[$_i]})"
+done
 echo " SSH user: ${SSH_USER}  (override: DEPLOY_SSH_USER=<user> ./deploy_secrets.sh)"
 echo "=================================================================="
 
@@ -73,13 +82,18 @@ echo ""
 echo "[2/2] Pushing .env to remote nodes..."
 
 declare -A NODE_MAP
-NODE_MAP["${NODE2_IP}"]="2"
-NODE_MAP["${NODE3_IP}"]="3"
-NODE_MAP["${NODE4_IP}"]="4"
+NODE_MAP["${NODE2_IP}"]="node2"
+NODE_MAP["${NODE3_IP}"]="node3"
+NODE_MAP["${NODE4_IP}"]="node4"
+TARGET_IPS=("${NODE2_IP}" "${NODE3_IP}" "${NODE4_IP}")
+for _i in "${!EXTRA_NAMES[@]}"; do
+    NODE_MAP["${EXTRA_IPS[$_i]}"]="${EXTRA_NAMES[$_i]}"
+    TARGET_IPS+=("${EXTRA_IPS[$_i]}")
+done
 
-for node_ip in "${NODE2_IP}" "${NODE3_IP}" "${NODE4_IP}"; do
-    nodenum="${NODE_MAP[${node_ip}]}"
-    echo "  → node${nodenum} (${node_ip})"
+for node_ip in "${TARGET_IPS[@]}"; do
+    nodename="${NODE_MAP[${node_ip}]}"
+    echo "  → ${nodename} (${node_ip})"
 
     # Copy the file
     scp -q "${ENV_FILE}" "${SSH_USER}@${node_ip}:/opt/flowfirst/.env"
@@ -88,17 +102,17 @@ for node_ip in "${NODE2_IP}" "${NODE3_IP}" "${NODE4_IP}"; do
     # shellcheck disable=SC2087
     ssh -T "${SSH_USER}@${node_ip}" <<REMOTE
 set -e
-sed -i 's/^NODE_NAME=.*/NODE_NAME=node${nodenum}/' /opt/flowfirst/.env
+sed -i 's/^NODE_NAME=.*/NODE_NAME=${nodename}/' /opt/flowfirst/.env
 sed -i 's/^CURRENT_NODE_IP=.*/CURRENT_NODE_IP=${node_ip}/' /opt/flowfirst/.env
 chmod 600 /opt/flowfirst/.env
 REMOTE
 
-    echo "    node${nodenum}: deployed and per-node identity set"
+    echo "    ${nodename}: deployed and per-node identity set"
 done
 
 echo ""
 echo "=================================================================="
-echo " Done. All four nodes have matching secrets."
+echo " Done. Every node has matching secrets."
 echo " SWIFT_HASH_PATH_* were pre-set in the .env files and were not changed."
 echo ""
 echo " Next:"

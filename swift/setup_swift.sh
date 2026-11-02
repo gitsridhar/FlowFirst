@@ -68,6 +68,13 @@ NODE2_IP="${NODE2_IP:-}"
 NODE3_IP="${NODE3_IP:-}"
 CURRENT_NODE_IP="${CURRENT_NODE_IP:-}"
 
+# Extra core nodes (ReadMe Scenario 76): extramgmtnode<N> is Swift zone 3+N. Their ring entries are
+# added by swift/add_ring_node.sh (rings are never rebuilt here), but every member must know them
+# for memcached, rsync and the firewall.
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/extra_nodes_lib.sh"
+extra_nodes_load || exit 1
+
 # Validate required variables (must come from .env — no hardcoded fallbacks)
 for _var in NODE1_IP NODE2_IP NODE3_IP CURRENT_NODE_IP SWIFT_HASH_PATH_PREFIX SWIFT_HASH_PATH_SUFFIX; do
     _val="${!_var:-}"
@@ -97,20 +104,33 @@ elif [ "${CURRENT_NODE_IP}" = "${NODE2_IP}" ]; then
     MY_ID=2
 elif [ "${CURRENT_NODE_IP}" = "${NODE3_IP}" ]; then
     MY_ID=3
+elif _extra_name="$(extra_name_for_ip "${CURRENT_NODE_IP}")"; then
+    MY_ID="$(extra_node_id "${_extra_name}")"
+    if [ ! -f /etc/swift/object.ring.gz ]; then
+        echo "ERROR: ${_extra_name} must receive the existing rings BEFORE Swift is set up here."
+        echo "  Run swift/add_ring_node.sh on node1, copy /etc/swift/*.builder and *.ring.gz to this node"
+        echo "  (ReadMe Scenario 76), then re-run. Building fresh rings here would split the cluster."
+        exit 1
+    fi
 else
     echo "ERROR: CURRENT_NODE_IP='${CURRENT_NODE_IP}' does not match any of"
-    echo "  NODE1_IP=${NODE1_IP}, NODE2_IP=${NODE2_IP}, NODE3_IP=${NODE3_IP}"
+    echo "  NODE1_IP=${NODE1_IP}, NODE2_IP=${NODE2_IP}, NODE3_IP=${NODE3_IP}, EXTRA_NODES=${EXTRA_NODES:-}"
     echo "Set CURRENT_NODE_IP correctly in /opt/flowfirst/.env"
     exit 1
 fi
 
 MEMCACHE_SERVERS="${NODE1_IP}:${MEMCACHED_PORT},${NODE2_IP}:${MEMCACHED_PORT},${NODE3_IP}:${MEMCACHED_PORT}"
+RSYNC_EXTRA_HOSTS=""
+for _ip in "${EXTRA_IPS[@]+"${EXTRA_IPS[@]}"}"; do
+    MEMCACHE_SERVERS+=",${_ip}:${MEMCACHED_PORT}"
+    RSYNC_EXTRA_HOSTS+=" ${_ip}"
+done
 SWIFT_DEVICE_PATH="${SWIFT_DEVICES_DIR}/${SWIFT_DEVICE}"
 
 echo "=================================================================="
 echo " FlowFirst - Swift (OpenStack ${SWIFT_OPENSTACK_RELEASE}) Cluster Setup"
 echo " This node:     ${CURRENT_NODE_IP}  (zone ${MY_ID})"
-echo " Swift nodes:   ${NODE1_IP}, ${NODE2_IP}, ${NODE3_IP}"
+echo " Swift nodes:   ${NODE1_IP}, ${NODE2_IP}, ${NODE3_IP}$([ "${EXTRA_COUNT}" -gt 0 ] && echo ", extra: $(extra_ips_csv)")"
 echo " Proxy port:    ${SWIFT_PROXY_PORT}  (HAProxy VIP port: ${SWIFT_LB_PORT})"
 echo " Ring ports:    account ${SWIFT_ACCOUNT_PORT} / container ${SWIFT_CONTAINER_PORT} / object ${SWIFT_OBJECT_PORT}"
 echo " Device path:   ${SWIFT_DEVICE_PATH}"
@@ -298,7 +318,7 @@ log file = /var/log/rsyncd.log
 # systemd tracks the PID itself.  Writing a pid file to /var/run/ would trigger
 # an SELinux denial (rsyncd_t cannot write var_run_t) and cause startup failure.
 address = ${CURRENT_NODE_IP}
-hosts allow = ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}
+hosts allow = ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}${RSYNC_EXTRA_HOSTS}
 hosts deny = *
 
 [account]
@@ -508,8 +528,8 @@ if command -v firewall-cmd &>/dev/null && sudo systemctl is-active --quiet firew
     for _p in "${SWIFT_PROXY_PORT}" "${SWIFT_ACCOUNT_PORT}" "${SWIFT_CONTAINER_PORT}" "${SWIFT_OBJECT_PORT}"; do
         sudo firewall-cmd --permanent --add-port="${_p}/tcp" > /dev/null
     done
-    # rsync and memcached are cluster-internal: allow only the three Swift nodes
-    for _ip in "${NODE1_IP}" "${NODE2_IP}" "${NODE3_IP}"; do
+    # rsync and memcached are cluster-internal: allow only the Swift nodes
+    for _ip in "${NODE1_IP}" "${NODE2_IP}" "${NODE3_IP}" "${EXTRA_IPS[@]+"${EXTRA_IPS[@]}"}"; do
         for _p in 873 "${MEMCACHED_PORT}"; do
             sudo firewall-cmd --permanent \
                 --add-rich-rule="rule family=ipv4 source address=${_ip} port port=${_p} protocol=tcp accept" > /dev/null

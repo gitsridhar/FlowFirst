@@ -36,6 +36,12 @@ NODE3_NAME="${NODE3_NAME:-node3}"
 NODE3_IP="${NODE3_IP:-}"
 HACLUSTER_PASS="${HACLUSTER_PASS:-hacluster123}"
 
+# Extra core nodes (ReadMe Scenario 76) are resolvable by name on every node, but they join the
+# cluster later with pacemaker/add_extra_node.sh, never through the initial 3-node 'pcs cluster setup'.
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/extra_nodes_lib.sh"
+extra_nodes_load || exit 1
+
 # Validate required IP variables (must come from .env — no hardcoded fallbacks)
 for _var in NODE1_IP NODE2_IP NODE3_IP; do
     _val="${!_var:-}"
@@ -170,10 +176,11 @@ prepare_node() {
 
     # 5. Add all cluster nodes to /etc/hosts (idempotent)
     echo "[P5/5] Adding cluster nodes to /etc/hosts..."
-    for entry in \
-        "${NODE1_IP} ${NODE1_NAME}" \
-        "${NODE2_IP} ${NODE2_NAME}" \
-        "${NODE3_IP} ${NODE3_NAME}"
+    HOSTS_ENTRIES=("${NODE1_IP} ${NODE1_NAME}" "${NODE2_IP} ${NODE2_NAME}" "${NODE3_IP} ${NODE3_NAME}")
+    for _i in "${!EXTRA_NAMES[@]}"; do
+        HOSTS_ENTRIES+=("${EXTRA_IPS[$_i]} ${EXTRA_NAMES[$_i]}")
+    done
+    for entry in "${HOSTS_ENTRIES[@]}"
     do
         ip_part="${entry%% *}"
         name_part="${entry##* }"

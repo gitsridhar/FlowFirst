@@ -30,6 +30,11 @@ PKI_CRL_DAYS="${PKI_CRL_DAYS:-30}"
 PKI_BACKDATE_MIN="${PKI_BACKDATE_MIN:-5}"      # notBefore = now - N minutes, tolerates small clock skew
 
 die()  { echo "ERROR: $*" >&2; exit 1; }
+
+# Extra core nodes (EXTRA_NODES in .env, ReadMe Scenario 76): EXTRA_NAMES[] / EXTRA_IPS[]
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/extra_nodes_lib.sh"
+extra_nodes_load || exit 1
 info() { echo "  $*"; }
 
 require_openssl() {

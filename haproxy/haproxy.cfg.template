@@ -91,6 +91,7 @@ backend flowfirst_api_back
     server __NODE1_NAME__ __NODE1_IP__:__API_BACKEND_PORT__ check __API_TLS_N1__
     server __NODE2_NAME__ __NODE2_IP__:__API_BACKEND_PORT__ check __API_TLS_N2__
     server __NODE3_NAME__ __NODE3_IP__:__API_BACKEND_PORT__ check __API_TLS_N3__
+__EXTRA_API_SERVERS__
 
 #---------------------------------------------------------------------
 # Load balancing & Failover for MariaDB Galera Cluster (Port 3306)
@@ -114,6 +115,7 @@ backend mariadb_galera_back
     server __NODE1_NAME__ __NODE1_IP__:__MARIADB_PORT__ check
     server __NODE2_NAME__ __NODE2_IP__:__MARIADB_PORT__ check
     server __NODE3_NAME__ __NODE3_IP__:__MARIADB_PORT__ check
+__EXTRA_MARIADB_SERVERS__
 
 #---------------------------------------------------------------------
 # Load balancing for RabbitMQ AMQP (Port 5672 -> LB Port 5673)
@@ -135,6 +137,7 @@ backend rabbitmq_amqp_back
     server __NODE1_NAME__ __NODE1_IP__:__RABBITMQ_BACKEND_PORT__ check inter 5s fall 2 rise 2
     server __NODE2_NAME__ __NODE2_IP__:__RABBITMQ_BACKEND_PORT__ check inter 5s fall 2 rise 2
     server __NODE3_NAME__ __NODE3_IP__:__RABBITMQ_BACKEND_PORT__ check inter 5s fall 2 rise 2
+__EXTRA_RABBITMQ_SERVERS__
 
 #---------------------------------------------------------------------
 # Load balancing for the Swift cluster (proxy port -> LB Port on the VIP)
@@ -158,3 +161,4 @@ backend swift_back
     server __NODE1_NAME__ __NODE1_IP__:__SWIFT_PROXY_PORT__ check __SWIFT_TLS_N1__
     server __NODE2_NAME__ __NODE2_IP__:__SWIFT_PROXY_PORT__ check __SWIFT_TLS_N2__
     server __NODE3_NAME__ __NODE3_IP__:__SWIFT_PROXY_PORT__ check __SWIFT_TLS_N3__
+__EXTRA_SWIFT_SERVERS__

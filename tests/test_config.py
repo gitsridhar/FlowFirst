@@ -92,6 +92,55 @@ def test_host_lists_are_built_from_node_ips(monkeypatch):
     assert cfg.MARIADB_HOSTS == "10.0.0.1,10.0.0.2,10.0.0.3"
 
 
+def test_extra_nodes_default_is_empty(monkeypatch):
+    cfg = _reload(monkeypatch, EXTRA_NODES="", RABBITMQ_HOSTS="", MARIADB_HOSTS="", ZK_HOSTS="",
+                  NODE1_IP="10.0.0.1", NODE2_IP="10.0.0.2", NODE3_IP="10.0.0.3", RABBITMQ_PORT="5672",
+                  TLS_RABBITMQ_ENABLED="false", TLS_ZK_ENABLED="false",
+                  RABBITMQ_PASSWORD=_STRONG_RMQ, MARIADB_PASSWORD=_STRONG_MDB)
+    assert cfg.EXTRA_NODE_LIST == []
+    assert cfg.MARIADB_HOSTS == "10.0.0.1,10.0.0.2,10.0.0.3"
+
+
+def test_extra_nodes_are_appended_to_generated_host_lists(monkeypatch):
+    cfg = _reload(monkeypatch, EXTRA_NODES="extramgmtnode1:10.0.0.7,extramgmtnode2:10.0.0.8",
+                  RABBITMQ_HOSTS="", MARIADB_HOSTS="", ZK_HOSTS="",
+                  NODE1_IP="10.0.0.1", NODE2_IP="10.0.0.2", NODE3_IP="10.0.0.3", RABBITMQ_PORT="5672",
+                  TLS_RABBITMQ_ENABLED="false", TLS_ZK_ENABLED="false",
+                  RABBITMQ_PASSWORD=_STRONG_RMQ, MARIADB_PASSWORD=_STRONG_MDB)
+    assert cfg.EXTRA_NODE_LIST == [("extramgmtnode1", "10.0.0.7"), ("extramgmtnode2", "10.0.0.8")]
+    assert cfg.RABBITMQ_HOSTS == "10.0.0.1:5672,10.0.0.2:5672,10.0.0.3:5672,10.0.0.7:5672,10.0.0.8:5672"
+    assert cfg.MARIADB_HOSTS == "10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.7,10.0.0.8"
+    assert cfg.ZK_HOSTS.split(",")[-1].startswith("10.0.0.8:")
+    assert len(cfg.ZK_HOSTS.split(",")) == 5
+
+
+def test_explicit_host_lists_win_over_extra_nodes(monkeypatch):
+    cfg = _reload(monkeypatch, EXTRA_NODES="extramgmtnode1:10.0.0.7", MARIADB_HOSTS="10.9.9.9",
+                  RABBITMQ_PASSWORD=_STRONG_RMQ, MARIADB_PASSWORD=_STRONG_MDB)
+    assert cfg.MARIADB_HOSTS == "10.9.9.9"
+
+
+@pytest.mark.parametrize("raw", [
+    "node5:10.0.0.7",                                  # wrong name
+    "extramgmtnode1",                                  # no IP
+    "extramgmtnode1:10.0.0.999",                       # bad IP
+    "extramgmtnode1:host.example.com",                 # not an IPv4 literal
+    "extramgmtnode1:10.0.0.7,extramgmtnode1:10.0.0.8", # duplicate name
+    "extramgmtnode1:10.0.0.7,extramgmtnode2:10.0.0.7", # duplicate IP
+    "extramgmtnode1:10.0.0.7;rm -rf /",                # injection attempt
+])
+def test_parse_extra_nodes_rejects_bad_entries(raw):
+    with pytest.raises(ValueError) as err:
+        config.parse_extra_nodes(raw)
+    assert "rm -rf" not in str(err.value)
+
+
+def test_import_fails_closed_on_bad_extra_nodes(monkeypatch):
+    with pytest.raises(ValueError):
+        _reload(monkeypatch, EXTRA_NODES="bogus:1.2.3.4",
+                RABBITMQ_PASSWORD=_STRONG_RMQ, MARIADB_PASSWORD=_STRONG_MDB)
+
+
 def test_publish_connections_are_clamped(monkeypatch):
     assert _reload(monkeypatch, API_PUBLISH_CONNECTIONS="0").API_PUBLISH_CONNECTIONS == 1
     assert _reload(monkeypatch, API_PUBLISH_CONNECTIONS="999").API_PUBLISH_CONNECTIONS == 32

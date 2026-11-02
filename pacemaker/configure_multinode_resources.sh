@@ -17,6 +17,13 @@ if [ -f "${ROOT_DIR}/.env" ]; then
     set +a
 fi
 
+# Extra core nodes (ReadMe Scenario 76): they run the Process 1-4 clones and HAProxy too
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/extra_nodes_lib.sh"
+extra_nodes_load || exit 1
+CORE_NODE_COUNT=$((3 + EXTRA_COUNT))
+CORE_NODE_IPS=("${NODE1_IP}" "${NODE2_IP}" "${NODE3_IP}" "${EXTRA_IPS[@]+"${EXTRA_IPS[@]}"}")
+
 VIP="${1:-${FLOWFIRST_VIP:-}}"
 VIP_NIC="${2:-${VIP_NIC:-}}"
 VIP_CIDR_NETMASK="${3:-${VIP_CIDR_NETMASK:-24}}"
@@ -62,7 +69,7 @@ done
 
 # Stop any orphan standalone systemd units or manually launched background processes
 echo "  Stopping any standalone/unmanaged process instances on cluster nodes..."
-for node in "${NODE1_IP}" "${NODE2_IP}" "${NODE3_IP}"; do
+for node in "${CORE_NODE_IPS[@]}"; do
     ssh -o BatchMode=yes -o ConnectTimeout=3 "${node}" \
         "sudo systemctl stop flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4 2>/dev/null || true; \
          sudo pkill -f 'python.*process[1-4]' 2>/dev/null || true" 2>/dev/null || true
@@ -78,7 +85,7 @@ sudo pcs resource create flowfirst-vip ocf:heartbeat:IPaddr2 \
 
 # 3. Ensure HAProxy config is generated and valid across all 3 nodes before registering with Pacemaker
 echo "[3/5] Verifying HAProxy configuration across all cluster nodes..."
-for node in "${NODE1_IP}" "${NODE2_IP}" "${NODE3_IP}"; do
+for node in "${CORE_NODE_IPS[@]}"; do
     echo "  Configuring and verifying HAProxy on ${node}..."
     ssh -o BatchMode=yes -o ConnectTimeout=5 "${node}" \
         "cd /opt/flowfirst && sudo ./haproxy/setup_haproxy.sh" 2>/dev/null || true
@@ -100,28 +107,28 @@ sudo pcs resource create flowfirst-p4-res systemd:flowfirst-process4 \
     op start   interval=0s  timeout=60s \
     op stop    interval=0s  timeout=30s \
     op monitor interval=30s timeout=30s
-sudo pcs resource clone flowfirst-p4-res clone-max=3 clone-node-max=1
+sudo pcs resource clone flowfirst-p4-res clone-max="${CORE_NODE_COUNT}" clone-node-max=1
 
 # Forwarder (Process 3): Reflector & Forwarder
 sudo pcs resource create flowfirst-p3-res systemd:flowfirst-process3 \
     op start   interval=0s  timeout=60s \
     op stop    interval=0s  timeout=30s \
     op monitor interval=30s timeout=30s
-sudo pcs resource clone flowfirst-p3-res clone-max=3 clone-node-max=1
+sudo pcs resource clone flowfirst-p3-res clone-max="${CORE_NODE_COUNT}" clone-node-max=1
 
 # Transformer (Process 2): Examiner & Reflector
 sudo pcs resource create flowfirst-p2-res systemd:flowfirst-process2 \
     op start   interval=0s  timeout=60s \
     op stop    interval=0s  timeout=30s \
     op monitor interval=30s timeout=30s
-sudo pcs resource clone flowfirst-p2-res clone-max=3 clone-node-max=1
+sudo pcs resource clone flowfirst-p2-res clone-max="${CORE_NODE_COUNT}" clone-node-max=1
 
 # API Gateway (Process 1): REST API Producer (listening on :8080 on all 3 nodes)
 sudo pcs resource create flowfirst-p1-res systemd:flowfirst-process1 \
     op start   interval=0s  timeout=60s \
     op stop    interval=0s  timeout=30s \
     op monitor interval=30s timeout=30s
-sudo pcs resource clone flowfirst-p1-res clone-max=3 clone-node-max=1
+sudo pcs resource clone flowfirst-p1-res clone-max="${CORE_NODE_COUNT}" clone-node-max=1
 
 # 5. Order constraints: Processes start before HAProxy routes traffic
 echo "[5/5] Setting startup ordering constraints..."

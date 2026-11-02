@@ -17,6 +17,11 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
     set +a
 fi
 
+# Extra core nodes (ReadMe Scenario 76): one extra 'server' line per extramgmtnode<N> in each backend
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/extra_nodes_lib.sh"
+extra_nodes_load || exit 1
+
 NODE1_NAME="${NODE1_NAME:-node1}"
 NODE1_IP="${1:-${NODE1_IP:-}}"
 NODE2_NAME="${NODE2_NAME:-node2}"
@@ -132,6 +137,21 @@ if _is_true "${TLS_SWIFT_ENABLED}"; then
 fi
 _is_true "${TLS_RABBITMQ_ENABLED}" && HAP_RABBITMQ_BACKEND_PORT="${RABBITMQ_TLS_PORT}"
 
+# Build the extra 'server' lines (empty when EXTRA_NODES is blank, so the default config is unchanged)
+EXTRA_API_SERVERS="" EXTRA_MARIADB_SERVERS="" EXTRA_RABBITMQ_SERVERS="" EXTRA_SWIFT_SERVERS=""
+_nl=$'\n'
+for _i in "${!EXTRA_NAMES[@]}"; do
+    _n="${EXTRA_NAMES[$_i]}" _ip="${EXTRA_IPS[$_i]}"
+    _api_tls="" _swift_tls=""
+    _is_true "${TLS_API_ENABLED}" && _api_tls=" $(_server_tls "${_n}")"
+    _is_true "${TLS_SWIFT_ENABLED}" && _swift_tls=" $(_server_tls "${_n}")"
+    EXTRA_API_SERVERS+="${EXTRA_API_SERVERS:+${_nl}}    server ${_n} ${_ip}:${API_BACKEND_PORT} check${_api_tls}"
+    EXTRA_MARIADB_SERVERS+="${EXTRA_MARIADB_SERVERS:+${_nl}}    server ${_n} ${_ip}:${MARIADB_PORT} check"
+    EXTRA_RABBITMQ_SERVERS+="${EXTRA_RABBITMQ_SERVERS:+${_nl}}    server ${_n} ${_ip}:${HAP_RABBITMQ_BACKEND_PORT} check inter 5s fall 2 rise 2"
+    EXTRA_SWIFT_SERVERS+="${EXTRA_SWIFT_SERVERS:+${_nl}}    server ${_n} ${_ip}:${SWIFT_PROXY_PORT} check${_swift_tls}"
+done
+export EXTRA_API_SERVERS EXTRA_MARIADB_SERVERS EXTRA_RABBITMQ_SERVERS EXTRA_SWIFT_SERVERS
+
 render_config() {
     # '|' is the sed delimiter for the TLS values because they contain '/'. Their characters were validated above.
     sed \
@@ -168,7 +188,14 @@ render_config() {
         -e "s|__SWIFT_TLS_N1__|${HAP_SWIFT_TLS_N1}|g" \
         -e "s|__SWIFT_TLS_N2__|${HAP_SWIFT_TLS_N2}|g" \
         -e "s|__SWIFT_TLS_N3__|${HAP_SWIFT_TLS_N3}|g" \
-        "${SCRIPT_DIR}/haproxy.cfg.template"
+        "${SCRIPT_DIR}/haproxy.cfg.template" |
+    awk '
+        /^__EXTRA_(API|MARIADB|RABBITMQ|SWIFT)_SERVERS__$/ {
+            v = ENVIRON[substr($0, 3, length($0) - 4)]
+            if (v != "") print v
+            next
+        }
+        { print }'
 }
 
 # Test/review helper: print the generated config and stop (no sudo, no NIC check, nothing installed).

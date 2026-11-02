@@ -276,6 +276,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [71](#scenario-71-rabbitmq-queue-demo-across-nodes) | RabbitMQ Queue Demo Across Nodes | RabbitMQ | `scripts/rabbitmq_queue_demo.py`: work queue, competing consumers, fanout exchange, redelivery after a consumer crash |
 | [72](#scenario-72-greenthread-eventlet-demo-locally-and-across-nodes) | Greenthread (eventlet) Demo Locally and Across Nodes | Greenthreads | `scripts/greenthread_demo.py`: cooperative scheduling, many waits on one OS thread, `restart_on_error`, probing all nodes at once, a consumer + publisher greenthread per RabbitMQ node |
 | [73](#scenario-73-swift-object-storage-demo-across-nodes) | Swift Object Storage Demo Across Nodes | Swift | `scripts/swift_object_demo.py`: write through each proxy node, read from every node, container listing, object lifecycle, the `swift_storage.py` helpers via the VIP |
+| [74](#scenario-74-haproxy-load-balancing-demo-across-nodes) | HAProxy Load-Balancing Demo Across Nodes | HAProxy | `scripts/haproxy_lb_demo.py`: VIP vs node ports, HAProxy's own backend state, round-robin on REST/MariaDB/RabbitMQ/Swift, live `watch` during a node outage |
 
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
@@ -9618,6 +9619,195 @@ Rules that apply in this project (see `AGENTS.md`): build the connection only th
 
 ---
 
+
+## Scenario 74: HAProxy Load-Balancing Demo Across Nodes
+
+> **Goal:** show, with a small piece of code you can read, that HAProxy is in front of the cluster and what it does there. The script is `scripts/haproxy_lb_demo.py`. It talks to the Virtual IP (VIP) like a real client, talks to every node directly, and reads HAProxy's own counters from the stats page, then compares the three: which node answered, how the requests were shared, which servers HAProxy thinks are up, and what changes when a node is taken out. It covers all four load-balanced services (REST API, MariaDB, RabbitMQ, Swift). It is a demonstration, not a load test (Scenario 61 is). For the HAProxy installation see Phase 3; for the stats page see Scenario 9; for the VIP moving between nodes see Scenarios 8 and 15; for the log lines see Scenario 48.
+>
+> **Runs on:** node1, node2, node3, node4 or a workstation that can reach the VIP (REST `8080`, stats `9000`, MariaDB `3307`, RabbitMQ `5673`, Swift `8090`). The per-node checks in `status` and `api` also need the node addresses (API Gateway `8082`, MariaDB `3306`, RabbitMQ `5672`, Swift `8888`), and `.env` is the same as on the cluster nodes.
+
+### What HAProxy does here (so the output makes sense)
+
+| Service | VIP port (`.env`) | Mode | Backend name | Health check | Balancing |
+|---|---|---|---|---|---|
+| REST API (Process 1) | `8080` (`API_PORT`) | HTTP | `flowfirst_api_back` → node `:8082` | `GET /health` must return 200 | round-robin, `http-reuse never` (each request is balanced on its own) |
+| MariaDB Galera | `3307` (`MARIADB_LB_PORT`) | TCP | `mariadb_galera_back` → node `:3306` | TCP connect only | round-robin per connection |
+| RabbitMQ AMQP | `5673` (`RABBITMQ_LB_PORT`) | TCP | `rabbitmq_amqp_back` → node `:5672` (`:5671` with TLS) | TCP connect only | round-robin per connection |
+| Swift | `8090` (`SWIFT_LB_PORT`) | HTTP | `swift_back` → node `:8888` | `GET /healthcheck` must return 200 | round-robin |
+| Stats page | `9000` (`HAPROXY_STATS_PORT`) | HTTP | - | - | - |
+
+Checks run every 3 s (`inter 3s`; RabbitMQ every 5 s). A server is marked DOWN after 2 failed checks (`fall 2`, about 6 s) and UP again after 2 passed checks (`rise 2`). Only the node that currently holds the VIP runs HAProxy (Pacemaker starts it there, Scenario 8), so the VIP address is always answered by exactly one HAProxy.
+
+### What it does
+
+| Stage | What happens | Code |
+|---|---|---|
+| 1 `status` | Opens a TCP connection to every VIP port **and** to the same service on every node directly. Shows that HAProxy listens on the VIP and the real services listen on the nodes. | `stage_status()` |
+| 2 `backends` | Reads `/;csv` from the stats page and prints every server of the four backends: `UP`/`DOWN`, the last health-check result, total sessions, seconds in the current state. A backend passes when a majority of its servers is up. Needs `HAPROXY_STATS_PASS` (skipped, not failed, without it). | `stage_backends()`, `parse_stats_csv()` |
+| 3 `api` | Sends N `GET /health` requests (a new connection each) to the VIP. Every answer names the node that produced it (`"node"`). Shows the count per node, HAProxy's *new sessions* counter per server for the same period, and a direct probe of each node. A node HAProxy marks DOWN must receive nothing; a node in rotation must receive some; the shares must be even. | `stage_api()`, `is_balanced()` |
+| 4 `mariadb` | N MariaDB connections through the VIP, each running `SELECT @@hostname`. The host names are matched to nodes by connecting to each node directly first. HAProxy's counters per Galera server for the same period are shown next to them. | `stage_mariadb()`, `_stage_tcp()` |
+| 5 `rabbitmq` | N AMQP connections (open, authenticate, close) through the VIP. Shares are read from HAProxy's counters, because an AMQP client does not learn which broker it reached. | `stage_rabbitmq()` |
+| 6 `swift` | N `GET /healthcheck` requests through the VIP; shares from HAProxy's counters. | `stage_swift()` |
+| `watch` | One request per second through the VIP for `--seconds`: time, HTTP status, the node that answered, latency and HAProxy's view of the API backend. A line is flagged when a server changes state. Use it while you stop something (section D). | `cmd_watch()` |
+
+How the check works: the demo takes HAProxy's `stot` (total sessions) counter per server **before and after** its requests and subtracts. That is the number HAProxy itself says it gave each server, independent of what the application says. On the REST stage both numbers can be compared; on the other three the counters are the only evidence. Other clients use the same VIP at the same time, so the counters can move by more than the demo's own requests; the balance check therefore allows a small difference (`max(2, N/5)`).
+
+Safety properties of the demo:
+
+- **Read-only.** It creates no queue, row or object and sends no message. MariaDB sees `SELECT @@hostname`, RabbitMQ sees connect and close, Swift and the API see health URLs.
+- **TLS.** `TLS_API_ENABLED`, `TLS_MARIADB_ENABLED`, `TLS_RABBITMQ_ENABLED` and `TLS_SWIFT_ENABLED` are followed through `src.tls.tls` (the pipeline client certificate is presented, the server is verified against the FlowFirst CA, missing files stop the run). There is no insecure mode. With TLS on, the VIP certificate must be valid for the VIP address (`security/issue_all.sh` does this).
+- **Secrets.** `HAPROXY_STATS_PASS`, `MARIADB_PASSWORD` and `RABBITMQ_PASSWORD` are never printed. Errors print only the exception type or the HTTP status (`HTTP 401`), never a URL or host.
+- **The stats password travels in an HTTP `Authorization: Basic` header.** Without `TLS_API_ENABLED` the stats page is plain HTTP, so run the demo from inside the cluster network and not across an untrusted link. With `TLS_API_ENABLED=true` the stats page is HTTPS (`setup_haproxy.sh`).
+
+### Prerequisites
+
+- HAProxy running on the VIP holder under Pacemaker (Phase 5; `sudo pcs status | grep -A5 vip-haproxy-group`). Never start `haproxy.service` by hand.
+- `.env` has `FLOWFIRST_VIP`, `NODE1_IP`..`NODE3_IP`, `MARIADB_USER`/`MARIADB_PASSWORD`, `RABBITMQ_USER`/`RABBITMQ_PASSWORD`, and for the counters `HAPROXY_STATS_USER`/`HAPROXY_STATS_PASS`.
+- The server names in HAProxy are `NODE1_NAME`..`NODE3_NAME` (default `node1`..`node3`). The demo matches HAProxy's server lines to nodes by those names, and they must equal `NODE_NAME` on each node, which is what API Gateway (Process 1) reports as `"node"`.
+- Python 3 with the `.venv` active (`cd /opt/flowfirst && source .venv/bin/activate`).
+
+### A. Run the full demo
+
+```bash
+python3 scripts/haproxy_lb_demo.py
+python3 scripts/haproxy_lb_demo.py run --requests 30     # a longer run gives a clearer distribution
+```
+
+Expected output shape (illustrative: the layout is real, the numbers will differ; this sample was composed from the code, and the REST stage layout was checked against an in-process stand-in, not against a real HAProxy):
+
+```text
+== FlowFirst HAProxy Load-Balancing Demo ==
+VIP        : 10.10.1.200   (REST 8080, MariaDB 3307, RabbitMQ 5673, Swift 8090, stats 9000)
+nodes      : node1 (10.10.1.128), node2 (10.10.1.129), node3 (10.10.1.130)
+client     : node1
+requests   : 12 per stage
+tls mode   : API off, MariaDB off, RabbitMQ off, Swift off
+stats page : credentials set
+
+[1] VIP ports and node ports reachable
+    service        VIP endpoint      via VIP      direct node1  direct node2  direct node3  result
+    -------------  ----------------  -----------  ------------  ------------  ------------  ---------------------
+    REST API       10.10.1.200:8080  open (2 ms)  open :8082    open :8082    open :8082    PASS: HAProxy listens
+    MariaDB        10.10.1.200:3307  open (1 ms)  open :3306    open :3306    open :3306    PASS: HAProxy listens
+    RabbitMQ       10.10.1.200:5673  open (1 ms)  open :5672    open :5672    open :5672    PASS: HAProxy listens
+    Swift          10.10.1.200:8090  open (1 ms)  open :8888    open :8888    open :8888    PASS: HAProxy listens
+    HAProxy stats  10.10.1.200:9000  open (1 ms)  -             -             -             PASS: HAProxy listens
+
+[2] HAProxy's own view of every backend server
+    backend              server  status  last check  total sessions  state for (s)  result
+    -------------------  ------  ------  ----------  --------------  -------------  -----------------
+    flowfirst_api_back   node1   UP      L7OK        1480            86400          PASS: in rotation
+    flowfirst_api_back   node2   UP      L7OK        1479            86400          PASS: in rotation
+    flowfirst_api_back   node3   UP      L7OK        1481            86400          PASS: in rotation
+    mariadb_galera_back  node1   UP      L4OK        212             86400          PASS: in rotation
+    ...
+
+[3] REST API: round-robin over the nodes
+    node   direct /health  answered via VIP  share  HAProxy new sessions  result
+    -----  --------------  ----------------  -----  --------------------  -----------------------------------------
+    node1  200 (3 ms)      4                 33%    4                     PASS: served 4 request(s)
+    node2  200 (3 ms)      4                 33%    4                     PASS: served 4 request(s)
+    node3  200 (4 ms)      4                 33%    4                     PASS: served 4 request(s)
+    TOTAL  -               12/12             -      -                     PASS: round-robin, every request answered
+
+[4] MariaDB: connections shared over the Galera nodes
+    server  HAProxy status  new sessions     answered (SQL)  result
+    ------  --------------  ---------------  --------------  -----------------------------------------
+    node1   UP              4                4               PASS: received 4 session(s)
+    node2   UP              4                4               PASS: received 4 session(s)
+    node3   UP              4                4               PASS: received 4 session(s)
+    TOTAL   -               12 (we made 12)  -               PASS: every connection was counted by HAProxy
+
+[5] RabbitMQ: connections shared over the brokers
+    ...
+[6] Swift: requests shared over the Swift proxies
+    ...
+
+[7] Summary & Result
+    PASS: HAProxy balances the cluster nodes as configured.
+```
+
+The exit code is 0 on success, 1 if a stage failed, 2 for a usage error. If the stats password is not set, stage 2 prints `SKIP` and stages 4 to 6 report only that the connections were made (`no HAProxy counters`), because without the counters there is no evidence of the distribution.
+
+### B. Run one stage
+
+```bash
+python3 scripts/haproxy_lb_demo.py status
+python3 scripts/haproxy_lb_demo.py backends
+python3 scripts/haproxy_lb_demo.py api --requests 30
+python3 scripts/haproxy_lb_demo.py mariadb --requests 9
+python3 scripts/haproxy_lb_demo.py rabbitmq
+python3 scripts/haproxy_lb_demo.py swift
+python3 scripts/haproxy_lb_demo.py api --nodes node1,node2                 # judge only these nodes (node3 is being repaired)
+python3 scripts/haproxy_lb_demo.py api --vip 10.10.1.129 --api-port 8082    # aim at ONE node instead of HAProxy
+```
+
+The last line is a useful contrast: with no HAProxy in the path every request lands on one node and the stage fails the balance check, which is the problem the load balancer removes. Every port can be overridden (`--api-port`, `--stats-port`, `--mariadb-port`, `--rabbitmq-port`, `--swift-port`); the defaults come from `.env`.
+
+### C. The same facts by hand
+
+```bash
+set -a && source /opt/flowfirst/.env && set +a
+# Which node answers? Six requests through the VIP; "node" names the answering node (expect node1,node2,node3,node1,node2,node3)
+for i in 1 2 3 4 5 6; do curl -s http://${FLOWFIRST_VIP}:8080/health | jq -r .node; done
+# HAProxy's own table: backend, server, status, total sessions (the stats URI is "/", so the CSV is /;csv)
+curl -s -u "${HAPROXY_STATS_USER}:${HAPROXY_STATS_PASS}" "http://${FLOWFIRST_VIP}:9000/;csv" \
+  | awk -F, 'NR>1 && $2!="FRONTEND" && $2!="BACKEND" {printf "%-22s %-8s %-10s sessions=%s\n", $1, $2, $18, $8}'
+# Which node holds the VIP, i.e. where HAProxy runs right now
+sudo pcs status | grep -E "vip-haproxy-group|Started"
+# On the VIP holder, the same data from the HAProxy runtime socket (used in Scenario 53)
+echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | cut -d, -f1,2,8,18 | head -20
+```
+
+### D. Prove HAProxy reacts: take a node out and bring it back
+
+Terminal 1 watches the API through the VIP:
+
+```bash
+python3 scripts/haproxy_lb_demo.py watch --seconds 90
+```
+
+Terminal 2 stops API Gateway (Process 1) on one node, as in Scenario 11 (`pcs resource ban/clear` acts cluster-wide):
+
+```bash
+sudo pcs resource ban flowfirst-p1-res-clone node3
+# ...wait about 10 s and watch terminal 1...
+sudo pcs resource clear flowfirst-p1-res-clone
+```
+
+What you should see in terminal 1: the node column cycles node1, node2, node3. After the ban, requests that HAProxy has not yet written off may get a `502`/`503` or a longer latency for up to about 6 s (2 failed checks of 3 s) before the line `node3=DOWN   <-- HAProxy changed a server state` appears. From then on only node1 and node2 answer. After `clear`, `node3=UP` appears about 6 s after Process 1 listens again (`rise 2`) and node3 returns to the rotation. `option redispatch` and `retries 3` hide most single failures from the client, so a window with no errors at all is also normal. While node3 is out, run `python3 scripts/haproxy_lb_demo.py api`: node3 must show `PASS: out of rotation, got nothing` and node1/node2 about 50% each.
+
+To watch the **VIP** itself move, run `watch` and put the VIP holder into standby (Scenario 8: `sudo pcs node standby node1`, later `unstandby`). Requests fail while the VIP and HAProxy start on another node (seconds), so `watch` exits with code 1 for that run; that is the honest picture of a VIP failover, not a defect. Do not run both tests at once.
+
+If `backends` or `api` shows a node `DOWN` that you did not take out, the cause is on that node: `curl -s http://<node-ip>:8082/health` (with TLS, use the client certificate), `journalctl -u flowfirst-process1`, and the `last check` column (`L4CON` = port closed, `L7STS` = non-200 status, `L7TOUT` = no answer within `timeout check`).
+
+### How to use HAProxy in your own client
+
+Clients never address a node; they use the VIP and the LB ports from `.env`, which the project's helpers already do:
+
+```python
+# REST: call the VIP, not a node. HAProxy picks the node per request.
+import requests
+r = requests.post(f"http://{FLOWFIRST_VIP}:8080/api/flow1", json={"item_id": 1, "counter": 100}, timeout=10)
+r.json()["handled_by_node"]          # which node HAProxy chose
+
+# MariaDB: src/db/db.py connects to MARIADB_HOST (the VIP) and keeps its own node list for reconnect (config.MARIADB_HOSTS).
+# RabbitMQ: config.get_connection() tries the node list (NODE*_IP:5672) itself.
+# Swift: get_swift_connection() logs in at SWIFT_AUTH_URL = http://<VIP>:8090/auth/v1.0.
+```
+
+Rules that apply in this project (see `AGENTS.md`): API Gateway (Process 1) listens on `API_BACKEND_PORT` (8082), never on 8080, because HAProxy owns 8080; point HAProxy at `/health`, never at `/ready` (a node taken out of rotation would never reconnect its publisher); change HAProxy only through `haproxy/setup_haproxy.sh` and `haproxy.cfg.template`, validate with `haproxy -c`, and let Pacemaker start it.
+
+### Notes and limits
+
+- **Tested:** the HAProxy `stats;csv` parser (against a sample in HAProxy's column layout), the before/after counter arithmetic (including a counter reset), the up/down state reading, the balance rule, node resolution, error text that hides URLs and hosts, argument handling, and the "VIP unreachable" path (`tests/test_haproxy_lb_demo.py`, no HAProxy needed; it also checks that every backend name the script reads exists in `haproxy/haproxy.cfg.template`). The `api` and `watch` stages and the stats-page handling were also run on a workstation against a small in-process stand-in (three fake nodes, a round-robin front, a CSV stats page, a switch to mark a node down and up). That checks the script's logic and exit codes, but **it is not HAProxy**. **Not tested against a real HAProxy / Pacemaker cluster**: the `mariadb`, `rabbitmq` and `swift` stages, TLS on any stage, the real `stats;csv` column set of your HAProxy version, the failover timings in section D, and every output sample above. Run it once on a test cluster and correct this note when you have.
+- The `mariadb` stage matches `@@hostname` to nodes by connecting to each node directly first. If a node's MariaDB host name is not the node's name, the *answered* column shows that host name (or 0 for the node) instead; HAProxy's own counters in the same row stay valid.
+- The MariaDB and RabbitMQ checks are **TCP connects only**. A Galera node that accepts connections but is not `Synced` stays in the rotation, and so does a RabbitMQ node whose broker is up but paused by `pause_minority`. HAProxy showing `UP` means "the port accepts connections", not "the service is healthy"; use Scenarios 3, 4 and 13 for that.
+- Round-robin evenness is judged over a few requests with other clients on the same VIP, so a failure with a small `--requests` on a busy cluster is weak evidence. Repeat with `--requests 60` before drawing a conclusion. HAProxy can hold a node at a lower share with `weight` (not set in this configuration).
+- Scenario 1 section D reads `stats;csv` for a backend named `api_backend`. In the current template the backend is `flowfirst_api_back` and the stats URI is `/`, so the CSV is at `/;csv`. This scenario uses those names; the Scenario 1 command probably needs the same change (not changed here).
+- After the VIP moves, the new HAProxy starts with its counters at 0. The before/after subtraction handles that within a stage (a reset is shown as 0, never negative), but the *total sessions* column restarts from 0.
+
+---
 
 ## Authentication Architecture
 

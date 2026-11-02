@@ -17,9 +17,9 @@ the env vars are explicitly set. Reading `RABBITMQ_HOST` alone misses the multi-
 Setup scripts only install ZooKeeper. The znode tree (`/flowfirst/election`, `/flowfirst/config`,
 etc.) is lazily created by `zk.get_client()` → `_ensure_base_paths()` on first process startup.
 
-## Process 5 runs exclusively on Node 4 (remote worker)
-`systemd/install_services.sh --remote` installs only `flowfirst-process5.service` on Node 4.
-Nodes 1–3 run processes 1–4 only. Never install process5 on core cluster nodes.
+## Process 5 runs exclusively on Remote Node 1 (remote worker)
+`systemd/install_services.sh --remote` installs only `flowfirst-process5.service` on Remote Node 1.
+Mgmt Nodes 1–3 run processes 1–4 only. Never install process5 on core cluster nodes.
 
 ## `ReadMe.md` (capital R, no extension conflict) is the canonical ops reference
 58 numbered scenarios cover every failure mode, network partition, rolling reboot, and ZK/Galera

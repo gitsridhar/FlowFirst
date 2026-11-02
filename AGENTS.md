@@ -20,7 +20,7 @@ python -m src.application.process1   # REST API (listens on API_BACKEND_PORT=808
 python -m src.application.process2   # Message transformer/examiner
 python -m src.application.process3   # Acknowledgment sealer
 python -m src.application.process4   # MariaDB + Swift persistence engine
-python -m src.application.process5   # Remote worker (Node 4 only)
+python -m src.application.process5   # Remote worker (Remote Node 1 only)
 ```
 
 ## End-to-End Testing
@@ -100,7 +100,7 @@ All queues are declared durable via `setup_queues(channel)` before any publish/c
 - **Backups are encrypted and verified:** `scripts/backup_flowfirst.sh` / `restore_flowfirst.sh` (helpers in `backup_lib.sh`, ZooKeeper part in `zk_config_backup.py`) never write plaintext secrets to disk, need `--passphrase-file` (mode 600, 16+ chars), and the exit code is non-zero if any part failed. Back up state, not messages: queue contents are not backed up on purpose. Anything that restores must refuse to overwrite without an explicit flag. Passwords go to the MariaDB client through a mode-600 option file, never on the command line.
 - **Production readiness:** `scripts/preflight_check.py` (read-only, prints no secret) is the per-node check; keep it in step when you add a setting that has an unsafe value (add a PASS/WARN/FAIL line). The ReadMe chapter "Production Rollout Run-Book" is the procedure; it states that it has not been run on a real cluster, so update it when it is. Rotating a password means changing it in the service as well as in `.env`.
 - **Tests gate changes:** run `./scripts/ci_check.sh` before committing (pytest + ruff are in `requirements-dev.txt`, dev/CI hosts only). Add a test with every new rule in `authz.py`, `config.py` checks, `tls.py` or the API Gateway (Process 1) request handling. Tests that import `process1` must run it in a subprocess (`tests/_p1_harness.py`) because `gt.monkey_patch()` must never run inside pytest. Change dependencies only in `requirements*.in`, then run `scripts/update_requirements.sh`.
-- **Extra core nodes:** `EXTRA_NODES=extramgmtnode<N>:<IPv4>,...` in `.env` (blank by default, identical on every node, literal value) adds full core nodes beyond node1..node3; node4 stays the remote worker. `config.parse_extra_nodes()` (Python) and `scripts/extra_nodes_lib.sh` (bash) are the only parsers: both are strict allow-lists, fail closed, and never echo a bad value. `config.py` appends the extra IPs to the generated `RABBITMQ_HOSTS`/`MARIADB_HOSTS`/`ZK_HOSTS`; those stay blank. ZooKeeper `myid` and Swift zone for `extramgmtnode<N>` are `3+N` and are never reused. Any new script that lists the core nodes must `source scripts/extra_nodes_lib.sh` instead of hard-coding NODE1..3. Swift rings are only changed by `swift/add_ring_node.sh`; `setup_swift.sh` refuses to build rings on an extra node. Procedure: ReadMe Scenario 76 (`scripts/add_extra_node.sh`); tests: `tests/test_extra_nodes.py`, `tests/test_config.py`.
+- **Extra core nodes:** `EXTRA_NODES=extramgmtnode<N>:<IPv4>,...` in `.env` (blank by default, identical on every node, literal value) adds full core nodes beyond mgmtnode1..mgmtnode3; remotenode1 stays the remote worker. `config.parse_extra_nodes()` (Python) and `scripts/extra_nodes_lib.sh` (bash) are the only parsers: both are strict allow-lists, fail closed, and never echo a bad value. `config.py` appends the extra IPs to the generated `RABBITMQ_HOSTS`/`MARIADB_HOSTS`/`ZK_HOSTS`; those stay blank. ZooKeeper `myid` and Swift zone for `extramgmtnode<N>` are `3+N` and are never reused. Any new script that lists the core nodes must `source scripts/extra_nodes_lib.sh` instead of hard-coding NODE1..3. Swift rings are only changed by `swift/add_ring_node.sh`; `setup_swift.sh` refuses to build rings on an extra node. Procedure: ReadMe Scenario 76 (`scripts/add_extra_node.sh`); tests: `tests/test_extra_nodes.py`, `tests/test_config.py`.
 - **Publishing from API Gateway (Process 1) goes only through `_publish(routing_key, body)`.** It round-robins over `API_PUBLISH_CONNECTIONS` `_PublishSlot` objects, each holding its own connection, channel (confirms on, via `setup_queues`) and semaphore. Never publish on a shared channel, and never call `basic_publish` directly in `process1.py`. A slot reconnects itself after a broker restart.
 - **Request limits and generic errors:** API Gateway (Process 1) enforces `API_MAX_BODY_BYTES` (413), `API_MAX_BATCH_COUNT`, `API_MAX_LIST_LIMIT` and a per-connection `API_REQUEST_TIMEOUT_S`. Read POST bodies only through `_read_json_body()` and return errors only through `_fail()`, which logs the exception under a `request_id` and sends the client a generic message. Never put `str(e)`, a path, a URL or a host into a response body (`API_EXPOSE_ERROR_DETAILS` is the dev-only switch). Client-supplied numbers go through `int()`/`float()` inside the `ValueError`->400 handler.
 - With `TLS_API_ENABLED=true`, API Gateway (Process 1) still binds `API_BACKEND_PORT` (8082) but speaks HTTPS; HAProxy on 8080 requires client certificates (mutual TLS) and sets `X-SSL-Client-CN`
@@ -137,10 +137,10 @@ cp src/config/.env.example .env
 
 **Per-node `.env` variables** (only these two differ between nodes):
 
-| Variable | node1 | node2 | node3 | node4 |
+| Variable | mgmtnode1 | mgmtnode2 | mgmtnode3 | remotenode1 |
 |---|---|---|---|---|
-| `NODE_NAME` | `node1` | `node2` | `node3` | `node4` |
-| `CURRENT_NODE_IP` | `<node1-ip>` | `<node2-ip>` | `<node3-ip>` | `<node4-ip>` |
+| `NODE_NAME` | `mgmtnode1` | `mgmtnode2` | `mgmtnode3` | `remotenode1` |
+| `CURRENT_NODE_IP` | `<mgmtnode1-ip>` | `<mgmtnode2-ip>` | `<mgmtnode3-ip>` | `<remotenode1-ip>` |
 
 **Shared `.env` variables** (identical on all nodes — use literal IPs, never `${VAR}`):
 
@@ -154,16 +154,16 @@ cp src/config/.env.example .env
 | `MARIADB_HOSTS` | **Leave blank** — `src/config/config.py` builds from `NODE*_IP` |
 | `VIP_NIC` | Physical cluster NIC name on **this** node (e.g. `ens3`, `enp0s3`) — may differ per node |
 
-### Phase 1 — MariaDB Galera Cluster (Nodes 1–3)
+### Phase 1 — MariaDB Galera Cluster (Mgmt Nodes 1–3)
 > `setup_galera_node.sh` configures the official MariaDB repository (`mariadb_repo_setup`) to ensure the latest MariaDB Server and Galera packages are installed.
 ```bash
 cd /opt/flowfirst
 
-# On Node 1:
+# On Mgmt Node 1:
 sudo ./mariadb-galera/setup_galera_node.sh
 sudo ./mariadb-galera/bootstrap_galera.sh   # bootstraps primary node
 
-# On Nodes 2 and 3 (after Node 1 is bootstrapped):
+# On Nodes 2 and 3 (after Mgmt Node 1 is bootstrapped):
 sudo ./mariadb-galera/setup_galera_node.sh
 sudo systemctl enable --now mariadb          # joins the cluster
 
@@ -171,7 +171,7 @@ sudo systemctl enable --now mariadb          # joins the cluster
 ./mariadb-galera/check_galera_status.sh
 ```
 
-### Phase 1b — ZooKeeper Ensemble (Nodes 1–3)
+### Phase 1b — ZooKeeper Ensemble (Mgmt Nodes 1–3)
 > Install after Galera, before RabbitMQ. ZK must be in quorum before pipeline processes start.
 ```bash
 sudo ./zookeeper/setup_zookeeper.sh
@@ -194,7 +194,7 @@ ulimit -n 65536   # apply to current session immediately
 # systemd units already include LimitNOFILE=65536 — handled automatically under Pacemaker
 ```
 
-### Phase 2 — RabbitMQ (Nodes 1–3)
+### Phase 2 — RabbitMQ (Mgmt Nodes 1–3)
 > Chrony must be synced first. The install script checks `chronyd` and warns if not.
 ```bash
 sudo ./scripts/install_rabbitmq_rhel9.sh
@@ -204,10 +204,10 @@ sudo ./scripts/install_rabbitmq_rhel9.sh
 # Writes cluster_partition_handling = pause_minority to /etc/rabbitmq/rabbitmq.conf (before first start)
 ```
 
-### Phase 2b — Swift Object Store (Nodes 1–3)
-> Native RPM + systemd install (no containers). Node 4 runs no Swift server. Run after Phase 2, before Phase 3.
+### Phase 2b — Swift Object Store (Mgmt Nodes 1–3)
+> Native RPM + systemd install (no containers). Remote Node 1 runs no Swift server. Run after Phase 2, before Phase 3.
 ```bash
-# Generate ONCE, put the SAME values in .env on node1-3 (script refuses placeholders; never change after data is stored):
+# Generate ONCE, put the SAME values in .env on mgmtnode1-3 (script refuses placeholders; never change after data is stored):
 #   SWIFT_HASH_PATH_PREFIX=$(openssl rand -hex 16)   SWIFT_HASH_PATH_SUFFIX=$(openssl rand -hex 16)
 sudo ./swift/setup_swift.sh
 # Uses CentOS Cloud SIG OpenStack repo (SWIFT_OPENSTACK_RELEASE, default epoxy; repo written enabled=0)
@@ -217,7 +217,7 @@ sudo ./swift/setup_swift.sh
 ```
 > Swift proxy cannot use `:8080` (HAProxy API frontend). Ring changes are manual; the script keeps existing `*.ring.gz`.
 
-### Phase 3 — HAProxy (Nodes 1–3)
+### Phase 3 — HAProxy (Mgmt Nodes 1–3)
 > RHEL 9 uses predictable NIC names (ens3, ens192, enp0s3) — not eth0. `VIP_NIC` may differ per node.
 ```bash
 # Discover NIC name on each node:
@@ -246,16 +246,16 @@ sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 
 ### Phase 4 — Systemd Units
 ```bash
-# Nodes 1–3: install units for P1–P4, then disable direct boot (Pacemaker manages lifecycle)
+# Mgmt Nodes 1–3: install units for P1–P4, then disable direct boot (Pacemaker manages lifecycle)
 sudo ./systemd/install_services.sh /opt/flowfirst
 sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4
 
-# Node 4 only: install and ENABLE P5 directly (no Pacemaker on Node 4)
+# Remote Node 1 only: install and ENABLE P5 directly (no Pacemaker on Remote Node 1)
 sudo ./systemd/install_services.sh /opt/flowfirst --remote
 sudo systemctl enable --now flowfirst-process5
 ```
 
-### Phase 5 — Pacemaker Cluster & VIP (Nodes 1–3)
+### Phase 5 — Pacemaker Cluster & VIP (Mgmt Nodes 1–3)
 ```bash
 # Step 5a — Run on ALL THREE nodes first (installs pcs/corosync/haproxy, starts pcsd on port 2224):
 sudo ./pacemaker/setup_multinode_cluster.sh --prepare-node
@@ -278,7 +278,7 @@ sudo ss -tlnp | grep haproxy
 ./security/init_ca.sh && ./security/issue_all.sh
 ./security/install_certs.sh                       # or --stage DIR to review first
 
-# Nodes 1–3, one node at a time (plain listeners stay on):
+# Mgmt Nodes 1–3, one node at a time (plain listeners stay on):
 sudo ./security/enable_rabbitmq_tls.sh
 sudo ./security/enable_zookeeper_tls.sh
 sudo ./security/enable_mariadb_tls.sh

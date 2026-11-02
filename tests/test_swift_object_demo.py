@@ -16,15 +16,15 @@ def demo():
 
 
 TARGETS = {
-    "node1": "http://10.0.0.1:8888/auth/v1.0",
-    "node2": "http://10.0.0.2:8888/auth/v1.0",
-    "node3": "http://10.0.0.3:8888/auth/v1.0",
+    "mgmtnode1": "http://10.0.0.1:8888/auth/v1.0",
+    "mgmtnode2": "http://10.0.0.2:8888/auth/v1.0",
+    "mgmtnode3": "http://10.0.0.3:8888/auth/v1.0",
     "vip": "http://10.0.0.9:8090/auth/v1.0",
 }
 
 
 def test_resolve_named_host_and_url(demo):
-    assert demo.resolve_target("node2", TARGETS) == ("node2", "http://10.0.0.2:8888/auth/v1.0")
+    assert demo.resolve_target("mgmtnode2", TARGETS) == ("mgmtnode2", "http://10.0.0.2:8888/auth/v1.0")
     assert demo.resolve_target("vip", TARGETS) == ("vip", "http://10.0.0.9:8090/auth/v1.0")
     label, url = demo.resolve_target("192.168.1.50:8890", TARGETS)
     assert label == "192.168.1.50:8890" and url.endswith("://192.168.1.50:8890/auth/v1.0")
@@ -44,8 +44,8 @@ def test_resolve_invalid_port(demo):
 
 
 def test_resolve_targets_drops_duplicate_urls(demo):
-    res = demo.resolve_targets("node1,node2,node1", TARGETS)
-    assert [label for label, _ in res] == ["node1", "node2"]
+    res = demo.resolve_targets("mgmtnode1,mgmtnode2,mgmtnode1", TARGETS)
+    assert [label for label, _ in res] == ["mgmtnode1", "mgmtnode2"]
 
 
 def test_endpoint_of(demo):
@@ -90,7 +90,7 @@ def test_wait_for_returns_when_done_and_on_timeout(demo):
 
 def test_render_table_aligns_and_handles_none(demo):
     out = demo.render_table(
-        [{"a": "node1", "b": None}, {"a": "node2", "b": "5.1"}],
+        [{"a": "mgmtnode1", "b": None}, {"a": "mgmtnode2", "b": "5.1"}],
         [("a", "Node"), ("b", "Login")],
     )
     lines = out.splitlines()
@@ -108,7 +108,7 @@ def test_every_run_stage_has_a_table_definition(demo):
 def test_cli_parsing(demo):
     p = demo.build_parser()
     assert p.parse_args(["run", "--keep"]).keep is True
-    assert p.parse_args(["status", "--nodes", "node1,node2"]).nodes == "node1,node2"
+    assert p.parse_args(["status", "--nodes", "mgmtnode1,mgmtnode2"]).nodes == "mgmtnode1,mgmtnode2"
     assert p.parse_args(["cleanup", "--run-id", "abc"]).func is demo.cmd_cleanup
     with pytest.raises(SystemExit):
         p.parse_args(["cleanup"])        # --run-id is required

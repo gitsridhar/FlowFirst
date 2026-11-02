@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# FlowFirst - enable TLS on a ZooKeeper node (run on each of node1-3, as a user with sudo).
+# FlowFirst - enable TLS on a ZooKeeper node (run on each of mgmtnode1-3, as a user with sudo).
 #
 #   sudo ./security/enable_zookeeper_tls.sh                 add the TLS client port (secureClientPort, default 2281)
 #                                                           with a REQUIRED client certificate; the plain port stays on
@@ -20,7 +20,7 @@
 # The settings live in a marked block at the end of zoo.cfg (BEGIN/END FLOWFIRST TLS); re-running replaces it.
 # The first run saves zoo.cfg.pre-tls for undo.
 #
-# Safe order: run on node1, node2, node3 one at a time (a restart makes that node rejoin the quorum; two of three
+# Safe order: run on mgmtnode1, mgmtnode2, mgmtnode3 one at a time (a restart makes that node rejoin the quorum; two of three
 # must stay up). Then set TLS_ZK_ENABLED=true in .env on every node (ZK_TLS_CLIENT_PORT must match) and restart the
 # processes. Only then think about --disable-plain.
 #   --quorum needs one maintenance window: a server using TLS quorum cannot talk to one that does not.

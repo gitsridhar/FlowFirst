@@ -9,41 +9,41 @@ Links back to the relevant section of [ReadMe.md](../ReadMe.md) are provided und
 
 > Source: [ReadMe.md § Multi-Node Cluster Architecture](../ReadMe.md#multi-node-cluster-architecture--network-topology)
 
-Shows the 4-node cluster layout: Nodes 1–3 running all pipeline processes, Galera, RabbitMQ, ZooKeeper and HAProxy; Remote Node 4 running the Remote Worker only; the Pacemaker Virtual IP as the single entry point; and HAProxy round-robin to API Gateway instances.
+Shows the 4-node cluster layout: Mgmt Nodes 1–3 running all pipeline processes, Galera, RabbitMQ, ZooKeeper and HAProxy; Remote Node 1 running the Remote Worker only; the Pacemaker Virtual IP as the single entry point; and HAProxy round-robin to API Gateway instances.
 
 ```mermaid
 graph TD
     Client["Client / curl"] -->|"VIP:8080"| VIP["Pacemaker VIP"]
     VIP --> HAProxy["HAProxy\nREST :8080 round-robin\nSQL :3307 load-balanced\nRMQ :5673 load-balanced\nSwift :8090 load-balanced"]
 
-    subgraph Node1[Node 1]
+    subgraph Mgmtnode1[Mgmt Node 1]
         P1a["API Gateway"]
         P2a["Transformer"]
         P3a["Forwarder"]
         P4a["DB Updater"]
         RMQ1[("RabbitMQ")]
-        GAL1[("Galera Node 1")]
+        GAL1[("Galera Mgmt Node 1")]
     end
 
-    subgraph Node2[Node 2]
+    subgraph Mgmtnode2[Mgmt Node 2]
         P1b["API Gateway"]
         P2b["Transformer"]
         P3b["Forwarder"]
         P4b["DB Updater"]
         RMQ2[("RabbitMQ")]
-        GAL2[("Galera Node 2")]
+        GAL2[("Galera Mgmt Node 2")]
     end
 
-    subgraph Node3[Node 3]
+    subgraph Mgmtnode3[Mgmt Node 3]
         P1c["API Gateway"]
         P2c["Transformer"]
         P3c["Forwarder"]
         P4c["DB Updater"]
         RMQ3[("RabbitMQ")]
-        GAL3[("Galera Node 3")]
+        GAL3[("Galera Mgmt Node 3")]
     end
 
-    subgraph Node4[Remote Node 4]
+    subgraph Remotenode1[Remote Node 1]
         P5["Remote Worker"]
     end
 
@@ -210,8 +210,8 @@ Used by: Swift proxy server"]
         ISSUE_PIPE["<b>nodeN-pipeline</b>  [client]  ×3
 Used by: Processes 1–4 client identity on each node
 Also used by: HAProxy towards API Gateway (Process 1) backends"]
-        ISSUE_N4["<b>node4-pipeline</b>  [client]
-Used by: Remote Worker (Process 5) client identity (remote node4)"]
+        ISSUE_N4["<b>remotenode1-pipeline</b>  [client]
+Used by: Remote Worker (Process 5) client identity (remote remotenode1)"]
         ISSUE_ADM["<b>admin-client</b>  [client]
 Used by: operators / curl for mTLS REST API access"]
 
@@ -229,7 +229,7 @@ Used by: operators / curl for mTLS REST API access"]
     %% ── Stage 2: Distribution ────────────────────────────────────────
     subgraph DIST ["② Distribute — security/install_certs.sh (SSH+sudo → /etc/flowfirst/tls/)"]
         direction LR
-        N1["<b>Node 1</b>
+        N1["<b>Mgmt Node 1</b>
 ca.crt  ca.crl
 api/api.{crt,key}
 pipeline/pipeline.{crt,key}
@@ -238,11 +238,11 @@ rabbitmq/rabbitmq.{crt,key}
 mariadb/mariadb.{crt,key}
 zookeeper/zookeeper.{crt,key}
 swift/swift.{crt,key}"]
-        N2["<b>Node 2</b>
-(same set, node2 leaf certs)"]
-        N3["<b>Node 3</b>
-(same set, node3 leaf certs)"]
-        N4["<b>Node 4</b>
+        N2["<b>Mgmt Node 2</b>
+(same set, mgmtnode2 leaf certs)"]
+        N3["<b>Mgmt Node 3</b>
+(same set, mgmtnode3 leaf certs)"]
+        N4["<b>Remote Node 1</b>
 ca.crt  ca.crl
 pipeline/pipeline.{crt,key}"]
     end
@@ -271,8 +271,8 @@ src/tls/tls.py → server_context()"])
             P24(["Processes 2–4
 presents nodeN-pipeline.crt (client)
 tls.py → client_context()"])
-            P5(["Remote Worker (Process 5)  (node4)
-presents node4-pipeline.crt (client)
+            P5(["Remote Worker (Process 5)  (remotenode1)
+presents remotenode1-pipeline.crt (client)
 tls.py → client_context()"])
         end
         subgraph INFRA ["Infrastructure  (nodes 1–3)"]
@@ -342,7 +342,7 @@ flowchart TD
     subgraph ADMIN ["Admin / CA host  (pki/ kept here, never on nodes)"]
         direction TB
         INIT["<b>security/init_ca.sh</b>\nGenerate RSA-4096 root CA\n(ca.key encrypted AES-256, ca.crt public)\nca.crl created at the same time"]
-        ISSUE["<b>security/issue_all.sh</b>\nIssues 21 leaf certs under pki/issued/\n• flowfirst-vip  (server)\n• node1-3: -api -rabbitmq -mariadb\n  -zookeeper -swift (server/peer)\n  -pipeline (client)\n• node4-pipeline (client)\n• admin-client (client)"]
+        ISSUE["<b>security/issue_all.sh</b>\nIssues 21 leaf certs under pki/issued/\n• flowfirst-vip  (server)\n• mgmtnode1-3: -api -rabbitmq -mariadb\n  -zookeeper -swift (server/peer)\n  -pipeline (client)\n• remotenode1-pipeline (client)\n• admin-client (client)"]
         INSTALL["<b>security/install_certs.sh</b>\nSSH+sudo: copies only the files\neach node needs into /etc/flowfirst/tls/"]
         REFRESH["<b>security/refresh_crl.sh</b>\n(weekly cron) re-sign the CRL\nbefore nextUpdate expires"]
         REVOKE["<b>security/revoke_cert.sh NAME</b>\nMark cert revoked → regen CRL\nThen re-run install_certs.sh --crl-only"]
@@ -352,7 +352,7 @@ flowchart TD
         REVOKE -->|"install_certs.sh --crl-only"| INSTALL
     end
 
-    subgraph NODES ["Cluster nodes (node1 – node3)  /etc/flowfirst/tls/"]
+    subgraph NODES ["Cluster nodes (mgmtnode1 – mgmtnode3)  /etc/flowfirst/tls/"]
         direction TB
         SHARED["ca.crt  ca.crl  (all nodes, root:root 644)"]
         API_F["api/api.{crt,key}  → API Gateway (Process 1) HTTPS listener  (flowuser)"]
@@ -364,13 +364,13 @@ flowchart TD
         SW_F["swift/swift.{crt,key}  (swift)"]
     end
 
-    subgraph NODE4 ["Node 4  /etc/flowfirst/tls/"]
+    subgraph NODE4 ["Remote Node 1  /etc/flowfirst/tls/"]
         N4_SHARED["ca.crt  ca.crl"]
         N4_PIPE["pipeline/pipeline.{crt,key}  → Remote Worker (Process 5) client identity"]
     end
 
-    INSTALL -->|"node1-3"| NODES
-    INSTALL -->|"node4"| NODE4
+    INSTALL -->|"mgmtnode1-3"| NODES
+    INSTALL -->|"remotenode1"| NODE4
 ```
 
 ---
@@ -387,7 +387,7 @@ flowchart LR
     HA(["HAProxy  :8080\nvip.pem server\nbackend.pem client"])
     P1(["API Gateway (Process 1)  :8082\napi.crt server"])
     P25(["Processes 2–4\npipeline.crt client"])
-    P5(["Remote Worker (Process 5) (node4)\npipeline.crt client"])
+    P5(["Remote Worker (Process 5) (remotenode1)\npipeline.crt client"])
     RMQ(["RabbitMQ  :5671\nrabbitmq.crt server"])
     MDB(["MariaDB  :3306/3307\nmariadb.crt server"])
     ZK(["ZooKeeper  :2281\nzookeeper.crt server"])

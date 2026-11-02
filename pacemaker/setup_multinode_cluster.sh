@@ -5,7 +5,7 @@ set -euo pipefail
 # FlowFirst - Multi-Node Pacemaker Cluster Setup Script (3 Nodes)
 # Run on NODE 1 ONLY after running the prerequisites on all three nodes.
 #
-# PRE-REQUISITE — run these commands on EVERY node (node1, node2, node3)
+# PRE-REQUISITE — run these commands on EVERY node (mgmtnode1, mgmtnode2, mgmtnode3)
 # before executing this script:
 #
 #   sudo ./pacemaker/setup_multinode_cluster.sh --prepare-node
@@ -13,7 +13,7 @@ set -euo pipefail
 # That flag installs packages, starts pcsd, opens firewall ports, sets the
 # hacluster password, and adds /etc/hosts entries.  It can be run safely
 # multiple times.  Once all three nodes are prepared, run this script without
-# flags on node1 to complete the cluster initialisation.
+# flags on mgmtnode1 to complete the cluster initialisation.
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,11 +28,11 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
 fi
 
 CLUSTER_NAME="${CLUSTER_NAME:-flowfirst_cluster}"
-NODE1_NAME="${NODE1_NAME:-node1}"
+NODE1_NAME="${NODE1_NAME:-mgmtnode1}"
 NODE1_IP="${NODE1_IP:-}"
-NODE2_NAME="${NODE2_NAME:-node2}"
+NODE2_NAME="${NODE2_NAME:-mgmtnode2}"
 NODE2_IP="${NODE2_IP:-}"
-NODE3_NAME="${NODE3_NAME:-node3}"
+NODE3_NAME="${NODE3_NAME:-mgmtnode3}"
 NODE3_IP="${NODE3_IP:-}"
 HACLUSTER_PASS="${HACLUSTER_PASS:-hacluster123}"
 
@@ -122,7 +122,7 @@ HAREPO
 
 # ---------------------------------------------------------------------------
 # prepare_node — install packages, open firewall, set password, /etc/hosts
-# Run this on EVERY node before running the cluster init on node1.
+# Run this on EVERY node before running the cluster init on mgmtnode1.
 # ---------------------------------------------------------------------------
 prepare_node() {
     echo "============================================================"
@@ -195,14 +195,14 @@ prepare_node() {
     echo ""
     echo "============================================================"
     echo " Node preparation complete."
-    echo " Run this on node2 and node3 as well, then run:"
+    echo " Run this on mgmtnode2 and mgmtnode3 as well, then run:"
     echo "   sudo ./pacemaker/setup_multinode_cluster.sh"
-    echo " on node1 only to complete cluster initialisation."
+    echo " on mgmtnode1 only to complete cluster initialisation."
     echo "============================================================"
 }
 
 # ---------------------------------------------------------------------------
-# preflight_checks — verify node2 and node3 are reachable on port 2224
+# preflight_checks — verify mgmtnode2 and mgmtnode3 are reachable on port 2224
 # before attempting pcs host auth
 # ---------------------------------------------------------------------------
 preflight_checks() {
@@ -252,13 +252,13 @@ if [[ "${1:-}" == "--prepare-node" ]]; then
     exit 0
 fi
 
-# Full cluster init — runs on node1 only
+# Full cluster init — runs on mgmtnode1 only
 echo "=================================================================="
 echo " Setting up 3-Node Pacemaker High Availability Cluster"
 echo " Cluster: ${CLUSTER_NAME}"
-echo " Node 1:  ${NODE1_NAME} (${NODE1_IP})"
-echo " Node 2:  ${NODE2_NAME} (${NODE2_IP})"
-echo " Node 3:  ${NODE3_NAME} (${NODE3_IP})"
+echo " Mgmt Node 1:  ${NODE1_NAME} (${NODE1_IP})"
+echo " Mgmt Node 2:  ${NODE2_NAME} (${NODE2_IP})"
+echo " Mgmt Node 3:  ${NODE3_NAME} (${NODE3_IP})"
 echo "=================================================================="
 
 # 0. Pre-flight: verify all nodes reachable on port 2224

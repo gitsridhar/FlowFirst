@@ -23,9 +23,9 @@ def _res(rid, nodes, failed="false"):
     return f'<resource id="{rid}" resource_agent="x" role="Started" active="{active}" failed="{failed}">{inner}</resource>'
 
 
-def make_xml(vip="node1", standby=(), offline=(), clones=None, quorum="true", failures=(), dc="node1", failed=()):
+def make_xml(vip="mgmtnode1", standby=(), offline=(), clones=None, quorum="true", failures=(), dc="mgmtnode1", failed=()):
     """Shape of 'crm_mon -1 -r --output-as=xml' (only the attributes the demo reads)."""
-    names = ["node1", "node2", "node3"]
+    names = ["mgmtnode1", "mgmtnode2", "mgmtnode3"]
     eligible = [n for n in names if n not in standby and n not in offline]
     nodes = "".join(
         f'<node name="{n}" id="{i}" online="{"false" if n in offline else "true"}" standby="{"true" if n in standby else "false"}" '
@@ -38,7 +38,7 @@ def make_xml(vip="node1", standby=(), offline=(), clones=None, quorum="true", fa
         rid = f"flowfirst-p{n}-res"
         body += f'<clone id="{rid}-clone">' + "".join(
             _res(rid, [h], "true" if rid in failed else "false") for h in clones.get(rid, eligible)) + "</clone>"
-    fails = "".join(f'<failure op_key="{k}" node="node2"/>' for k in failures)
+    fails = "".join(f'<failure op_key="{k}" node="mgmtnode2"/>' for k in failures)
     return (f'<pacemaker-result api-version="2.29"><summary><current_dc present="true" name="{dc}" with_quorum="{quorum}"/></summary>'
             f"<nodes>{nodes}</nodes><resources>{group}{body}</resources><failures>{fails}</failures></pacemaker-result>")
 
@@ -51,17 +51,17 @@ def view_of(demo, **kw):
 
 def test_parse_view_healthy_cluster(demo):
     v = view_of(demo)
-    assert [n.name for n in v.nodes] == ["node1", "node2", "node3"]
-    assert v.dc == "node1" and v.quorum is True and v.nodes[0].is_dc
-    assert v.running["flowfirst-vip"] == ["node1"] and v.running["haproxy-res"] == ["node1"]
-    assert v.running["flowfirst-p3-res"] == ["node1", "node2", "node3"]    # clone instances share one id and are merged
+    assert [n.name for n in v.nodes] == ["mgmtnode1", "mgmtnode2", "mgmtnode3"]
+    assert v.dc == "mgmtnode1" and v.quorum is True and v.nodes[0].is_dc
+    assert v.running["flowfirst-vip"] == ["mgmtnode1"] and v.running["haproxy-res"] == ["mgmtnode1"]
+    assert v.running["flowfirst-p3-res"] == ["mgmtnode1", "mgmtnode2", "mgmtnode3"]    # clone instances share one id and are merged
     assert v.failed == [] and v.failures == []
 
 
 def test_parse_view_standby_failed_and_no_quorum(demo):
-    v = view_of(demo, standby=("node3",), quorum="false", failures=("flowfirst-p2-res_monitor_30000",), failed=("flowfirst-p2-res",))
+    v = view_of(demo, standby=("mgmtnode3",), quorum="false", failures=("flowfirst-p2-res_monitor_30000",), failed=("flowfirst-p2-res",))
     assert v.nodes[2].standby and v.quorum is False
-    assert v.failed == ["flowfirst-p2-res"] and v.failures == ["flowfirst-p2-res_monitor_30000@node2"]
+    assert v.failed == ["flowfirst-p2-res"] and v.failures == ["flowfirst-p2-res_monitor_30000@mgmtnode2"]
 
 
 def test_parse_view_rejects_garbage(demo):
@@ -78,24 +78,24 @@ def test_parse_view_no_dc_means_no_quorum(demo):
 # ---------------------------------------------------------------- placement rules
 
 def test_eligible_nodes_skip_standby_and_offline(demo):
-    assert demo.eligible_nodes(view_of(demo, standby=("node2",), offline=("node3",))) == ["node1"]
+    assert demo.eligible_nodes(view_of(demo, standby=("mgmtnode2",), offline=("mgmtnode3",))) == ["mgmtnode1"]
 
 
 def test_vip_holder_and_expected_placement(demo):
-    v = view_of(demo, vip="node2")
-    assert demo.vip_holder(v) == "node2"
-    assert demo.expected_placement(v, "haproxy-res") == ["node2"]
-    assert demo.expected_placement(v, "flowfirst-p1-res") == ["node1", "node2", "node3"]
+    v = view_of(demo, vip="mgmtnode2")
+    assert demo.vip_holder(v) == "mgmtnode2"
+    assert demo.expected_placement(v, "haproxy-res") == ["mgmtnode2"]
+    assert demo.expected_placement(v, "flowfirst-p1-res") == ["mgmtnode1", "mgmtnode2", "mgmtnode3"]
     assert demo.vip_holder(view_of(demo, vip=None)) is None
 
 
 def test_vip_holder_none_when_on_two_nodes(demo):
-    v = view_of(demo)._replace(running={"flowfirst-vip": ["node1", "node2"]})
+    v = view_of(demo)._replace(running={"flowfirst-vip": ["mgmtnode1", "mgmtnode2"]})
     assert demo.vip_holder(v) is None
 
 
 def test_placement_signature_changes_when_a_resource_moves(demo):
-    assert demo.placement_signature(view_of(demo, vip="node1")) != demo.placement_signature(view_of(demo, vip="node2"))
+    assert demo.placement_signature(view_of(demo, vip="mgmtnode1")) != demo.placement_signature(view_of(demo, vip="mgmtnode2"))
     assert demo.placement_signature(view_of(demo)) == demo.placement_signature(view_of(demo))
 
 
@@ -107,10 +107,10 @@ def test_preflight_passes_on_healthy_cluster(demo):
 
 @pytest.mark.parametrize("kw, text", [
     ({"quorum": "false"}, "no quorum"),
-    ({"standby": ("node2",)}, "node2 is already in standby"),
-    ({"offline": ("node3",)}, "node3 is offline"),
+    ({"standby": ("mgmtnode2",)}, "mgmtnode2 is already in standby"),
+    ({"offline": ("mgmtnode3",)}, "mgmtnode3 is offline"),
     ({"vip": None}, "VIP is not running on exactly one node"),
-    ({"clones": {"flowfirst-p4-res": ["node1", "node2"]}}, "DB Updater (Process 4) is not running on every active node"),
+    ({"clones": {"flowfirst-p4-res": ["mgmtnode1", "mgmtnode2"]}}, "DB Updater (Process 4) is not running on every active node"),
     ({"failures": ("x_monitor_0",)}, "failed resources or failed actions"),
     ({"failed": ("flowfirst-p1-res",)}, "failed resources or failed actions"),
 ])
@@ -137,18 +137,18 @@ def test_parse_node_report_short_output(demo):
 
 
 def test_service_mismatches(demo):
-    v = view_of(demo, clones={"flowfirst-p3-res": ["node2", "node3"]})          # Pacemaker: p3 not on node1
+    v = view_of(demo, clones={"flowfirst-p3-res": ["mgmtnode2", "mgmtnode3"]})          # Pacemaker: p3 not on mgmtnode1
     r = demo.parse_node_report(REPORT)                                         # systemd: p3 inactive on this node
-    assert demo.service_mismatches(v, "node1", r) == []
-    v2 = view_of(demo)                                                         # Pacemaker says p3 runs on node1 ...
-    assert demo.service_mismatches(v2, "node1", r) == ["flowfirst-process3 is inactive but Pacemaker says it runs here"]
-    v3 = view_of(demo, clones={"flowfirst-p4-res": ["node2", "node3"]})        # ... or says p4 must NOT run on node1
-    assert demo.service_mismatches(v3, "node1", r)[-1] == "flowfirst-process4 is active but Pacemaker says it does not run here"
+    assert demo.service_mismatches(v, "mgmtnode1", r) == []
+    v2 = view_of(demo)                                                         # Pacemaker says p3 runs on mgmtnode1 ...
+    assert demo.service_mismatches(v2, "mgmtnode1", r) == ["flowfirst-process3 is inactive but Pacemaker says it runs here"]
+    v3 = view_of(demo, clones={"flowfirst-p4-res": ["mgmtnode2", "mgmtnode3"]})        # ... or says p4 must NOT run on mgmtnode1
+    assert demo.service_mismatches(v3, "mgmtnode1", r)[-1] == "flowfirst-process4 is active but Pacemaker says it does not run here"
 
 
 def test_service_mismatches_flags_a_stopped_cluster_daemon(demo):
     r = demo.parse_node_report(REPORT.replace("active\nactive\nactive", "active\ninactive\nactive", 1))
-    assert "pacemaker is inactive" in demo.service_mismatches(view_of(demo, clones={"flowfirst-p3-res": ["node2", "node3"]}), "node1", r)
+    assert "pacemaker is inactive" in demo.service_mismatches(view_of(demo, clones={"flowfirst-p3-res": ["mgmtnode2", "mgmtnode3"]}), "mgmtnode1", r)
 
 
 # ---------------------------------------------------------------- helpers
@@ -163,7 +163,7 @@ def test_wait_until_with_fake_clock(demo, monkeypatch):
 
 
 def test_render_table_handles_none(demo):
-    out = demo.render_table([{"a": "node1", "b": None}], [("a", "Node"), ("b", "State")])
+    out = demo.render_table([{"a": "mgmtnode1", "b": None}], [("a", "Node"), ("b", "State")])
     assert "None" not in out and out.splitlines()[0].startswith("Node")
 
 
@@ -173,7 +173,7 @@ def test_describe_error_hides_message(demo):
 
 
 def test_safe_rejects_option_injection_and_spaces(demo):
-    for bad in ("-rf", "node1 node2", "a;b", "", "$(x)"):
+    for bad in ("-rf", "mgmtnode1 mgmtnode2", "a;b", "", "$(x)"):
         with pytest.raises(ValueError):
             demo._safe(bad, "x")
     assert demo._safe("node-1.example", "x") == "node-1.example"
@@ -198,12 +198,12 @@ class FakeCluster:
 
     def __init__(self, demo, delay=2):
         self.demo = demo
-        self.standby, self.banned, self.vip, self.calls = set(), {}, "node1", []
+        self.standby, self.banned, self.vip, self.calls = set(), {}, "mgmtnode1", []
         self.delay, self.ticks_since = delay, None
         self.fail_unstandby = False
 
     def view(self):
-        eligible = [n for n in ("node1", "node2", "node3") if n not in self.standby]
+        eligible = [n for n in ("mgmtnode1", "mgmtnode2", "mgmtnode3") if n not in self.standby]
         if self.ticks_since is not None:
             self.ticks_since += 1
             if self.ticks_since >= self.delay and self.vip in self.standby:
@@ -251,9 +251,9 @@ def test_failover_moves_the_vip_and_restores_the_node(demo, fake):
     text = " | ".join(r["result"] for r in rows)
     assert ok, text
     assert fake.standby == set()                                  # restored
-    assert ("node", "standby", "node1") in fake.calls and ("node", "unstandby", "node1") in fake.calls
-    assert any("node1 -> node2" in r["result"] for r in rows)
-    assert rows[-1]["step"] == "pcs node unstandby node1"
+    assert ("node", "standby", "mgmtnode1") in fake.calls and ("node", "unstandby", "mgmtnode1") in fake.calls
+    assert any("mgmtnode1 -> mgmtnode2" in r["result"] for r in rows)
+    assert rows[-1]["step"] == "pcs node unstandby mgmtnode1"
 
 
 def test_failover_restores_even_when_the_move_never_happens(demo, fake):
@@ -266,28 +266,28 @@ def test_failover_restores_even_when_the_move_never_happens(demo, fake):
 def test_failover_reports_when_the_restore_itself_fails(demo, fake):
     fake.fail_unstandby = True
     ok, rows, _ = demo.stage_failover(settings(demo))
-    assert not ok and "Run by hand NOW: sudo pcs node unstandby node1" in rows[-1]["result"]
+    assert not ok and "Run by hand NOW: sudo pcs node unstandby mgmtnode1" in rows[-1]["result"]
 
 
 def test_failover_refuses_on_an_unhealthy_cluster(demo, fake):
-    fake.standby.add("node3")
+    fake.standby.add("mgmtnode3")
     ok, rows, _ = demo.stage_failover(settings(demo))
-    assert not ok and rows[0]["result"].startswith("REFUSED") and ("node", "standby", "node1") not in fake.calls
+    assert not ok and rows[0]["result"].startswith("REFUSED") and ("node", "standby", "mgmtnode1") not in fake.calls
 
 
 def test_ban_stops_one_instance_and_clears_the_ban(demo, fake, monkeypatch):
     monkeypatch.setattr(demo, "fetch_report", lambda st, nd: demo.NodeReport({"flowfirst-process2": "inactive"}, set()))
-    ok, rows, _ = demo.stage_ban(settings(demo, "--process", "2", "--node", "node3", cmd="ban"))
+    ok, rows, _ = demo.stage_ban(settings(demo, "--process", "2", "--node", "mgmtnode3", cmd="ban"))
     assert ok, rows
     assert fake.banned == {}                                      # cleared
-    assert ("resource", "ban", "flowfirst-p2-res-clone", "node3") in fake.calls
+    assert ("resource", "ban", "flowfirst-p2-res-clone", "mgmtnode3") in fake.calls
     assert ("cleanup", "flowfirst-p2-res-clone") in fake.calls
 
 
 def test_ban_default_target_is_not_the_vip_holder(demo, fake, monkeypatch):
     monkeypatch.setattr(demo, "fetch_report", lambda st, nd: demo.NodeReport({}, set()))
     demo.stage_ban(settings(demo, cmd="ban"))
-    assert ("resource", "ban", "flowfirst-p1-res-clone", "node2") in fake.calls
+    assert ("resource", "ban", "flowfirst-p1-res-clone", "mgmtnode2") in fake.calls
 
 
 def test_ban_refuses_an_unknown_node(demo, fake):
@@ -299,8 +299,8 @@ def test_ban_refuses_an_unknown_node(demo, fake):
 
 def test_cli_parsing(demo):
     p = demo.build_parser()
-    a = p.parse_args(["ban", "--yes", "--process", "3", "--node", "node2", "--wait", "10"])
-    assert (a.yes, a.process, a.node, a.wait) == (True, 3, "node2", 10)
+    a = p.parse_args(["ban", "--yes", "--process", "3", "--node", "mgmtnode2", "--wait", "10"])
+    assert (a.yes, a.process, a.node, a.wait) == (True, 3, "mgmtnode2", 10)
     assert p.parse_args(["watch", "--seconds", "5"]).func is demo.cmd_watch
     with pytest.raises(SystemExit):
         p.parse_args(["ban", "--process", "5"])

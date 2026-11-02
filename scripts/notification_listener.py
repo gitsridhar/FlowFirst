@@ -11,12 +11,12 @@ to stdout as it arrives.
   Run it on ANY machine that can reach the RabbitMQ cluster.
   The typical choices are:
 
-    Node 1, 2, or 3  — the cluster nodes themselves.
+    Mgmt Node 1, 2, or 3  — the cluster nodes themselves.
                         The script connects to 127.0.0.1:5672 by
                         default (RMQ_HOST), so no firewall rules
                         are needed.  Recommended for quick tests.
 
-    Node 4            — the remote worker node.  Point RMQ_HOST at
+    Remote Node 1            — the remote worker node.  Point RMQ_HOST at
                         the VIP or any cluster node IP.
 
     Your laptop / CI  — set RMQ_HOST=<VIP or any node IP> and make

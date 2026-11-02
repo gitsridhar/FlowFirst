@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# FlowFirst - enable TLS on a RabbitMQ node (run on each of node1-3, as a user with sudo).
+# FlowFirst - enable TLS on a RabbitMQ node (run on each of mgmtnode1-3, as a user with sudo).
 #
 #   sudo ./security/enable_rabbitmq_tls.sh                     AMQPS :5671 + HTTPS management :15671 (plain AMQP stays on)
 #   sudo ./security/enable_rabbitmq_tls.sh --disable-plain     also close the plain AMQP :5672 and HTTP :15672 listeners
@@ -21,7 +21,7 @@
 # The configuration lives in a marked block (BEGIN/END FLOWFIRST TLS); re-running replaces only that block.
 #
 # Safe order for a running cluster (one node at a time, so pause_minority keeps a majority up):
-#   1. run this script on node1, then node2, then node3                (plain AMQP still works)
+#   1. run this script on mgmtnode1, then mgmtnode2, then mgmtnode3                (plain AMQP still works)
 #   2. set TLS_RABBITMQ_ENABLED=true in .env on every node and restart the processes
 #   3. optional: re-run with --disable-plain to close the plaintext ports
 #   --inter-node is different: a node using TLS distribution cannot talk to one that does not, so every node

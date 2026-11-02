@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """FlowFirst demo: how to use OpenStack Swift object storage across the cluster nodes.
 
-Talks to the Swift proxy on node1..node3 directly (one python-swiftclient connection per node, no REST API, no pipeline
+Talks to the Swift proxy on mgmtnode1..mgmtnode3 directly (one python-swiftclient connection per node, no REST API, no pipeline
 process), so it isolates the object-store layer and shows which node handles each request. All objects live in a demo
 container named "flowfirst_demo_<run id>", so the pipeline container (SWIFT_CONTAINER, default flowfirst_messages) is
 never touched.
@@ -16,7 +16,7 @@ Stages:
 Usage:
     python3 scripts/swift_object_demo.py                          full demo (same as 'run')
     python3 scripts/swift_object_demo.py run --keep               ...and leave the demo container in place
-    python3 scripts/swift_object_demo.py run --nodes node1,node2  only use these proxies (e.g. node3 is down)
+    python3 scripts/swift_object_demo.py run --nodes mgmtnode1,mgmtnode2  only use these proxies (e.g. mgmtnode3 is down)
     python3 scripts/swift_object_demo.py status
     python3 scripts/swift_object_demo.py write
     python3 scripts/swift_object_demo.py list
@@ -24,9 +24,9 @@ Usage:
     python3 scripts/swift_object_demo.py helpers
     python3 scripts/swift_object_demo.py cleanup --run-id <id>    delete the container of a run left behind by --keep
 
---nodes accepts node1, node2, node3, vip (the HAProxy address SWIFT_AUTH_URL), host[:port] or a full auth URL.
+--nodes accepts mgmtnode1, mgmtnode2, mgmtnode3, vip (the HAProxy address SWIFT_AUTH_URL), host[:port] or a full auth URL.
 
-Where to run it: on node1..node4 or any workstation that can reach TCP 8888 (proxy; 8090 for the VIP) and has the FlowFirst
+Where to run it: on mgmtnode1..remotenode1 or any workstation that can reach TCP 8888 (proxy; 8090 for the VIP) and has the FlowFirst
 .env (SWIFT_USER, SWIFT_KEY). Connections honour TLS_SWIFT_ENABLED through src.tls.tls (fails closed). The key is never
 printed and errors print only the exception type and, for Swift, the HTTP status.
 
@@ -63,7 +63,7 @@ from src.swift import swift_storage  # noqa: E402
 from src.tls.tls import swift_kwargs  # noqa: E402
 
 DEMO_PREFIX = "flowfirst_demo"          # container name = DEMO_PREFIX + "_" + run id
-DEFAULT_NODES = "node1,node2,node3"
+DEFAULT_NODES = "mgmtnode1,mgmtnode2,mgmtnode3"
 DEFAULT_TIMEOUT_S = 10.0
 POLL_INTERVAL_S = 0.2
 
@@ -94,9 +94,9 @@ def auth_url_for(host: str, port: Optional[int] = None) -> str:
 def named_targets() -> Dict[str, str]:
     """Label -> auth URL: the three node-local proxies plus the load-balanced VIP address."""
     return {
-        "node1": auth_url_for(NODE1_IP),
-        "node2": auth_url_for(NODE2_IP),
-        "node3": auth_url_for(NODE3_IP),
+        "mgmtnode1": auth_url_for(NODE1_IP),
+        "mgmtnode2": auth_url_for(NODE2_IP),
+        "mgmtnode3": auth_url_for(NODE3_IP),
         "vip": SWIFT_AUTH_URL,
     }
 
@@ -108,7 +108,7 @@ def endpoint_of(auth_url: str) -> str:
 
 
 def resolve_target(spec: str, targets: Optional[Dict[str, str]] = None) -> Target:
-    """'node2' -> ('node2', 'http://<NODE2_IP>:8888/auth/v1.0'); '10.0.0.1:8888' and full URLs are accepted too."""
+    """'mgmtnode2' -> ('mgmtnode2', 'http://<NODE2_IP>:8888/auth/v1.0'); '10.0.0.1:8888' and full URLs are accepted too."""
     spec = (spec or "").strip()
     if not spec:
         raise ValueError("empty node name")
@@ -127,7 +127,7 @@ def resolve_target(spec: str, targets: Optional[Dict[str, str]] = None) -> Targe
 
 
 def resolve_targets(csv: str, targets: Optional[Dict[str, str]] = None) -> List[Target]:
-    """'node1,node2' -> [(label, auth url), ...] with duplicate URLs omitted."""
+    """'mgmtnode1,mgmtnode2' -> [(label, auth url), ...] with duplicate URLs omitted."""
     out, seen = [], set()
     for part in (csv or "").split(","):
         part = part.strip()
@@ -595,7 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(sp, keep=True):
         sp.add_argument("--nodes", default=DEFAULT_NODES,
-                        help="comma list of proxies: node1,node2,node3,vip,host[:port] (default: %(default)s)")
+                        help="comma list of proxies: mgmtnode1,mgmtnode2,mgmtnode3,vip,host[:port] (default: %(default)s)")
         sp.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="seconds to wait per step")
         if keep:
             sp.add_argument("--keep", action="store_true", help="leave the demo container in place")

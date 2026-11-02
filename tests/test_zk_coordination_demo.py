@@ -18,14 +18,14 @@ def demo():
 
 
 TARGETS = {
-    "node1": ("10.0.0.1", 2181),
-    "node2": ("10.0.0.2", 2181),
-    "node3": ("10.0.0.3", 2181),
+    "mgmtnode1": ("10.0.0.1", 2181),
+    "mgmtnode2": ("10.0.0.2", 2181),
+    "mgmtnode3": ("10.0.0.3", 2181),
 }
 
 
 def test_resolve_named_and_literal(demo):
-    assert demo.resolve_target("node2", TARGETS) == ("node2", "10.0.0.2", 2181)
+    assert demo.resolve_target("mgmtnode2", TARGETS) == ("mgmtnode2", "10.0.0.2", 2181)
     assert demo.resolve_target("192.168.1.50:2281", TARGETS) == ("192.168.1.50:2281", "192.168.1.50", 2281)
 
 
@@ -42,8 +42,8 @@ def test_resolve_invalid_port(demo):
 
 
 def test_resolve_targets_drops_duplicate_hosts(demo):
-    res = demo.resolve_targets("node1,node2,10.0.0.1:2181", TARGETS)
-    assert res == [("node1", "10.0.0.1", 2181), ("node2", "10.0.0.2", 2181)]
+    res = demo.resolve_targets("mgmtnode1,mgmtnode2,10.0.0.1:2181", TARGETS)
+    assert res == [("mgmtnode1", "10.0.0.1", 2181), ("mgmtnode2", "10.0.0.2", 2181)]
 
 
 def test_parse_mntr_response(demo):
@@ -87,7 +87,7 @@ def test_render_table_aligns_and_handles_none(demo):
 def test_default_command_is_run(demo):
     p = demo.build_parser()
     assert p.parse_args(["run", "--keep"]).keep is True
-    assert p.parse_args(["status", "--nodes", "node1,node2"]).func is demo.cmd_status
+    assert p.parse_args(["status", "--nodes", "mgmtnode1,mgmtnode2"]).func is demo.cmd_status
     assert p.parse_args(["election"]).func is demo.cmd_election
     assert p.parse_args(["config"]).func is demo.cmd_config
     assert p.parse_args(["registry"]).func is demo.cmd_registry

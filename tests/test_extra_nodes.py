@@ -63,7 +63,7 @@ def test_haproxy_default_output_has_no_extra_servers_and_no_placeholders():
     assert r.returncode == 0, r.stderr
     assert "extramgmtnode" not in r.stdout
     assert "__EXTRA_" not in r.stdout
-    assert r.stdout.count("    server node3 ") == 4          # one per backend, unchanged
+    assert r.stdout.count("    server mgmtnode3 ") == 4          # one per backend, unchanged
 
 
 def test_haproxy_adds_one_server_line_per_extra_node_to_every_backend():
@@ -111,9 +111,9 @@ def test_orchestrator_plan_lists_every_step_and_changes_nothing():
             r = subprocess.run([BASH, "scripts/add_extra_node.sh", "extramgmtnode2", "--plan"], cwd=ROOT,
                                capture_output=True, text=True, timeout=30, env={"PATH": BASE_ENV["PATH"], "HOME": d})
             assert r.returncode != 0 and "not in EXTRA_NODES" in r.stderr
-            r = subprocess.run([BASH, "scripts/add_extra_node.sh", "node4", "--plan"], cwd=ROOT,
+            r = subprocess.run([BASH, "scripts/add_extra_node.sh", "remotenode1", "--plan"], cwd=ROOT,
                                capture_output=True, text=True, timeout=30, env={"PATH": BASE_ENV["PATH"], "HOME": d})
-            assert r.returncode == 2          # node4 is the remote worker, never an extra node
+            assert r.returncode == 2          # remotenode1 is the remote worker, never an extra node
         finally:
             os.remove(env_file)
 

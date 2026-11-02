@@ -37,7 +37,7 @@ NODE1_IP = os.getenv("NODE1_IP", "127.0.0.1")
 NODE2_IP = os.getenv("NODE2_IP", "127.0.0.1")
 NODE3_IP = os.getenv("NODE3_IP", "127.0.0.1")
 NODE4_IP = os.getenv("NODE4_IP", "127.0.0.1")
-NODE4_NAME = os.getenv("NODE4_NAME", "node4")
+NODE4_NAME = os.getenv("NODE4_NAME", "remotenode1")
 FLOWFIRST_VIP = os.getenv("FLOWFIRST_VIP", NODE1_IP)
 
 # Strip unexpanded shell references from IP/host values too
@@ -348,8 +348,8 @@ QUEUE_FLOW2_P1_TO_P2 = "flow2_p1_to_p2"
 QUEUE_FLOW2_P2_TO_P3 = "flow2_p2_to_p3"
 QUEUE_FLOW2_P3_REFLECTED = "flow2_p3_reflected"
 
-# Flow 3 Queues (Remote Node 4 / Remote Worker (Process 5) Scenario)
-# Flow 3: P1 (Node1-3) -> [flow3_p1_to_p5] -> P5 (Remote Node 4) -> (modifies/reflects) -> [flow3_p5_to_p2] -> P2 (Node1-3) -> [flow3_p2_to_p4] -> P4 (persists to MariaDB & Swift)
+# Flow 3 Queues (Remote Node 1 / Remote Worker (Process 5) Scenario)
+# Flow 3: P1 (Mgmtnode1-3) -> [flow3_p1_to_p5] -> P5 (Remote Node 1) -> (modifies/reflects) -> [flow3_p5_to_p2] -> P2 (Mgmtnode1-3) -> [flow3_p2_to_p4] -> P4 (persists to MariaDB & Swift)
 QUEUE_FLOW3_P1_TO_P5 = "flow3_p1_to_p5"
 QUEUE_FLOW3_P5_TO_P2 = "flow3_p5_to_p2"
 QUEUE_FLOW3_P2_TO_P4 = "flow3_p2_to_p4"

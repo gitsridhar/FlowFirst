@@ -2,12 +2,12 @@ import time
 from src.application import authz
 
 CERT = {"subject": ((("commonName", "alice"),),)}
-PROXY_CERT = {"subject": ((("organizationName", "x"),), (("commonName", "node1-pipeline"),))}
+PROXY_CERT = {"subject": ((("organizationName", "x"),), (("commonName", "mgmtnode1-pipeline"),))}
 
 
 def test_cert_common_name():
     assert authz.cert_common_name(CERT) == "alice"
-    assert authz.cert_common_name(PROXY_CERT) == "node1-pipeline"
+    assert authz.cert_common_name(PROXY_CERT) == "mgmtnode1-pipeline"
     assert authz.cert_common_name(None) is None
     assert authz.cert_common_name({}) is None
     assert authz.cert_common_name({"subject": ((("commonName", ""),),)}) is None
@@ -20,18 +20,18 @@ def test_parse_list():
 
 
 def test_header_ignored_without_certificate():
-    assert authz.resolve_identity(None, "admin", ["node1-pipeline"]) is None
+    assert authz.resolve_identity(None, "admin", ["mgmtnode1-pipeline"]) is None
 
 
 def test_header_ignored_from_untrusted_connection():
     # A client with its own valid certificate must not be able to claim another identity.
-    assert authz.resolve_identity(CERT, "admin", ["node1-pipeline"]) == "alice"
+    assert authz.resolve_identity(CERT, "admin", ["mgmtnode1-pipeline"]) == "alice"
 
 
 def test_header_trusted_from_proxy_connection():
-    assert authz.resolve_identity(PROXY_CERT, "alice", ["node1-pipeline"]) == "alice"
-    assert authz.resolve_identity(PROXY_CERT, "  ", ["node1-pipeline"]) == "node1-pipeline"
-    assert authz.resolve_identity(PROXY_CERT, None, ["node1-pipeline"]) == "node1-pipeline"
+    assert authz.resolve_identity(PROXY_CERT, "alice", ["mgmtnode1-pipeline"]) == "alice"
+    assert authz.resolve_identity(PROXY_CERT, "  ", ["mgmtnode1-pipeline"]) == "mgmtnode1-pipeline"
+    assert authz.resolve_identity(PROXY_CERT, None, ["mgmtnode1-pipeline"]) == "mgmtnode1-pipeline"
 
 
 def test_admin_decision_without_tls_fails_closed():

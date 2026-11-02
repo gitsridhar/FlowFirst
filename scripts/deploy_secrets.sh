@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ==============================================================================
-# FlowFirst - generate secrets on node1 and push .env to all other nodes.
+# FlowFirst - generate secrets on mgmtnode1 and push .env to all other nodes.
 #
-# Run ONCE on node1 after copying src/config/.env.node1 to /opt/flowfirst/.env:
+# Run ONCE on mgmtnode1 after copying src/config/.env.mgmtnode1 to /opt/flowfirst/.env:
 #
 #   sudo ./scripts/deploy_secrets.sh
 #
@@ -19,7 +19,7 @@ set -euo pipefail
 #      per-node values stay correct after the copy.
 #
 # Prerequisites (all done in Phase 0):
-#   - /opt/flowfirst/.env exists on THIS node (cp src/config/.env.node1 .env)
+#   - /opt/flowfirst/.env exists on THIS node (cp src/config/.env.mgmtnode1 .env)
 #   - SSH key-based access to the other nodes works (Phase 0 pre-step)
 #   - flowadmin has passwordless sudo on all nodes (Phase 0 pre-step)
 #
@@ -36,7 +36,7 @@ ENV_FILE="${ROOT_DIR}/.env"
 # ---------------------------------------------------------------------------
 if [[ ! -f "${ENV_FILE}" ]]; then
     echo "ERROR: ${ENV_FILE} not found."
-    echo "  Copy the per-node template first:  cp src/config/.env.node1 .env"
+    echo "  Copy the per-node template first:  cp src/config/.env.mgmtnode1 .env"
     exit 1
 fi
 
@@ -59,8 +59,8 @@ done
 
 echo "=================================================================="
 echo " FlowFirst — generate secrets and deploy .env to all nodes"
-echo " This node (node1): secrets will be generated here"
-echo " Targets: ${NODE2_IP} (node2)  ${NODE3_IP} (node3)  ${NODE4_IP} (node4)"
+echo " This node (mgmtnode1): secrets will be generated here"
+echo " Targets: ${NODE2_IP} (mgmtnode2)  ${NODE3_IP} (mgmtnode3)  ${NODE4_IP} (remotenode1)"
 for _i in "${!EXTRA_NAMES[@]}"; do
     echo "          ${EXTRA_IPS[$_i]} (${EXTRA_NAMES[$_i]})"
 done
@@ -71,7 +71,7 @@ echo "=================================================================="
 # Step 1: Generate passwords on this node
 # ---------------------------------------------------------------------------
 echo ""
-echo "[1/2] Generating secrets on node1..."
+echo "[1/2] Generating secrets on mgmtnode1..."
 "${SCRIPT_DIR}/generate_secrets.sh" --write --file "${ENV_FILE}"
 chmod 600 "${ENV_FILE}"
 
@@ -82,9 +82,9 @@ echo ""
 echo "[2/2] Pushing .env to remote nodes..."
 
 declare -A NODE_MAP
-NODE_MAP["${NODE2_IP}"]="node2"
-NODE_MAP["${NODE3_IP}"]="node3"
-NODE_MAP["${NODE4_IP}"]="node4"
+NODE_MAP["${NODE2_IP}"]="mgmtnode2"
+NODE_MAP["${NODE3_IP}"]="mgmtnode3"
+NODE_MAP["${NODE4_IP}"]="remotenode1"
 TARGET_IPS=("${NODE2_IP}" "${NODE3_IP}" "${NODE4_IP}")
 for _i in "${!EXTRA_NAMES[@]}"; do
     NODE_MAP["${EXTRA_IPS[$_i]}"]="${EXTRA_NAMES[$_i]}"
@@ -98,7 +98,7 @@ for node_ip in "${TARGET_IPS[@]}"; do
     # Copy the file
     scp -q "${ENV_FILE}" "${SSH_USER}@${node_ip}:/opt/flowfirst/.env"
 
-    # Restore the two per-node lines — the scp above overwrote them with node1's values
+    # Restore the two per-node lines — the scp above overwrote them with mgmtnode1's values
     # shellcheck disable=SC2087
     ssh -T "${SSH_USER}@${node_ip}" <<REMOTE
 set -e

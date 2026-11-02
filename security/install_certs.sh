@@ -12,12 +12,12 @@
 # Layout on each node (TLS_DIR, default /etc/flowfirst/tls):
 #   ca.crt  ca.crl                       root:root 644        public
 #   pipeline/pipeline.{crt,key}          flowuser             client identity of Processes 1-5
-#   api/api.{crt,key}                    flowuser             API Gateway (Process 1) HTTPS listener        (node1-3)
-#   haproxy/{vip,backend}.pem            haproxy              VIP server cert, backend client cert (node1-3)
-#   rabbitmq/rabbitmq.{crt,key}          rabbitmq             (node1-3)
-#   mariadb/mariadb.{crt,key}            mysql                (node1-3)
-#   zookeeper/zookeeper.{crt,key}        zookeeper            (node1-3)
-#   swift/swift.{crt,key}                swift                (node1-3)
+#   api/api.{crt,key}                    flowuser             API Gateway (Process 1) HTTPS listener        (mgmtnode1-3)
+#   haproxy/{vip,backend}.pem            haproxy              VIP server cert, backend client cert (mgmtnode1-3)
+#   rabbitmq/rabbitmq.{crt,key}          rabbitmq             (mgmtnode1-3)
+#   mariadb/mariadb.{crt,key}            mysql                (mgmtnode1-3)
+#   zookeeper/zookeeper.{crt,key}        zookeeper            (mgmtnode1-3)
+#   swift/swift.{crt,key}                swift                (mgmtnode1-3)
 # Private keys are mode 600, owned by the service account. If the account does not exist yet
 # (service not installed), the file stays root:root 600 and a notice is printed: re-run after install.
 # ==============================================================================
@@ -64,7 +64,7 @@ stage_node() {   # stage_node N
     if [[ ${CRL_ONLY} -eq 1 ]]; then return; fi
     add "${I}/${nm}-pipeline/${nm}-pipeline.crt" pipeline/pipeline.crt flowuser 644
     add "${I}/${nm}-pipeline/${nm}-pipeline.key" pipeline/pipeline.key flowuser 600
-    if [[ "${n}" != "4" ]]; then   # node1-3 and the extra core nodes; node4 is the remote worker
+    if [[ "${n}" != "4" ]]; then   # mgmtnode1-3 and the extra core nodes; remotenode1 is the remote worker
         add "${I}/${nm}-api/${nm}-api.crt"             api/api.crt              flowuser  644
         add "${I}/${nm}-api/${nm}-api.key"             api/api.key              flowuser  600
         add "${I}/flowfirst-vip/flowfirst-vip.pem"     haproxy/vip.pem          haproxy   600

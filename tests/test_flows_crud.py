@@ -410,7 +410,7 @@ def test_p2_handle_flow6_remote_return_forwards_to_p4():
 
     ch = MagicMock()
     method = _make_method()
-    data = _base_data(6, {"device_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "remote_node": "node4"})
+    data = _base_data(6, {"device_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "remote_node": "remotenode1"})
 
     p2.handle_flow6_remote_return_message(ch, method, None, _body(data))
 

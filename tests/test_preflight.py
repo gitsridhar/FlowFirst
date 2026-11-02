@@ -15,7 +15,7 @@ STRONG = {
     "SWIFT_HASH_PATH_PREFIX": "test-placeholder-swift-prefix-for-preflight-tests",
     "SWIFT_HASH_PATH_SUFFIX": "test-placeholder-swift-suffix-for-preflight-tests",
     "NODE1_IP": "10.0.0.1", "NODE2_IP": "10.0.0.2", "NODE3_IP": "10.0.0.3", "NODE4_IP": "10.0.0.4",
-    "NODE_NAME": "node1", "CURRENT_NODE_IP": "10.0.0.1",
+    "NODE_NAME": "mgmtnode1", "CURRENT_NODE_IP": "10.0.0.1",
 }
 
 

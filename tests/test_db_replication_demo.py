@@ -15,11 +15,11 @@ def demo():
     return mod
 
 
-TARGETS = {"node1": "10.0.0.1", "node2": "10.0.0.2", "node3": "10.0.0.3", "vip": "10.0.0.100"}
+TARGETS = {"mgmtnode1": "10.0.0.1", "mgmtnode2": "10.0.0.2", "mgmtnode3": "10.0.0.3", "vip": "10.0.0.100"}
 
 
 def test_resolve_named_and_literal(demo):
-    assert demo.resolve_target("node2", TARGETS) == ("node2", "10.0.0.2")
+    assert demo.resolve_target("mgmtnode2", TARGETS) == ("mgmtnode2", "10.0.0.2")
     assert demo.resolve_target(" vip ", TARGETS) == ("vip", "10.0.0.100")
     assert demo.resolve_target("192.168.5.5", TARGETS) == ("192.168.5.5", "192.168.5.5")
 
@@ -32,7 +32,7 @@ def test_resolve_empty_is_error(demo):
 
 
 def test_resolve_targets_drops_duplicate_hosts(demo):
-    assert demo.resolve_targets("node1,node2,10.0.0.1", TARGETS) == [("node1", "10.0.0.1"), ("node2", "10.0.0.2")]
+    assert demo.resolve_targets("mgmtnode1,mgmtnode2,10.0.0.1", TARGETS) == [("mgmtnode1", "10.0.0.1"), ("mgmtnode2", "10.0.0.2")]
 
 
 def test_missing_entries(demo):
@@ -52,13 +52,13 @@ def test_render_table_aligns_and_handles_none(demo):
 def test_default_command_is_run(demo):
     p = demo.build_parser()
     assert p.parse_args(["run", "--keep"]).keep is True
-    assert p.parse_args(["write", "--node", "node2"]).func is demo.cmd_write
+    assert p.parse_args(["write", "--node", "mgmtnode2"]).func is demo.cmd_write
     assert p.parse_args(["read"]).node == "all"
 
 
 def test_main_refuses_without_password(demo, monkeypatch, capsys):
     monkeypatch.setattr(demo, "MARIADB_PASSWORD", "")
-    assert demo.main(["read", "--node", "node1"]) == 2
+    assert demo.main(["read", "--node", "mgmtnode1"]) == 2
     assert "MARIADB_PASSWORD" in capsys.readouterr().err
 
 

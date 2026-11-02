@@ -47,7 +47,7 @@ command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found." >&2; ex
 
 is_true() { case "$(printf %s "${1:-}" | tr A-Z a-z)" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }
 NODES=(); for n in 1 2 3; do v="NODE${n}_IP"; [[ -n "${!v:-}" ]] && NODES+=("${!v}"); done
-# Extra core nodes (EXTRA_NODES, ReadMe Scenario 76) are checked like node1..3
+# Extra core nodes (EXTRA_NODES, ReadMe Scenario 76) are checked like mgmtnode1..3
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/extra_nodes_lib.sh"
 extra_nodes_load || exit 2

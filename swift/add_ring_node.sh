@@ -4,7 +4,7 @@ set -euo pipefail
 # ==============================================================================
 # FlowFirst - add extra core nodes (EXTRA_NODES) to the Swift account/container/object rings.
 #
-#   sudo ./swift/add_ring_node.sh            on node1: add the devices, rebalance, show what changed
+#   sudo ./swift/add_ring_node.sh            on mgmtnode1: add the devices, rebalance, show what changed
 #   sudo ./swift/add_ring_node.sh --push     ... and copy the rings to every other node over SSH
 #   sudo ./swift/add_ring_node.sh --check    read-only: list which extra nodes are / are not in the rings
 #
@@ -55,7 +55,7 @@ RINGS=(account container object)
 command -v swift-ring-builder >/dev/null 2>&1 || { echo "ERROR: swift-ring-builder not found (run on a node where Swift is installed)."; exit 1; }
 for r in "${RINGS[@]}"; do
     [ -f "/etc/swift/${r}.builder" ] || {
-        echo "ERROR: /etc/swift/${r}.builder is missing. Run this on the node where setup_swift.sh built the rings (node1)."
+        echo "ERROR: /etc/swift/${r}.builder is missing. Run this on the node where setup_swift.sh built the rings (mgmtnode1)."
         exit 1; }
 done
 

@@ -109,7 +109,11 @@ utc_stamp() {
 }
 
 # Names/IPs of the cluster from .env (defaults match the rest of the repo).
-node_name() { local v="NODE$1_NAME"; echo "${!v:-node$1}"; }
+node_name() {
+    local v="NODE$1_NAME" d="mgmtnode$1"
+    [[ "$1" == "4" ]] && d="remotenode1"
+    echo "${!v:-${d}}"
+}
 node_ip()   { local v="NODE$1_IP";   echo "${!v:-}"; }
 
 # Bump the CRL (called by init and revoke).

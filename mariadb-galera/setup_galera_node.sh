@@ -17,7 +17,7 @@ if [ -f "${ROOT_DIR}/.env" ]; then
     set +a
 fi
 
-CURRENT_NODE_NAME="${1:-${NODE_NAME:-node1}}"
+CURRENT_NODE_NAME="${1:-${NODE_NAME:-mgmtnode1}}"
 CURRENT_NODE_IP="${2:-${CURRENT_NODE_IP:-}}"
 NODE1_IP="${3:-${NODE1_IP:-}}"
 NODE2_IP="${4:-${NODE2_IP:-}}"
@@ -193,8 +193,8 @@ echo "=================================================================="
 echo " Galera configuration written successfully to /etc/my.cnf.d/galera.cnf"
 echo ""
 echo " Next Steps to start the cluster:"
-echo " - On Node 1 (Bootstrap node ONLY):"
+echo " - On Mgmt Node 1 (Bootstrap node ONLY):"
 echo "     sudo ./mariadb-galera/bootstrap_galera.sh"
-echo " - On Node 2 & Node 3 (Joiner nodes):"
+echo " - On Mgmt Node 2 & Mgmt Node 3 (Joiner nodes):"
 echo "     sudo systemctl enable --now mariadb"
 echo "=================================================================="

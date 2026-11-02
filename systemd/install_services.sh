@@ -25,11 +25,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Copying unit files to ${SYSTEMD_DIR}..."
 
 # Mode selection:
-# --remote / node4: install only flowfirst-process5.service
-# default (node1-node3): install flowfirst-process1..4 and flowfirst.target
+# --remote / remotenode1: install only flowfirst-process5.service
+# default (mgmtnode1-mgmtnode3): install flowfirst-process1..4 and flowfirst.target
 TARGET_MODE="${2:-cluster}"
 
-if [[ "${TARGET_MODE}" == "--remote" ]] || [[ "${TARGET_MODE}" == "remote" ]] || [[ "${TARGET_MODE}" == "node4" ]]; then
+if [[ "${TARGET_MODE}" == "--remote" ]] || [[ "${TARGET_MODE}" == "remote" ]] || [[ "${TARGET_MODE}" == "remotenode1" ]]; then
     UNITS=("flowfirst-process5.service")
     echo "Installing Remote Node units (Remote Worker (Process 5) only)..."
 else
@@ -70,7 +70,7 @@ done
 # 4. Open the API Gateway (Process 1) backend port in the firewall on every cluster node.
 #    HAProxy's health checks and proxied requests reach each node on this port.
 #    This must be open on ALL three nodes — not just the one running HAProxy.
-if [[ "${TARGET_MODE}" != "--remote" && "${TARGET_MODE}" != "remote" && "${TARGET_MODE}" != "node4" ]]; then
+if [[ "${TARGET_MODE}" != "--remote" && "${TARGET_MODE}" != "remote" && "${TARGET_MODE}" != "remotenode1" ]]; then
     API_BACKEND_PORT="${API_BACKEND_PORT:-8082}"
     # Read from .env if present (honours a non-default API_BACKEND_PORT)
     _env_file="${INSTALL_DIR}/.env"

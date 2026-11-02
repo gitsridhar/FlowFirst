@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """FlowFirst demo: how HAProxy is used in front of the cluster nodes.
 
-HAProxy listens on the Virtual IP (VIP) and spreads clients over node1..node3. This script talks to the VIP like a real
+HAProxy listens on the Virtual IP (VIP) and spreads clients over mgmtnode1..mgmtnode3. This script talks to the VIP like a real
 client and to every node directly, and compares the two, so you SEE the load balancer working: which node answered,
 how the requests were shared, what HAProxy's own counters say, and what happens when a node is taken out.
 
@@ -27,7 +27,7 @@ Usage:
     python3 scripts/haproxy_lb_demo.py swift
     python3 scripts/haproxy_lb_demo.py watch --seconds 60       leave it running, then stop a node's API in another shell
 
-Where to run it: on node1..node4 or any workstation that can reach the VIP (and, for the per-node checks, the node
+Where to run it: on mgmtnode1..remotenode1 or any workstation that can reach the VIP (and, for the per-node checks, the node
 addresses) and has the FlowFirst .env. TLS follows TLS_API_ENABLED / TLS_MARIADB_ENABLED / TLS_RABBITMQ_ENABLED /
 TLS_SWIFT_ENABLED through src.tls.tls (fails closed; the VIP certificate must be valid for the VIP address). Passwords
 are never printed; errors print only the exception type or the HTTP status.
@@ -75,7 +75,7 @@ from src.config.config import (  # noqa: E402
 )
 from src.tls.tls import client_context, mysql_ssl  # noqa: E402
 
-DEFAULT_NODES = "node1,node2,node3"
+DEFAULT_NODES = "mgmtnode1,mgmtnode2,mgmtnode3"
 DEFAULT_REQUESTS = 12
 DEFAULT_TIMEOUT_S = 5.0
 BACKENDS = {      # stage -> backend name in haproxy/haproxy.cfg.template
@@ -122,12 +122,12 @@ class Settings:
 # ----------------------------------------------------------------------------- pure helpers (unit-tested)
 
 def named_nodes() -> Dict[str, Node]:
-    ips = {"node1": NODE1_IP, "node2": NODE2_IP, "node3": NODE3_IP}
-    return {label: Node(label, ip, os.getenv(f"{label.upper()}_NAME", label), API_BACKEND_PORT) for label, ip in ips.items()}
+    ips = {"mgmtnode1": ("NODE1_NAME", NODE1_IP), "mgmtnode2": ("NODE2_NAME", NODE2_IP), "mgmtnode3": ("NODE3_NAME", NODE3_IP)}
+    return {label: Node(label, ip, os.getenv(env, label), API_BACKEND_PORT) for label, (env, ip) in ips.items()}
 
 
 def resolve_nodes(csv_text: str, named: Optional[Dict[str, Node]] = None) -> List[Node]:
-    """'node1,node2' -> Node list; 'host:port' probes that API address directly; duplicates are dropped."""
+    """'mgmtnode1,mgmtnode2' -> Node list; 'host:port' probes that API address directly; duplicates are dropped."""
     named = named if named is not None else named_nodes()
     out: List[Node] = []
     seen = set()
@@ -224,7 +224,7 @@ def describe_error(e: Exception) -> str:
 
 
 def state_line(rows: List[Dict[str, str]], backend: str) -> str:
-    """'node1=UP node2=DOWN node3=UP' for one backend."""
+    """'mgmtnode1=UP mgmtnode2=DOWN mgmtnode3=UP' for one backend."""
     return " ".join(f"{r['svname']}={(r.get('status') or '?').split()[0]}" for r in server_rows(rows, backend))
 
 
@@ -650,7 +650,7 @@ def build_parser() -> argparse.ArgumentParser:
     def common(sp):
         sp.add_argument("--vip", default="", help="HAProxy address (default: FLOWFIRST_VIP from .env)")
         sp.add_argument("--nodes", default=DEFAULT_NODES,
-                        help="nodes to check directly: node1,node2,node3 or host:api-port (default: %(default)s)")
+                        help="nodes to check directly: mgmtnode1,mgmtnode2,mgmtnode3 or host:api-port (default: %(default)s)")
         sp.add_argument("--requests", type=int, default=DEFAULT_REQUESTS, help="requests/connections per stage (default: %(default)s)")
         sp.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="seconds per network step")
         for name in ("api", "stats", "mariadb", "rabbitmq", "swift"):

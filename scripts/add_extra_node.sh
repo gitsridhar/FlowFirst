@@ -10,13 +10,13 @@ set -euo pipefail
 #   ./scripts/add_extra_node.sh extramgmtnode1 --from 5          resume from a step after a failure
 #   ./scripts/add_extra_node.sh extramgmtnode1 --dry-run         show every remote command, run none
 #
-# Run on node1 as the user that has SSH key access to every node (flowadmin by default,
+# Run on mgmtnode1 as the user that has SSH key access to every node (flowadmin by default,
 # DEPLOY_SSH_USER overrides) with passwordless sudo on them.
 #
 # Prerequisites, done by hand BEFORE this script (ReadMe Scenario 76, steps A-D):
 #   - the new host is installed (RHEL 9.6), has the static IP from EXTRA_NODES and the host name <name>
 #   - chrony is synchronised, /opt/flowfirst is cloned, the venv + requirements are installed
-#   - the line EXTRA_NODES=<name>:<ip> is already in node1's /opt/flowfirst/.env
+#   - the line EXTRA_NODES=<name>:<ip> is already in mgmtnode1's /opt/flowfirst/.env
 #
 # Every step is safe to repeat. Secrets are never printed; .env is copied with scp and its per-node
 # lines are rewritten on the target. Existing nodes are changed one at a time, with a health wait.

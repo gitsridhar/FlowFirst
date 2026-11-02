@@ -185,7 +185,7 @@ def publish_flow2_message(item_id: int = None, custom_data: str = None, value: f
 
 
 def publish_flow3_message(item_id: int = None, custom_data: str = None, remote_metric: float = None) -> dict:
-    """Prepare and publish a Flow 3 message targeted to Remote Node 4 / Remote Worker (Process 5)."""
+    """Prepare and publish a Flow 3 message targeted to Remote Node 1 / Remote Worker (Process 5)."""
     if item_id  is None: item_id  = int(time.time() * 1000) % 100000
     if remote_metric is None: remote_metric = round(45.0 + (item_id % 15) * 2.2, 2)
     if custom_data is None: custom_data = f"Flow-3 remote payload for item #{item_id}"
@@ -199,7 +199,7 @@ def publish_flow3_message(item_id: int = None, custom_data: str = None, remote_m
         "history": [{
             "stage": "process1_created",
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "prepared_for_remote_node4",
+            "status": "prepared_for_remotenode1",
             "source": "rest_api",
             "published_by": NODE_NAME,
         }],
@@ -207,7 +207,7 @@ def publish_flow3_message(item_id: int = None, custom_data: str = None, remote_m
     body = json.dumps(payload, indent=2)
     _publish(QUEUE_FLOW3_P1_TO_P5, body)
     gt.metrics_counter["flow3_published"] += 1
-    log.info(f"[Flow 3] Published #{item_id} to Remote Node 4 (metric={remote_metric})")
+    log.info(f"[Flow 3] Published #{item_id} to Remote Node 1 (metric={remote_metric})")
     return payload
 
 
@@ -429,7 +429,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     "POST /zk/config":         "Update a runtime config value in ZK",
                     "POST /api/flow1":          "Publish message to Flow 1",
                     "POST /api/flow2":          "Publish message to Flow 2",
-                    "POST /api/flow3":          "Publish message to Flow 3 (Remote Node 4 / Remote Worker (Process 5) pipeline)",
+                    "POST /api/flow3":          "Publish message to Flow 3 (Remote Node 1 / Remote Worker (Process 5) pipeline)",
                     "POST /api/batch":          "Publish batch to all flows",
                     "POST /api/devices":        "Create IoT device (Flow 4)",
                     "POST /api/devices/query":  "Query IoT devices (Flow 5)",
@@ -667,7 +667,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 metric  = float(post_data["remote_metric"]) if "remote_metric" in post_data else None
                 p = publish_flow3_message(item_id=item_id, custom_data=post_data.get("initial_data"), remote_metric=metric)
                 self._send_json(200, {"status": "success", "flow": 3, "handled_by_node": NODE_NAME,
-                                      "target_queue": QUEUE_FLOW3_P1_TO_P5, "target_node": "remote_node4", "payload": p})
+                                      "target_queue": QUEUE_FLOW3_P1_TO_P5, "target_node": "remotenode1", "payload": p})
 
             elif path == "/api/batch":
                 if not self._require_authz("publish", "flow:*"):

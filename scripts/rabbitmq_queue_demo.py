@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """FlowFirst demo: how to use RabbitMQ queues across the cluster nodes.
 
-Talks to the RabbitMQ brokers on node1..node3 directly (one connection per node, no HAProxy, no REST API, no pipeline
+Talks to the RabbitMQ brokers on mgmtnode1..mgmtnode3 directly (one connection per node, no HAProxy, no REST API, no pipeline
 process), so it isolates the messaging layer. Every stage uses its own demo queues/exchange, named
 "flowfirst_demo.<run id>.*", so the nine pipeline queues and flowfirst_dead_letters are never touched.
 
@@ -15,7 +15,7 @@ Stages:
 Usage:
     python3 scripts/rabbitmq_queue_demo.py                         full demo (same as 'run')
     python3 scripts/rabbitmq_queue_demo.py run --keep              ...and leave the demo queues in place
-    python3 scripts/rabbitmq_queue_demo.py run --nodes node1,node2 only use these brokers (e.g. node3 is down)
+    python3 scripts/rabbitmq_queue_demo.py run --nodes mgmtnode1,mgmtnode2 only use these brokers (e.g. mgmtnode3 is down)
     python3 scripts/rabbitmq_queue_demo.py run --queue-type quorum use quorum queues (default: RABBITMQ_QUEUE_TYPE)
     python3 scripts/rabbitmq_queue_demo.py status
     python3 scripts/rabbitmq_queue_demo.py work --count 9
@@ -24,7 +24,7 @@ Usage:
     python3 scripts/rabbitmq_queue_demo.py redeliver
     python3 scripts/rabbitmq_queue_demo.py cleanup --run-id <id>   delete the queues of a run left behind by --keep
 
-Where to run it: on node1..node4 or any workstation that can reach TCP 5672 (5671 with TLS) on NODE1_IP..NODE3_IP and
+Where to run it: on mgmtnode1..remotenode1 or any workstation that can reach TCP 5672 (5671 with TLS) on NODE1_IP..NODE3_IP and
 has the FlowFirst .env. Connections honour TLS_RABBITMQ_ENABLED through src.tls.tls (fails closed). The password is
 never printed.
 
@@ -60,7 +60,7 @@ from src.config.config import (  # noqa: E402
 from src.tls.tls import client_context  # noqa: E402
 
 DEMO_PREFIX = "flowfirst_demo"      # must NOT match the policy pattern ^flow[123]_ (the pipeline queues)
-DEFAULT_NODES = "node1,node2,node3"
+DEFAULT_NODES = "mgmtnode1,mgmtnode2,mgmtnode3"
 DEFAULT_TIMEOUT_S = 10.0
 POLL_INTERVAL_S = 0.05
 WORK_SECONDS = 0.05                 # simulated processing time per message in the competing-consumer stage
@@ -80,11 +80,11 @@ def get_amqp_port() -> int:
 def named_targets(port: Optional[int] = None) -> Dict[str, Tuple[str, int]]:
     """Label -> (host, port) for the three RabbitMQ cluster members."""
     p = port if port is not None else get_amqp_port()
-    return {"node1": (NODE1_IP, p), "node2": (NODE2_IP, p), "node3": (NODE3_IP, p)}
+    return {"mgmtnode1": (NODE1_IP, p), "mgmtnode2": (NODE2_IP, p), "mgmtnode3": (NODE3_IP, p)}
 
 
 def resolve_target(spec: str, targets: Optional[Dict[str, Tuple[str, int]]] = None) -> Node:
-    """('node2') -> ('node2', '<NODE2_IP>', 5672); '10.0.0.1:5672' -> ('10.0.0.1:5672', '10.0.0.1', 5672)."""
+    """('mgmtnode2') -> ('mgmtnode2', '<NODE2_IP>', 5672); '10.0.0.1:5672' -> ('10.0.0.1:5672', '10.0.0.1', 5672)."""
     spec = (spec or "").strip()
     if not spec:
         raise ValueError("empty node name")
@@ -102,7 +102,7 @@ def resolve_target(spec: str, targets: Optional[Dict[str, Tuple[str, int]]] = No
 
 
 def resolve_targets(csv: str, targets: Optional[Dict[str, Tuple[str, int]]] = None) -> List[Node]:
-    """'node1,node2' -> [(label, host, port), ...] with duplicate host:port pairs omitted."""
+    """'mgmtnode1,mgmtnode2' -> [(label, host, port), ...] with duplicate host:port pairs omitted."""
     out, seen = [], set()
     for part in (csv or "").split(","):
         part = part.strip()

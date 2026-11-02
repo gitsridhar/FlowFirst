@@ -34,7 +34,7 @@ fi
 source "${SCRIPT_DIR}/extra_nodes_lib.sh"
 extra_nodes_load || exit 1
 
-SEED_NAME="${NODE1_NAME:-node1}"
+SEED_NAME="${NODE1_NAME:-mgmtnode1}"
 DRY_RUN=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -75,7 +75,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo "[2/6] Making every cluster member resolvable by name (/etc/hosts)..."
-entries=("${NODE1_IP} ${NODE1_NAME:-node1}" "${NODE2_IP} ${NODE2_NAME:-node2}" "${NODE3_IP} ${NODE3_NAME:-node3}")
+entries=("${NODE1_IP} ${NODE1_NAME:-mgmtnode1}" "${NODE2_IP} ${NODE2_NAME:-mgmtnode2}" "${NODE3_IP} ${NODE3_NAME:-mgmtnode3}")
 for i in "${!EXTRA_NAMES[@]}"; do entries+=("${EXTRA_IPS[$i]} ${EXTRA_NAMES[$i]}"); done
 for entry in "${entries[@]}"; do
     if grep -q "^${entry%% *}[[:space:]]" /etc/hosts 2>/dev/null; then

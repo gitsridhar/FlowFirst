@@ -4,7 +4,7 @@ Every process calls start("processN") from main(). When METRICS_ENABLED is false
 When it is true the process serves GET /metrics on METRICS_PORT_BASE + N (process1 -> 9101 ... process5 -> 9105).
 
 The listener is separate from the REST API port on purpose: it is not behind HAProxy (Prometheus must scrape each
-node, including Node 4), and a problem with it can never affect the API. It uses the API certificate and
+node, including Remote Node 1), and a problem with it can never affect the API. It uses the API certificate and
 TLS_API_CLIENT_AUTH when TLS_API_ENABLED is true. The output holds counters and certificate expiry times only, never
 message content. A metrics listener that cannot start (port in use, bad certificate) is logged and skipped: the
 pipeline keeps running, and it never falls back to plaintext when TLS is on.

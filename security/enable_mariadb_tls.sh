@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# FlowFirst - enable TLS on a MariaDB (Galera) node (run on each of node1-3, as a user with sudo).
+# FlowFirst - enable TLS on a MariaDB (Galera) node (run on each of mgmtnode1-3, as a user with sudo).
 #
 #   sudo ./security/enable_mariadb_tls.sh                    client connections: server TLS 1.2/1.3 (plain clients still allowed)
 #   sudo ./security/enable_mariadb_tls.sh --galera           ALSO encrypt Galera replication (:4567) - see warning
@@ -15,7 +15,7 @@
 # so galera.cnf is never edited. Delete that file and restart to undo.
 #
 # Safe order for a running cluster:
-#   1. run this script on node1, node2, node3 one at a time (each restart rejoins the cluster by IST)
+#   1. run this script on mgmtnode1, mgmtnode2, mgmtnode3 one at a time (each restart rejoins the cluster by IST)
 #   2. set TLS_MARIADB_ENABLED=true in .env on every node, restart the processes, confirm they connect
 #   3. run --require-client-cert on one node: from then on the app user cannot connect without a certificate
 #   --galera is different: a node using TLS replication cannot talk to one that does not, so stop MariaDB on

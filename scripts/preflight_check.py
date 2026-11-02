@@ -218,7 +218,7 @@ def check_sandbox():
 
 def check_swift_services():
     """Check that Swift systemd units are active on this node (nodes 1-3 only)."""
-    # openstack-swift-* units are not installed on node4; skip silently when none are present.
+    # openstack-swift-* units are not installed on remotenode1; skip silently when none are present.
     swift_units = [
         "openstack-swift-proxy",
         "openstack-swift-account",
@@ -230,7 +230,7 @@ def check_swift_services():
     present = [u for u in swift_units if shutil.which("systemctl") and
                run(["systemctl", "cat", u + ".service"], timeout=5)[0] == 0]
     if not present:
-        say("SKIP", "Swift services", "no openstack-swift units installed on this node (node4 or pre-install)")
+        say("SKIP", "Swift services", "no openstack-swift units installed on this node (remotenode1 or pre-install)")
         return
     inactive = []
     for u in present:

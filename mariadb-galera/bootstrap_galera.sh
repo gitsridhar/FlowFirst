@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ==============================================================================
-# FlowFirst - Bootstrap MariaDB Galera Cluster (Run on Node 1 only)
+# FlowFirst - Bootstrap MariaDB Galera Cluster (Run on Mgmt Node 1 only)
 # Automatically loads configuration from .env if present
 # ==============================================================================
 

@@ -6,7 +6,7 @@ set -euo pipefail
 #
 #   sudo ./pacemaker/add_extra_node.sh extramgmtnode1 [--dry-run]
 #
-# Run on node1 (any existing cluster member) AFTER:
+# Run on mgmtnode1 (any existing cluster member) AFTER:
 #   - sudo ./pacemaker/setup_multinode_cluster.sh --prepare-node   was run on the NEW node
 #   - sudo ./systemd/install_services.sh /opt/flowfirst            was run on the NEW node, and its
 #     flowfirst-process1..4 units were disabled (Pacemaker owns them)
@@ -82,4 +82,4 @@ else
 fi
 echo ""
 echo "Expect: ${NEW_NAME} Online, and Started on it: flowfirst-p1-res .. flowfirst-p4-res."
-echo "Quorum now needs $(( (CLONE_MAX) / 2 + 1 )) of ${CLONE_MAX} nodes (node4, the remote worker, is not a member)."
+echo "Quorum now needs $(( (CLONE_MAX) / 2 + 1 )) of ${CLONE_MAX} nodes (remotenode1, the remote worker, is not a member)."

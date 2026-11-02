@@ -8,14 +8,14 @@
 #
 # Inventory (name -> profile -> used for)
 #   flowfirst-vip      server  HAProxy on the VIP: HTTPS API, Swift, MariaDB-LB and RabbitMQ-LB TLS, stats page
-#   <node>-api         server  API Gateway (Process 1) HTTPS listener on node1..3 (HAProxy re-encrypts to it)
-#   <node>-rabbitmq    peer    RabbitMQ broker on node1..3 (clients + inter-node clustering)
-#   <node>-mariadb     peer    MariaDB / Galera on node1..3 (clients + replication, SST/IST)
-#   <node>-zookeeper   peer    ZooKeeper on node1..3 (clients + quorum + leader election)
-#   <node>-swift       server  Swift proxy on node1..3
-#   <node>-pipeline    client  identity of Processes 1-4 on node1..3, and of HAProxy towards its backends
-#   Extra core nodes (EXTRA_NODES, e.g. extramgmtnode1) get the same six certificates as node1..3.
-#   node4-pipeline     client  identity of Remote Worker (Process 5) on the remote node4 (it only ever connects out)
+#   <node>-api         server  API Gateway (Process 1) HTTPS listener on mgmtnode1..3 (HAProxy re-encrypts to it)
+#   <node>-rabbitmq    peer    RabbitMQ broker on mgmtnode1..3 (clients + inter-node clustering)
+#   <node>-mariadb     peer    MariaDB / Galera on mgmtnode1..3 (clients + replication, SST/IST)
+#   <node>-zookeeper   peer    ZooKeeper on mgmtnode1..3 (clients + quorum + leader election)
+#   <node>-swift       server  Swift proxy on mgmtnode1..3
+#   <node>-pipeline    client  identity of Processes 1-4 on mgmtnode1..3, and of HAProxy towards its backends
+#   Extra core nodes (EXTRA_NODES, e.g. extramgmtnode1) get the same six certificates as mgmtnode1..3.
+#   remotenode1-pipeline     client  identity of Remote Worker (Process 5) on the remote remotenode1 (it only ever connects out)
 #   admin-client       client  operator / test identity for the external API (mutual TLS)
 # More external API users: ./security/issue_cert.sh --name <user> --profile client --cn "<user>"
 # ==============================================================================

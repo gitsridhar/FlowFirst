@@ -17,19 +17,19 @@ This project implements an enterprise-grade, high-availability, distributed inte
   - **Transformer (Process 2)**: Message transformer, metric examiner & reflection forwarder — enriches device payloads (fingerprint, update sequence) and normalises query filters
   - **Forwarder (Process 3)**: Acknowledgment sealer & reflection forwarder — validates device type and UUID format; dual-publishes Flow 6 to both the DB path and the remote edge-sync path
   - **DB Updater (Process 4)**: Dual MariaDB & Swift persistence engine with ZooKeeper dedup protection — persists `processed_messages` (Flows 1–3) and `devices` (Flows 4–7, including soft-delete)
-  - **Remote Worker (Process 5)**: Dedicated remote worker running on Remote Node 4 (`node4`) for cross-network asynchronous task execution — handles Flow 3 pipeline reflection and the Flow 6 remote edge-sync (computes `edge_sync_token`, returns via `flow6_p5_to_p2`)
+  - **Remote Worker (Process 5)**: Dedicated remote worker running on Remote Node 1 (`remotenode1`) for cross-network asynchronous task execution — handles Flow 3 pipeline reflection and the Flow 6 remote edge-sync (computes `edge_sync_token`, returns via `flow6_p5_to_p2`)
 
 ---
 
 ## Multi-Node Cluster Architecture & Network Topology
 
 ### Cluster Nodes Configuration
-- **Node 1 (`node1`)**: `${NODE1_IP}` (Galera Node 1 / API Node 1 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
-- **Node 2 (`node2`)**: `${NODE2_IP}` (Galera Node 2 / API Node 2 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
-- **Node 3 (`node3`)**: `${NODE3_IP}` (Galera Node 3 / API Node 3 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
-- **Virtual IP (VIP)**: `${FLOWFIRST_VIP}` (Managed by Pacemaker across Nodes 1–3)
+- **Mgmt Node 1 (`mgmtnode1`)**: `${NODE1_IP}` (Galera Mgmt Node 1 / API Mgmt Node 1 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
+- **Mgmt Node 2 (`mgmtnode2`)**: `${NODE2_IP}` (Galera Mgmt Node 2 / API Mgmt Node 2 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
+- **Mgmt Node 3 (`mgmtnode3`)**: `${NODE3_IP}` (Galera Mgmt Node 3 / API Mgmt Node 3 / RabbitMQ Broker / ZooKeeper Peer / HAProxy)
+- **Virtual IP (VIP)**: `${FLOWFIRST_VIP}` (Managed by Pacemaker across Mgmt Nodes 1–3)
 - **Extra core nodes (`extramgmtnode1`, `extramgmtnode2`, …)**: optional, none by default. Each is a *full* core node (Galera, RabbitMQ, ZooKeeper, Swift, HAProxy, Pacemaker, Processes 1–4), listed in `EXTRA_NODES` in `.env`; see [Scenario 76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-)
-- **Remote Node 4 (`node4`)**: `${NODE4_IP}` (Dedicated Remote Worker running **`process5` only**; acts strictly as a lightweight client connecting to the RabbitMQ pool, ZooKeeper ensemble, and Swift storage with no local broker/database daemons)
+- **Remote Node 1 (`remotenode1`)**: `${NODE4_IP}` (Dedicated Remote Worker running **`process5` only**; acts strictly as a lightweight client connecting to the RabbitMQ pool, ZooKeeper ensemble, and Swift storage with no local broker/database daemons)
 
 > 📐 **[View diagram: Multi-Node Cluster Architecture & Network Topology](docs/diagrams.md#1-multi-node-cluster-architecture--network-topology)**
 
@@ -63,11 +63,11 @@ This project implements an enterprise-grade, high-availability, distributed inte
 
 ---
 
-### Flow 3: Remote Node 4 / Remote Worker (Process 5) Pipeline & Persistence
+### Flow 3: Remote Node 1 / Remote Worker (Process 5) Pipeline & Persistence
 1. **Client (`curl`)**: Sends `POST /api/flow3` to `http://${FLOWFIRST_VIP}:8080`.
 2. **HAProxy**: Delivers request to `API Gateway (Process 1)` on any of the first three nodes (Round-Robin).
 3. **API Gateway (Process 1) ([`process1.py`](src/application/process1.py:1))**: Prepares data with UUID and initial metric, publishes to `flow3_p1_to_p5` via RabbitMQ pool.
-4. **Remote Worker (Process 5) ([`process5.py`](src/application/process5.py:1)) on Remote Node (`node4`)**: Consumes from `flow3_p1_to_p5`, modifies/computes remote transform value, logs audit trail, and **reflects** the modified data back to the RabbitMQ pool on `flow3_p5_to_p2`.
+4. **Remote Worker (Process 5) ([`process5.py`](src/application/process5.py:1)) on Remote Node (`remotenode1`)**: Consumes from `flow3_p1_to_p5`, modifies/computes remote transform value, logs audit trail, and **reflects** the modified data back to the RabbitMQ pool on `flow3_p5_to_p2`.
 5. **Transformer (Process 2) ([`process2.py`](src/application/process2.py:1)) on any of the first three nodes**: Consumes from `flow3_p5_to_p2`, verifies the remote transformation, appends audit trail, and publishes to `flow3_p2_to_p4` via RabbitMQ pool.
 6. **DB Updater (Process 4) ([`src/application/process4.py`](src/application/process4.py:1)) on any of the first three nodes**: Consumes from `flow3_p2_to_p4` and stores the complete history and payload into both the **MariaDB Galera Cluster** via [`src/db/db.py`](src/db/db.py:1) and **Swift Object Storage** via [`src/swift/swift_storage.py`](src/swift/swift_storage.py:1).
 
@@ -131,7 +131,7 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/devices/query \
 **Endpoint:** `PUT /api/devices/{device_id}`
 **Body:** JSON object of fields to update (e.g. `{"firmware_version":"3.0.0","tags":{"env":"staging"}}`)
 
-Flow 6 is the only flow that fans out to **two** downstream queues at Forwarder (Process 3) — one for direct persistence and one for the remote edge-sync on node4.
+Flow 6 is the only flow that fans out to **two** downstream queues at Forwarder (Process 3) — one for direct persistence and one for the remote edge-sync on remotenode1.
 
 1. **Client (`curl`)**: Sends `PUT /api/devices/{device_id}` with the update fields.
 2. **HAProxy**: Delivers to `API Gateway (Process 1)` on one of the active nodes.
@@ -139,7 +139,7 @@ Flow 6 is the only flow that fans out to **two** downstream queues at Forwarder 
 4. **Transformer (Process 2) ([`process2.py`](src/application/process2.py:1))**: Generates a monotonic `update_sequence` (ms timestamp from ZooKeeper config or system clock), sets `previous_state_tracked: true`, and forwards to `flow6_p2_to_p3`.
 5. **Forwarder (Process 3) ([`process3.py`](src/application/process3.py:1))**: Validates `device_id` is a 36-character UUID; on success **dual-publishes** — to `flow6_p3_to_p4` (direct DB path) **and** to `flow6_p3_to_p5` (remote edge-sync path). Rejects with nack if `device_id` is missing or malformed.
 6. **DB Updater (Process 4) — direct path** ([`process4.py`](src/application/process4.py:253)): Consumes from `flow6_p3_to_p4`; calls [`db.upsert_device()`](src/db/db.py:174) after ZK dedup check; archives to Swift.
-7. **Remote Worker (Process 5) on node4 — edge-sync path** ([`process5.py`](src/application/process5.py:76)): Consumes from `flow6_p3_to_p5`; computes `edge_sync_token = SHA-256(device_id:update_sequence)[:16]`; sets `remote_sync_applied: true`; publishes result to `flow6_p5_to_p2`.
+7. **Remote Worker (Process 5) on remotenode1 — edge-sync path** ([`process5.py`](src/application/process5.py:76)): Consumes from `flow6_p3_to_p5`; computes `edge_sync_token = SHA-256(device_id:update_sequence)[:16]`; sets `remote_sync_applied: true`; publishes result to `flow6_p5_to_p2`.
 8. **Transformer (Process 2) — remote return** ([`process2.py`](src/application/process2.py:1)): Consumes from `flow6_p5_to_p2`; sets `process2_remote_return_verified: true`; forwards to `flow6_p2_to_p4`.
 9. **DB Updater (Process 4) — remote path** ([`process4.py`](src/application/process4.py:298)): Consumes from `flow6_p2_to_p4`; idempotent upsert after ZK dedup check; archives to Swift.
 
@@ -185,18 +185,18 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | **0 (pre)** | All nodes (1–4) | Create `flowadmin` user, add to `wheel`, grant passwordless sudo, distribute SSH key — **all subsequent phases run as `flowadmin`** | `useradd flowadmin` → `usermod -aG wheel` → `/etc/sudoers.d/flowadmin` → `ssh-keygen` + `ssh-copy-id` |
 | **0a** | All nodes (1–4) | Time synchronisation — install & configure Chrony | `dnf install -y chrony` → `chronyc makestep` |
 | **0b** | All nodes (1–4) | Clone repo, create Python venv, copy `.env` | `git clone` → `python3 -m venv .venv` → `pip install --require-hashes -r requirements.txt` |
-| **1** | Nodes 1–3 only | MariaDB Galera cluster setup (configures official MariaDB repo for latest GA release) | `mariadb-galera/setup_galera_node.sh` |
-| **1 bootstrap** | Node 1 only | Bootstrap the primary Galera node | `mariadb-galera/bootstrap_galera.sh` |
-| **1b** | Nodes 1–3 only | ZooKeeper 3-node ensemble (servers) | `zookeeper/setup_zookeeper.sh` |
+| **1** | Mgmt Nodes 1–3 only | MariaDB Galera cluster setup (configures official MariaDB repo for latest GA release) | `mariadb-galera/setup_galera_node.sh` |
+| **1 bootstrap** | Mgmt Node 1 only | Bootstrap the primary Galera node | `mariadb-galera/bootstrap_galera.sh` |
+| **1b** | Mgmt Nodes 1–3 only | ZooKeeper 3-node ensemble (servers) | `zookeeper/setup_zookeeper.sh` |
 | **1c** | All nodes (1–4) | Raise OS file-descriptor limit for eventlet greenthreads | `ulimit -n 65536` + `/etc/security/limits.d/flowfirst.conf` |
-| **2** | Nodes 1–3 only | RabbitMQ cluster & Erlang install (servers) | `scripts/install_rabbitmq_rhel9.sh` |
-| **2b** | Nodes 1–3 only | Swift object-store cluster (proxy + account/container/object servers, 3-replica rings, tempauth) | `swift/setup_swift.sh` |
-| **3** | Nodes 1–3 only | Identify cluster NIC, set `VIP_NIC` in `.env`, generate HAProxy config | `haproxy/setup_haproxy.sh` |
-| **4** | Nodes 1–3 | Install systemd units for API Gateway (Process 1)–4 & target (Pacemaker managed) | `systemd/install_services.sh /opt/flowfirst` |
-| **4 (Remote)** | Node 4 only | Phase 0a+0b on node4 first (chrony, repo clone, venv, copy `.env` from node1 and set `NODE_NAME=node4`/`CURRENT_NODE_IP`), then install & enable `flowfirst-process5.service` | `systemd/install_services.sh /opt/flowfirst --remote` |
-| **5a** | Nodes 1–3 only | Prepare cluster nodes for Pacemaker (packages, `pcsd`, firewall, `/etc/hosts`) | `pacemaker/setup_multinode_cluster.sh --prepare-node` |
-| **5b** | Node 1 only | Initialise cluster, authenticate nodes, deploy VIP + HAProxy + process clones | `pacemaker/setup_multinode_cluster.sh` → `pacemaker/configure_multinode_resources.sh` |
-| **5c** | Node 1 only | Verify HAProxy is running under Pacemaker after cluster start | `pcs status` → `ss -tlnp \| grep haproxy` |
+| **2** | Mgmt Nodes 1–3 only | RabbitMQ cluster & Erlang install (servers) | `scripts/install_rabbitmq_rhel9.sh` |
+| **2b** | Mgmt Nodes 1–3 only | Swift object-store cluster (proxy + account/container/object servers, 3-replica rings, tempauth) | `swift/setup_swift.sh` |
+| **3** | Mgmt Nodes 1–3 only | Identify cluster NIC, set `VIP_NIC` in `.env`, generate HAProxy config | `haproxy/setup_haproxy.sh` |
+| **4** | Mgmt Nodes 1–3 | Install systemd units for API Gateway (Process 1)–4 & target (Pacemaker managed) | `systemd/install_services.sh /opt/flowfirst` |
+| **4 (Remote)** | Remote Node 1 only | Phase 0a+0b on remotenode1 first (chrony, repo clone, venv, copy `.env` from mgmtnode1 and set `NODE_NAME=remotenode1`/`CURRENT_NODE_IP`), then install & enable `flowfirst-process5.service` | `systemd/install_services.sh /opt/flowfirst --remote` |
+| **5a** | Mgmt Nodes 1–3 only | Prepare cluster nodes for Pacemaker (packages, `pcsd`, firewall, `/etc/hosts`) | `pacemaker/setup_multinode_cluster.sh --prepare-node` |
+| **5b** | Mgmt Node 1 only | Initialise cluster, authenticate nodes, deploy VIP + HAProxy + process clones | `pacemaker/setup_multinode_cluster.sh` → `pacemaker/configure_multinode_resources.sh` |
+| **5c** | Mgmt Node 1 only | Verify HAProxy is running under Pacemaker after cluster start | `pcs status` → `ss -tlnp \| grep haproxy` |
 
 ---
 
@@ -219,8 +219,8 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [13](#scenario-13-stop--start-rabbitmq-on-a-single-node) | Stop & Start RabbitMQ (one node) | Service lifecycle | Verify 2-node RMQ quorum, rejoin |
 | [14](#scenario-14-stop--start-mariadb-galera-on-a-single-node) | Stop & Start MariaDB (one node) | Service lifecycle | Verify 2-node Galera, normal rejoin |
 | [15](#scenario-15-stop--start-haproxy-on-a-single-node) | Stop & Start HAProxy (one node) | Service lifecycle | Move VIP group via `pcs resource move` |
-| [16](#scenario-16-reboot-a-single-node-node3--zero-pipeline-downtime) | Reboot One Node — Zero Downtime | OS reboot | Node3 reboot, cluster continuity, auto-rejoin |
-| [17](#scenario-17-reboot-the-node-hosting-the-vip-node1--forced-failover) | Reboot VIP-Holding Node — Forced Failover | OS reboot | Evacuate node1, reboot, confirm VIP migrated |
+| [16](#scenario-16-reboot-a-single-node-mgmt-node-3--zero-pipeline-downtime) | Reboot One Node — Zero Downtime | OS reboot | Mgmt Node 3 reboot, cluster continuity, auto-rejoin |
+| [17](#scenario-17-reboot-the-node-hosting-the-vip-mgmt-node-1--forced-failover) | Reboot VIP-Holding Node — Forced Failover | OS reboot | Evacuate mgmtnode1, reboot, confirm VIP migrated |
 | [18](#scenario-18-sequential-rolling-reboot-of-all-three-nodes) | Sequential Rolling Reboot (all 3 nodes) | OS reboot | Reboot one at a time, quorum maintained throughout |
 | [19](#scenario-19-simultaneous-reboot-of-all-three-nodes-cluster-cold-start) | Simultaneous Reboot — Cluster Cold Start | OS reboot | All 3 nodes down, Galera bootstrap, Pacemaker cold start |
 | [20](#scenario-20-soft-network-degradation--latency--packet-loss-tc-netem) | Soft Network Degradation (latency + loss) | Network glitch | `tc netem` 300 ms + 10% loss, observe Corosync/Galera/RMQ |
@@ -247,7 +247,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [41](#scenario-41-per-queue-greenthread-independence--flow-1-blockage-does-not-stall-flow-2) | Per-Queue Greenthread Independence | Greenthreads | Slow one queue, confirm sibling greenthread unaffected |
 | [42](#scenario-42-greenthread-auto-restart-on-rabbitmq-consumer-failure) | Greenthread Auto-Restart on RMQ Failure | Greenthreads | Kill RMQ connection, greenthread reconnects automatically |
 | [43](#scenario-43-greenthread-metrics-reporter--throughput-monitoring) | Greenthread Metrics Reporter | Greenthreads | Read throughput counters from `/gt/status` and journal |
-| [44](#scenario-44-remote-node-4--process-5-end-to-end-pipeline-execution--database-validation) | Remote Node 4 / Remote Worker (Process 5) Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 4)→P2→P4, verify MariaDB audit trail & Swift object storage |
+| [44](#scenario-44-remote-node-1--process-5-end-to-end-pipeline-execution--database-validation) | Remote Node 1 / Remote Worker (Process 5) Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 1)→P2→P4, verify MariaDB audit trail & Swift object storage |
 | [45](#scenario-45-reading-the-mariadb-galera-error-log-across-scenarios) | Reading the MariaDB Galera Error Log | Galera | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 | [46](#scenario-46-reading-the-rabbitmq-broker-log-across-scenarios) | Reading the RabbitMQ Broker Log | RabbitMQ | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 | [47](#scenario-47-reading-the-zookeeper-server--client-logs-across-scenarios) | Reading the ZooKeeper Server & Client Logs | ZooKeeper | Locate logs, server & kazoo phrasebook, election timeline, session expiry correlation |
@@ -266,7 +266,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [60](#scenario-60-pipeline-process-log-files-varlogflowfirst) | Pipeline Process Log Files | Logging | `/var/log/flowfirst/processN.log`, levels, rotation, tracing one message across processes |
 | [61](#scenario-61-scalability-test--thousands-of-concurrent-api-invocations-four-node-cluster) | Scalability Test — Thousands of Concurrent API Invocations | Scale | `scripts/load_test_api.py` step test, scale parameters, bottleneck table, queue drain, DB cross-check |
 | [62](#scenario-62-performance-test--measured-latency-throughput-and-freshness-for-client-expectations) | Performance Test — Latency, Throughput & Freshness for Client Expectations | Performance | Fixed workload profiles, warm-up + 3 repeats, end-to-end latency from MariaDB, resource sampling, soak run, load during failover, result template |
-| [63](#scenario-63-tls-everywhere--private-ca-mutual-tls-rest-api-and-encrypted-internal-traffic) | TLS Everywhere — Private CA, Mutual-TLS REST API, Encrypted Internal Traffic | Security | `security/` PKI scripts, certificate per use, HTTPS + client certificates on the API, RabbitMQ/MariaDB/ZooKeeper/Swift TLS, node4 identity, rotation, revocation, `verify_tls.sh` |
+| [63](#scenario-63-tls-everywhere--private-ca-mutual-tls-rest-api-and-encrypted-internal-traffic) | TLS Everywhere — Private CA, Mutual-TLS REST API, Encrypted Internal Traffic | Security | `security/` PKI scripts, certificate per use, HTTPS + client certificates on the API, RabbitMQ/MariaDB/ZooKeeper/Swift TLS, remotenode1 identity, rotation, revocation, `verify_tls.sh` |
 | [64](#scenario-64-iot-device-crud--flow-4-create-device) | IoT Device CRUD — Flow 4: Create Device | CRUD Pipeline | `POST /api/devices`, device fingerprint, device type validation, `devices` table upsert |
 | [65](#scenario-65-iot-device-crud--flow-5-query-devices) | IoT Device CRUD — Flow 5: Query Devices | CRUD Pipeline | `POST /api/devices/query`, filter normalisation, `query_devices()` dynamic WHERE |
 | [66](#scenario-66-iot-device-crud--flow-6-update-device-with-remote-edge-sync) | IoT Device CRUD — Flow 6: Update Device with Remote Edge-Sync | CRUD Pipeline | `PUT /api/devices/{id}`, dual-publish P3→P4+P5, edge_sync_token, remote return path |
@@ -281,7 +281,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [75](#scenario-75-pacemaker-cluster-demo-across-nodes) | Pacemaker Cluster Demo Across Nodes | Pacemaker | `scripts/pacemaker_cluster_demo.py`: quorum/DC, resource placement vs the real interfaces and systemd on every node, `failover` (VIP holder to standby) and `ban` (one pipeline instance) with automatic restore, live `watch` |
 | [76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-) | Add an Extra Core Node (`extramgmtnode1`, `extramgmtnode2`, …) | Cluster scaling | `EXTRA_NODES` in `.env`, `scripts/add_extra_node.sh` (10 resumable steps), ZooKeeper rolling restart, Galera join, RabbitMQ `join_cluster`, Swift ring expansion, HAProxy backends, Pacemaker `clone-max`, TLS certificates, verification, rollback
 
-> **Which node do the demos (Scenarios 69–75) run on?** Log in to **node1** and run them there; the few exceptions (stopping a service on node3, starting `failover` from node2/node3, node4 cannot run the Pacemaker demo) are listed in [Where to run the demos](#where-to-run-the-demos-scenarios-6975).
+> **Which node do the demos (Scenarios 69–75) run on?** Log in to **mgmtnode1** and run them there; the few exceptions (stopping a service on mgmtnode3, starting `failover` from mgmtnode2/mgmtnode3, remotenode1 cannot run the Pacemaker demo) are listed in [Where to run the demos](#where-to-run-the-demos-scenarios-6975).
 
 
 
@@ -339,10 +339,10 @@ chmod 440 /etc/sudoers.d/flowadmin
 install -d -m 700 -o flowadmin -g flowadmin /home/flowadmin/.ssh
 ```
 
-**Step 2 — Generate the SSH key pair once (on node1's console as root):**
+**Step 2 — Generate the SSH key pair once (on mgmtnode1's console as root):**
 
 ```bash
-# On node1 console, as root — generate a key pair for flowadmin with no passphrase:
+# On mgmtnode1 console, as root — generate a key pair for flowadmin with no passphrase:
 sudo -u flowadmin ssh-keygen -t ed25519 -C "flowadmin@flowfirst" -N "" \
     -f /home/flowadmin/.ssh/id_ed25519
 
@@ -354,10 +354,10 @@ Copy the single output line (it starts with `ssh-ed25519 AAAA...`). You will pas
 
 **Step 3 — Install the public key on every node (console as root on each):**
 
-Run the following on **all four nodes** (including node1 itself). Paste the public key line from Step 2 where indicated:
+Run the following on **all four nodes** (including mgmtnode1 itself). Paste the public key line from Step 2 where indicated:
 
 ```bash
-# Replace the line below with the actual output of 'cat id_ed25519.pub' from node1:
+# Replace the line below with the actual output of 'cat id_ed25519.pub' from mgmtnode1:
 PUBKEY="ssh-ed25519 AAAA...paste-full-line-here... flowadmin@flowfirst"
 
 install -d -m 700 -o flowadmin -g flowadmin /home/flowadmin/.ssh
@@ -370,7 +370,7 @@ restorecon -R /home/flowadmin/.ssh
 
 > **Tip — copy the key without manual paste (optional):** If you can already SSH into the other nodes as your own user and have `sudo`, you can push the key without using the cloud console:
 > ```bash
-> # From node1 as flowadmin — push the public key to node2 and node3:
+> # From mgmtnode1 as flowadmin — push the public key to mgmtnode2 and mgmtnode3:
 > for node in ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
 >     cat /home/flowadmin/.ssh/id_ed25519.pub | \
 >         ssh <your-user>@${node} "sudo tee -a /home/flowadmin/.ssh/authorized_keys > /dev/null \
@@ -386,7 +386,7 @@ restorecon -R /home/flowadmin/.ssh
 `flowadmin` has no login password — authentication is by key only. You are currently root on the console, so switch to `flowadmin` with `su`:
 
 ```bash
-# Still on the node1 console as root — switch user (no password needed from root):
+# Still on the mgmtnode1 console as root — switch user (no password needed from root):
 su - flowadmin
 ```
 
@@ -426,7 +426,7 @@ done
 **Step 5 — From this point on, work as `flowadmin` and prefix install commands with `sudo`:**
 
 ```bash
-# From the node1 console (still as root):
+# From the mgmtnode1 console (still as root):
 su - flowadmin
 
 # Or from a remote machine (key auth — no password):
@@ -583,20 +583,20 @@ pip install --upgrade pip
 pip install --require-hashes -r requirements.txt
 
 # 4. Copy the pre-built .env for THIS node (already has all IPs set):
-#      node1 (10.10.1.128): cp src/config/.env.node1 .env
-#      node2 (10.10.1.129): cp src/config/.env.node2 .env
-#      node3 (10.10.1.130): cp src/config/.env.node3 .env
-#      node4 (10.10.1.131): cp src/config/.env.node4 .env
-cp src/config/.env.node1 .env          # ← change node1 to match THIS node
+#      mgmtnode1 (10.10.1.128): cp src/config/.env.mgmtnode1 .env
+#      mgmtnode2 (10.10.1.129): cp src/config/.env.mgmtnode2 .env
+#      mgmtnode3 (10.10.1.130): cp src/config/.env.mgmtnode3 .env
+#      remotenode1 (10.10.1.131): cp src/config/.env.remotenode1 .env
+cp src/config/.env.mgmtnode1 .env          # ← change mgmtnode1 to match THIS node
 chmod 600 .env
 
-# 5. Generate secrets and push .env to all nodes in one command (run on node1 only):
+# 5. Generate secrets and push .env to all nodes in one command (run on mgmtnode1 only):
 sudo ./scripts/deploy_secrets.sh
 ```
 
 > **What `deploy_secrets.sh` does:** generates strong random values for `RABBITMQ_PASSWORD`, `MARIADB_PASSWORD`, `SWIFT_KEY` and `HAPROXY_STATS_PASS` (calling `generate_secrets.sh --write` internally), then pushes the resulting `.env` to nodes 2, 3 and 4 over SSH and patches `NODE_NAME`/`CURRENT_NODE_IP` on each. `SWIFT_HASH_PATH_PREFIX` and `SWIFT_HASH_PATH_SUFFIX` are already set in the per-node files and are left untouched. The script never prints a secret value and never stores secrets in a temporary file.
 >
-> **Why `SWIFT_KEY` is not pre-set in the `.env.node*` files (unlike the hash paths):**  the per-node `.env` files are committed to git. `SWIFT_KEY` is a password — baking it into a tracked file would leak it permanently into version history. The hash paths (`SWIFT_HASH_PATH_*`) are safe to commit because they are structural ring identifiers, not authentication credentials: knowing them gives no access to Swift without also knowing the password. `deploy_secrets.sh` generates `SWIFT_KEY` at install time and pushes it over SSH, so it never touches git.
+> **Why `SWIFT_KEY` is not pre-set in the `.env.*node*` files (unlike the hash paths):**  the per-node `.env` files are committed to git. `SWIFT_KEY` is a password — baking it into a tracked file would leak it permanently into version history. The hash paths (`SWIFT_HASH_PATH_*`) are safe to commit because they are structural ring identifiers, not authentication credentials: knowing them gives no access to Swift without also knowing the password. `deploy_secrets.sh` generates `SWIFT_KEY` at install time and pushes it over SSH, so it never touches git.
 >
 > **Override the SSH user** if your cluster uses a different admin account:
 > ```bash
@@ -615,9 +615,9 @@ Then **edit `.env`** on each node. The rules are simple:
 
 #### Per-node variables (change these on each node)
 
-| Variable | node1 | node2 | node3 | What it means |
+| Variable | mgmtnode1 | mgmtnode2 | mgmtnode3 | What it means |
 |---|---|---|---|---|
-| `NODE_NAME` | `node1` | `node2` | `node3` | The hostname **of this node** — must match `/etc/hostname` and the name passed to `pcs cluster setup` |
+| `NODE_NAME` | `mgmtnode1` | `mgmtnode2` | `mgmtnode3` | The hostname **of this node** — must match `/etc/hostname` and the name passed to `pcs cluster setup` |
 | `CURRENT_NODE_IP` | `10.10.1.128` | `10.10.1.129` | `10.10.1.130` | The cluster-interface IP **of this node** — used by Galera's `wsrep_node_address` and Corosync bind address |
 
 #### Shared variables (identical on all three nodes)
@@ -625,10 +625,10 @@ Then **edit `.env`** on each node. The rules are simple:
 | Variable | Value | Notes |
 |---|---|---|
 | `CLUSTER_NAME` | `flowfirst_cluster` | Same on every node |
-| `NODE1_IP` | `10.10.1.128` | **Always the IP of node1**, regardless of which node the file is on |
-| `NODE2_IP` | `10.10.1.129` | **Always the IP of node2** |
-| `NODE3_IP` | `10.10.1.130` | **Always the IP of node3** |
-| `NODE4_IP` | `10.10.1.131` | **Always the IP of node4** (Remote Worker) |
+| `NODE1_IP` | `10.10.1.128` | **Always the IP of mgmtnode1**, regardless of which node the file is on |
+| `NODE2_IP` | `10.10.1.129` | **Always the IP of mgmtnode2** |
+| `NODE3_IP` | `10.10.1.130` | **Always the IP of mgmtnode3** |
+| `NODE4_IP` | `10.10.1.131` | **Always the IP of remotenode1** (Remote Worker) |
 | `FLOWFIRST_VIP` | `10.10.1.200` | Pacemaker Virtual IP — same on all nodes |
 | `RABBITMQ_HOST` | `10.10.1.200` | **Set to the VIP IP.** This is only a single-host fallback; in normal cluster operation `src/config/config.py` never reads it — it builds a full three-node host list from `NODE1_IP`…`NODE3_IP` automatically. |
 | `RABBITMQ_HOSTS` | *(leave blank)* | **Leave empty.** `src/config/config.py` builds `10.10.1.128:5672,10.10.1.129:5672,10.10.1.130:5672` at runtime from `NODE*_IP`. |
@@ -636,7 +636,7 @@ Then **edit `.env`** on each node. The rules are simple:
 | `MARIADB_HOST` | `10.10.1.200` | **Set to the VIP IP** — routes through HAProxy to the Galera cluster |
 | `MARIADB_HOSTS` | *(leave blank)* | **Leave empty.** `src/config/config.py` builds `10.10.1.128,10.10.1.129,10.10.1.130` at runtime. |
 | `MARIADB_PORT` | `3306` | Literal integer |
-| `SWIFT_AUTH_URL` | `http://10.10.1.200:8090/auth/v1.0` | **Set to the VIP IP.** HAProxy's Swift frontend (`SWIFT_LB_PORT=8090`) load-balances to the Swift proxy on `:8888`. Must be identical on all nodes including node4. Do **not** use a node-direct address (`:8888`) or the REST API port (`8080`). |
+| `SWIFT_AUTH_URL` | `http://10.10.1.200:8090/auth/v1.0` | **Set to the VIP IP.** HAProxy's Swift frontend (`SWIFT_LB_PORT=8090`) load-balances to the Swift proxy on `:8888`. Must be identical on all nodes including remotenode1. Do **not** use a node-direct address (`:8888`) or the REST API port (`8080`). |
 
 #### Concrete `.env` for each node
 
@@ -644,10 +644,10 @@ Pre-built files are in `src/config/`. Copy the right one on each node:
 
 | Node | IP | Command |
 |---|---|---|
-| node1 | `10.10.1.128` | `cp src/config/.env.node1 .env` |
-| node2 | `10.10.1.129` | `cp src/config/.env.node2 .env` |
-| node3 | `10.10.1.130` | `cp src/config/.env.node3 .env` |
-| node4 | `10.10.1.131` | `cp src/config/.env.node4 .env` |
+| mgmtnode1 | `10.10.1.128` | `cp src/config/.env.mgmtnode1 .env` |
+| mgmtnode2 | `10.10.1.129` | `cp src/config/.env.mgmtnode2 .env` |
+| mgmtnode3 | `10.10.1.130` | `cp src/config/.env.mgmtnode3 .env` |
+| remotenode1 | `10.10.1.131` | `cp src/config/.env.remotenode1 .env` |
 
 The only values that differ between nodes are `NODE_NAME` and `CURRENT_NODE_IP`; everything else — including the passwords set by `generate_secrets.sh --write` and the pre-generated Swift hash paths — is identical. See Phase 0b for the full copy-and-deploy workflow.
 
@@ -669,7 +669,7 @@ The only values that differ between nodes are `NODE_NAME` and `CURRENT_NODE_IP`;
 > `mariadb-galera/setup_galera_node.sh` configures the official MariaDB repository (via `mariadb_repo_setup`) so that the latest stable GA release of MariaDB Server and Galera are always installed.
 > All scripts automatically read parameters from `/opt/flowfirst/.env`.
 
-#### 1. On Node 1:
+#### 1. On Mgmt Node 1:
 ```bash
 cd /opt/flowfirst
 # Configure MariaDB repository & Galera node settings (reads from .env)
@@ -679,7 +679,7 @@ sudo ./mariadb-galera/setup_galera_node.sh
 sudo ./mariadb-galera/bootstrap_galera.sh
 ```
 
-#### 2. On Node 2:
+#### 2. On Mgmt Node 2:
 ```bash
 cd /opt/flowfirst
 # Configure Galera node settings (reads from .env)
@@ -689,7 +689,7 @@ sudo ./mariadb-galera/setup_galera_node.sh
 sudo systemctl enable --now mariadb
 ```
 
-#### 3. On Node 3:
+#### 3. On Mgmt Node 3:
 ```bash
 cd /opt/flowfirst
 # Configure Galera node settings (reads from .env)
@@ -803,7 +803,7 @@ The full znode tree populated once the pipeline processes start:
 │   └── flow2_scale_factor      (default: "1.15")
 ├── registry/         ← ephemeral service registration (auto-removed on crash)
 │   ├── process1/
-│   │   └── node1     {"node":"node1","pid":1234,"started_at":"..."}
+│   │   └── mgmtnode1     {"node":"mgmtnode1","pid":1234,"started_at":"..."}
 │   ├── process2/
 │   ├── process3/
 │   └── process4/
@@ -811,7 +811,7 @@ The full znode tree populated once the pipeline processes start:
 │   └── <message_id>  ← created on first processing, auto-expires after ZK_DEDUP_TTL_MS
 └── health/           ← pipeline health dashboard
     ├── process1/
-    │   └── node1     {"state":"leader","updated_at":"...","pid":1234}
+    │   └── mgmtnode1     {"state":"leader","updated_at":"...","pid":1234}
     ├── process2/
     ├── process3/
     └── process4/
@@ -848,9 +848,9 @@ ls /flowfirst
 ls /flowfirst/election/process1
 get /flowfirst/config/flow2_high_threshold
 ls /flowfirst/registry/process1
-get /flowfirst/registry/process1/node1
+get /flowfirst/registry/process1/mgmtnode1
 ls /flowfirst/health/process1
-get /flowfirst/health/process1/node1
+get /flowfirst/health/process1/mgmtnode1
 quit
 ```
 
@@ -1032,7 +1032,7 @@ The script performs these steps automatically:
 > **Why `pause_minority`:** if the network splits, a broker that can no longer see a majority of the cluster (at least 2 of 3) pauses itself and stops serving clients. It resumes and resyncs automatically when the network heals. The pipeline processes reconnect to the majority side through `src/config/config.py`'s multi-host list. RabbitMQ's default, `ignore`, keeps both sides running independently, so they diverge until an operator restarts one side.
 > **Trade-off:** if two brokers are down at the same time, the third pauses as well and the pipeline stops until one of them returns (see [Scenario 19](#scenario-19-simultaneous-reboot-of-all-three-nodes-cluster-cold-start)).
 >
-> On a cluster installed before this change, apply it on **each of node1–node3**, one node at a time:
+> On a cluster installed before this change, apply it on **each of mgmtnode1–mgmtnode3**, one node at a time:
 > ```bash
 > echo 'cluster_partition_handling = pause_minority' | sudo tee -a /etc/rabbitmq/rabbitmq.conf
 > sudo systemctl restart rabbitmq-server
@@ -1041,13 +1041,13 @@ The script performs these steps automatically:
 
 ---
 
-### Phase 2b: Install the Swift Object Store Cluster on Nodes 1–3
+### Phase 2b: Install the Swift Object Store Cluster on Mgmt Nodes 1–3
 
-> **Install after RabbitMQ (Phase 2a) and before HAProxy (Phase 3).** Node 4 does **not** run a Swift server; it only needs `python-swiftclient` (already in `requirements.txt`) and `SWIFT_AUTH_URL` pointing at the VIP.
+> **Install after RabbitMQ (Phase 2a) and before HAProxy (Phase 3).** Remote Node 1 does **not** run a Swift server; it only needs `python-swiftclient` (already in `requirements.txt`) and `SWIFT_AUTH_URL` pointing at the VIP.
 
 Swift is installed as a **native service** from RPM packages and managed by plain `systemd` on each node (like MariaDB, RabbitMQ and ZooKeeper), not by Pacemaker. RHEL 9 has no Swift server packages in its own repositories, so the script uses the **CentOS Cloud SIG OpenStack** repository (release set by `SWIFT_OPENSTACK_RELEASE`, default `epoxy` = Swift 2.35). The repo file is written with `enabled=0` and is only enabled for the Swift `dnf install`, so routine `dnf update` runs on the cluster never pull in OpenStack builds of base libraries.
 
-**What runs where (all of it on each of node1, node2 and node3):**
+**What runs where (all of it on each of mgmtnode1, mgmtnode2 and mgmtnode3):**
 
 | Component | Port | Purpose |
 |---|---|---|
@@ -1060,9 +1060,9 @@ Swift is installed as a **native service** from RPM packages and managed by plai
 
 **How the cluster is formed:** the script builds the account, container and object rings from `NODE1_IP..NODE3_IP` with one **zone per node**, `SWIFT_REPLICAS=3` and a fixed seed, so every node generates **byte-identical** `*.ring.gz` files and nothing has to be copied between nodes. Every object is therefore stored on all three nodes, and one node can fail without losing data or availability (writes need 2 of 3 replicas).
 
-`SWIFT_HASH_PATH_PREFIX` and `SWIFT_HASH_PATH_SUFFIX` are already set to pre-generated values in `src/config/.env.node1`–`.env.node3` (and identical in `.env.node4`). You do **not** need to run `openssl rand` manually. They must never change after data is stored; `setup_swift.sh` reads them from `.env` and writes them into `/etc/swift/swift.conf` — if they differ between nodes, objects become unreachable.
+`SWIFT_HASH_PATH_PREFIX` and `SWIFT_HASH_PATH_SUFFIX` are already set to pre-generated values in `src/config/.env.mgmtnode1`–`.env.mgmtnode3` (and identical in `.env.remotenode1`). You do **not** need to run `openssl rand` manually. They must never change after data is stored; `setup_swift.sh` reads them from `.env` and writes them into `/etc/swift/swift.conf` — if they differ between nodes, objects become unreachable.
 
-Confirm `SWIFT_USER` / `SWIFT_KEY` (the tempauth login, format `<account>:<user>`) and `SWIFT_AUTH_URL` (`http://10.10.1.200:8090/auth/v1.0`) are set in `.env` on **every node including node4** (they are pre-filled in the per-node files).
+Confirm `SWIFT_USER` / `SWIFT_KEY` (the tempauth login, format `<account>:<user>`) and `SWIFT_AUTH_URL` (`http://10.10.1.200:8090/auth/v1.0`) are set in `.env` on **every node including remotenode1** (they are pre-filled in the per-node files).
 
 ```bash
 cd /opt/flowfirst
@@ -1138,13 +1138,13 @@ Edit `/opt/flowfirst/.env` and set `VIP_NIC` to the name found above.
 The value may be different on each node:
 
 ```ini
-# On node1 (e.g. KVM guest with virtio NIC)
+# On mgmtnode1 (e.g. KVM guest with virtio NIC)
 VIP_NIC=ens3
 
-# On node2 (e.g. physical server with Broadcom NIC)
+# On mgmtnode2 (e.g. physical server with Broadcom NIC)
 VIP_NIC=enp0s3
 
-# On node3 (e.g. VMware guest)
+# On mgmtnode3 (e.g. VMware guest)
 VIP_NIC=ens192
 ```
 
@@ -1405,7 +1405,7 @@ sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 
 ### Phase 4: Install Systemd Services
 
-#### Step 4a — Core Cluster Nodes (node1, node2, node3)
+#### Step 4a — Core Cluster Nodes (mgmtnode1, mgmtnode2, mgmtnode3)
 Install unit files for Processes 1–4 and disable direct systemd boot so Pacemaker manages process lifecycles:
 
 ```bash
@@ -1417,28 +1417,28 @@ sudo ./systemd/install_services.sh /opt/flowfirst
 sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4
 ```
 
-#### Step 4b — Remote Node 4 (`node4` only)
+#### Step 4b — Remote Node 1 (`remotenode1` only)
 
-On Remote Node 4, **only Remote Worker (Process 5)** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, Swift server, HAProxy, or Pacemaker) run on Node 4; Remote Worker (Process 5) acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`).
+On Remote Node 1, **only Remote Worker (Process 5)** is installed and enabled. No server daemons (ZooKeeper server, RabbitMQ server, Galera server, Swift server, HAProxy, or Pacemaker) run on Remote Node 1; Remote Worker (Process 5) acts strictly as a Python client (`pika`, `kazoo`, `python-swiftclient`).
 
-Node 4 requires the same Phase 0 bootstrap as the cluster nodes — run **Phase 0 (pre-step)**, **Phase 0a** (time sync), and **Phase 0b** (clone repo & Python environment) on node4 before continuing here. Those steps are identical to what was done on nodes 1–3.
+Remote Node 1 requires the same Phase 0 bootstrap as the cluster nodes — run **Phase 0 (pre-step)**, **Phase 0a** (time sync), and **Phase 0b** (clone repo & Python environment) on remotenode1 before continuing here. Those steps are identical to what was done on nodes 1–3.
 
-##### `.env` for node4
+##### `.env` for remotenode1
 
-Node 4 does **not** run `generate_secrets.sh`. In Phase 0b you already copied `src/config/.env.node4` to `/opt/flowfirst/.env` on node4 — that file has `NODE_NAME=node4`, `CURRENT_NODE_IP=10.10.1.131`, and the same pre-generated Swift hash paths as the cluster nodes. After `generate_secrets.sh --write` runs on node1, copy the secrets-filled `.env` from node1 and restore node4's per-node identity:
+Remote Node 1 does **not** run `generate_secrets.sh`. In Phase 0b you already copied `src/config/.env.remotenode1` to `/opt/flowfirst/.env` on remotenode1 — that file has `NODE_NAME=remotenode1`, `CURRENT_NODE_IP=10.10.1.131`, and the same pre-generated Swift hash paths as the cluster nodes. After `generate_secrets.sh --write` runs on mgmtnode1, copy the secrets-filled `.env` from mgmtnode1 and restore remotenode1's per-node identity:
 
 ```bash
-# From node1 — push the secrets-filled .env to node4:
+# From mgmtnode1 — push the secrets-filled .env to remotenode1:
 scp /opt/flowfirst/.env flowadmin@10.10.1.131:/opt/flowfirst/.env
 ssh flowadmin@10.10.1.131 "
-    sed -i 's/^NODE_NAME=.*/NODE_NAME=node4/' /opt/flowfirst/.env
+    sed -i 's/^NODE_NAME=.*/NODE_NAME=remotenode1/' /opt/flowfirst/.env
     sed -i 's/^CURRENT_NODE_IP=.*/CURRENT_NODE_IP=10.10.1.131/' /opt/flowfirst/.env
 "
 ```
 
 This is already handled by the push loop in Phase 0b if you include `10.10.1.131` in it. All other variables (`NODE1_IP`–`NODE4_IP`, `FLOWFIRST_VIP`, `RABBITMQ_*`, `MARIADB_*`, `SWIFT_*`, passwords, Swift hash paths) are **identical to the cluster nodes** — do not change them.
 
-> **Firewall on node4:** outbound connections from node4 to the cluster. Ensure node4 can reach:
+> **Firewall on remotenode1:** outbound connections from remotenode1 to the cluster. Ensure remotenode1 can reach:
 > - `NODE1_IP`–`NODE3_IP` on port `5672` (RabbitMQ AMQP) — or `5671` when `TLS_RABBITMQ_ENABLED=true`
 > - `NODE1_IP`–`NODE3_IP` on port `2181` (ZooKeeper) — or `2281` when `TLS_ZK_ENABLED=true`
 > - `FLOWFIRST_VIP` on port `8090` (Swift, if `SWIFT_ENABLED=true`)
@@ -1449,7 +1449,7 @@ This is already handled by the push loop in Phase 0b if you include `10.10.1.131
 cd /opt/flowfirst
 sudo ./systemd/install_services.sh /opt/flowfirst --remote
 
-# Enable and start Remote Worker (Process 5) on Remote Node 4
+# Enable and start Remote Worker (Process 5) on Remote Node 1
 sudo systemctl enable --now flowfirst-process5
 sudo systemctl status flowfirst-process5
 ```
@@ -1474,7 +1474,7 @@ sudo systemctl status flowfirst-process5
 * **`LOG_DIR` outside `/var/log/flowfirst`:** the process still starts but logs "file logging disabled" (read-only file system). Add a drop-in, `sudo systemctl edit flowfirst-process1` (or create `.../flowfirst-process1.service.d/99-local.conf`) containing `[Service]` and `ReadWritePaths=/your/dir`, then `daemon-reload` and restart. Tested.
 * **Application directory or TLS files under `/home` or `/root`:** `install_services.sh` switches `ProtectHome` to `read-only` when the install directory is there. It cannot know about `TLS_*` paths; keep them under `/etc/flowfirst/tls` (the default), or set `ProtectHome=read-only` in a `99-local.conf`. The `/home` branch was **not** exercised.
 * **Relaxing one setting:** put it in a `99-local.conf` drop-in (for example `MemoryDenyWriteExecute=false`); it sorts after `10-hardening.conf` and wins. `FLOWFIRST_NO_HARDENING=1 sudo ./systemd/install_services.sh ...` installs the units without the sandbox, for finding out whether the sandbox causes a problem.
-* **Upgrading an existing node:** re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload`, and restart **one node at a time** through Pacemaker standby as in the Production Rollout Run-Book. Pacemaker's `systemd:` resources pick up drop-ins; this was **not** run under Pacemaker.
+* **Upgrading an existing node:** re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on remotenode1), then `sudo systemctl daemon-reload`, and restart **one node at a time** through Pacemaker standby as in the Production Rollout Run-Book. Pacemaker's `systemd:` resources pick up drop-ins; this was **not** run under Pacemaker.
 
 **Limits**
 1. Not run on RHEL 9 (systemd 252) or with SELinux enforcing. The directives used all exist in systemd 252, but an SELinux denial would be a separate problem. On RHEL 9 check `ausearch -m avc -ts recent` after the first start.
@@ -1491,7 +1491,7 @@ sudo systemctl status flowfirst-process5
 > reachable on port 2224 on **all three nodes** before `pcs host auth` can succeed.
 > The script handles this with a `--prepare-node` flag.
 
-#### Step 5a — Run on ALL THREE nodes first (node1, node2, node3)
+#### Step 5a — Run on ALL THREE nodes first (mgmtnode1, mgmtnode2, mgmtnode3)
 
 ```bash
 cd /opt/flowfirst
@@ -1557,7 +1557,7 @@ sudo journalctl -u haproxy -n 30 --no-pager
 
 ### Phase 6 (optional): TLS for the REST API and all internal links
 
-Everything above works in plain text, and TLS is **off by default** (`TLS_*_ENABLED=false`). Once the cluster is healthy you can add a private CA, mutual-TLS access to the REST API and encrypted RabbitMQ, MariaDB, ZooKeeper and Swift connections, including from the remote node4. Do it on a test cluster first, one component at a time. The full procedure (certificate inventory, rollout order with undo steps, client usage, rotation, revocation, troubleshooting) and an honest list of what was and was not tested are in [Scenario 63](#scenario-63-tls-everywhere--private-ca-mutual-tls-rest-api-and-encrypted-internal-traffic). In short:
+Everything above works in plain text, and TLS is **off by default** (`TLS_*_ENABLED=false`). Once the cluster is healthy you can add a private CA, mutual-TLS access to the REST API and encrypted RabbitMQ, MariaDB, ZooKeeper and Swift connections, including from the remote remotenode1. Do it on a test cluster first, one component at a time. The full procedure (certificate inventory, rollout order with undo steps, client usage, rotation, revocation, troubleshooting) and an honest list of what was and was not tested are in [Scenario 63](#scenario-63-tls-everywhere--private-ca-mutual-tls-rest-api-and-encrypted-internal-traffic). In short:
 
 ```bash
 ./security/init_ca.sh && ./security/issue_all.sh     # admin host, once
@@ -1586,16 +1586,16 @@ sudo ./security/enable_rabbitmq_tls.sh               # then the zookeeper, maria
 > resolves from that single `.env` — **no IP addresses are hardcoded**.
 >
 > **Where to run commands.** Each scenario starts with a **Runs on** line, and a `# On nodeX` comment marks any step that runs somewhere else. General rules:
-> - `pcs`, `crm_mon`, `crm_resource`, `corosync-cfgtool`: any cluster member (node1–node3). They act cluster-wide, so `pcs resource ban X node2` need not run on node2.
-> - `sudo mysql -u root -p` (no `-h`), `rabbitmqctl`, `rabbitmqadmin`, `zkCli.sh -server 127.0.0.1:2181`: node1–node3 only, and they talk to the **local** service, which must be running.
+> - `pcs`, `crm_mon`, `crm_resource`, `corosync-cfgtool`: any cluster member (mgmtnode1–mgmtnode3). They act cluster-wide, so `pcs resource ban X mgmtnode2` need not run on mgmtnode2.
+> - `sudo mysql -u root -p` (no `-h`), `rabbitmqctl`, `rabbitmqadmin`, `zkCli.sh -server 127.0.0.1:2181`: mgmtnode1–mgmtnode3 only, and they talk to the **local** service, which must be running.
 > - `journalctl -u flowfirst-processN`: local logs only. Only the ZooKeeper-elected leader does the work, so read logs on the leader node (`curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health`).
 > - `tc`, `iptables`, `tcpdump`: affect or capture only the node they run on.
-> - `curl http://${FLOWFIRST_VIP}…` and `mysql -h ${FLOWFIRST_VIP} …`: any machine that can reach the VIP (node1–node4 or a workstation; `mysql` needs a mariadb client).
-> - node4 runs only `flowfirst-process5`, with no local MariaDB, RabbitMQ, ZooKeeper or Pacemaker.
+> - `curl http://${FLOWFIRST_VIP}…` and `mysql -h ${FLOWFIRST_VIP} …`: any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation; `mysql` needs a mariadb client).
+> - remotenode1 runs only `flowfirst-process5`, with no local MariaDB, RabbitMQ, ZooKeeper or Pacemaker.
 
 ### Scenario 1: Invoke REST API via Virtual IP & Verify Round-Robin Load Balancing
 
-> **Runs on:** any machine that can reach the VIP (node1–node4 or a workstation).
+> **Runs on:** any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation).
 
 Send requests directly to the **Virtual IP (`${FLOWFIRST_VIP}:${API_PORT:-8080}`)**:
 
@@ -1639,12 +1639,12 @@ done
 ```
 *Expected output — each of the three nodes handles two requests:*
 ```text
-node1
-node2
-node3
-node1
-node2
-node3
+mgmtnode1
+mgmtnode2
+mgmtnode3
+mgmtnode1
+mgmtnode2
+mgmtnode3
 ```
 
 > **If all six lines show the same node** HAProxy is balancing correctly but the responses are 400s whose JSON has no `handled_by_node` key (jq prints `null`). Confirm with:
@@ -1659,16 +1659,16 @@ Confirm the distribution using the HAProxy stats API (no `jq` required):
 ```bash
 curl -s -u "${HAPROXY_STATS_USER}:${HAPROXY_STATS_PASS}" \
   "http://${FLOWFIRST_VIP}:9000/stats;csv" \
-  | grep -E "^api_backend,(node1|node2|node3)" \
+  | grep -E "^api_backend,(mgmtnode1|mgmtnode2|mgmtnode3)" \
   | awk -F',' '{printf "%-10s  sessions: %s\n", $2, $8}'
 ```
-*Each backend (`node1`, `node2`, `node3`) should show a non-zero and roughly equal session count.*
+*Each backend (`mgmtnode1`, `mgmtnode2`, `mgmtnode3`) should show a non-zero and roughly equal session count.*
 
 ---
 
 ### Scenario 2: End-to-End Flow Execution & Database Content Examination
 
-> **Runs on:** `scripts/test_flows_and_inspect_db.sh` and the `mariadb` commands: node1, node2 or node3 (a mariadb client is needed). `curl` commands: any machine that can reach the VIP (node1–node4 or a workstation).
+> **Runs on:** `scripts/test_flows_and_inspect_db.sh` and the `mariadb` commands: mgmtnode1, mgmtnode2 or mgmtnode3 (a mariadb client is needed). `curl` commands: any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation).
 
 This scenario executes Flow 1 and Flow 2 through the REST API, follows the messages through RabbitMQ and intermediate modifications, and inspects the resulting table rows and JSON audit trails stored in MariaDB Galera.
 
@@ -1816,7 +1816,7 @@ ORDER BY id DESC LIMIT 1\G
 
 ### Scenario 3: Synchronous Multi-Master Galera Replication Verification
 
-> **Runs on:** node1, node2 or node3 (each query targets a specific node IP with `-h`).
+> **Runs on:** mgmtnode1, mgmtnode2 or mgmtnode3 (each query targets a specific node IP with `-h`).
 
 #### A. Ensure data exists before querying
 
@@ -1849,15 +1849,15 @@ sudo journalctl -u flowfirst-process4 -n 50 --no-pager | grep -E "ERROR|Persiste
 Once rows exist, query each node **by its own IP** (bypassing HAProxy) to prove Galera has synchronised the write to all members:
 
 ```bash
-# Check on Node 1:
+# Check on Mgmt Node 1:
 mariadb -h ${NODE1_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 
-# Check on Node 2:
+# Check on Mgmt Node 2:
 mariadb -h ${NODE2_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 
-# Check on Node 3:
+# Check on Mgmt Node 3:
 mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT id, message_id, flow_id, item_id, counter_value, metric_value FROM processed_messages ORDER BY id DESC LIMIT 5;"
 ```
@@ -1868,11 +1868,11 @@ mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} 
 
 ### Scenario 4: Galera Node Outage & Automatic Quorum Resynchronization
 
-> **Runs on:** stop/start steps on **node3**; `check_galera_status.sh` and local `mysql` checks on **node1 or node2** (node3's MariaDB is down); `curl` from any machine that can reach the VIP (node1–node4 or a workstation).
+> **Runs on:** stop/start steps on **mgmtnode3**; `check_galera_status.sh` and local `mysql` checks on **mgmtnode1 or mgmtnode2** (mgmtnode3's MariaDB is down); `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation).
 
-1. **Simulate failure of Galera Node 3:**
+1. **Simulate failure of Galera Mgmt Node 3:**
    ```bash
-   sudo systemctl stop mariadb  # (on Node 3)
+   sudo systemctl stop mariadb  # (on Mgmt Node 3)
    ```
 2. **Verify Cluster Quorum remains healthy (2/3 nodes active):**
    ```bash
@@ -1883,9 +1883,9 @@ mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} 
    ```bash
    curl -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 -d '{"item_id": 555}'
    ```
-4. **Restart Node 3 and observe Automatic State Transfer (IST/SST):**
+4. **Restart Mgmt Node 3 and observe Automatic State Transfer (IST/SST):**
    ```bash
-   sudo systemctl start mariadb  # (on Node 3)
+   sudo systemctl start mariadb  # (on Mgmt Node 3)
    ```
    *Galera automatically synchronizes missing transactions. Cluster size returns to `3`.*
 
@@ -1893,7 +1893,7 @@ mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} 
 
 ### Scenario 5: Galera IST — Incremental State Transfer
 
-> **Runs on:** stop/start, `grastate.dat` and IST log checks on **node3** (the joiner); donor `wsrep_last_committed` checks on **node1 or node2**; the state-watch loop on **node1**.
+> **Runs on:** stop/start, `grastate.dat` and IST log checks on **mgmtnode3** (the joiner); donor `wsrep_last_committed` checks on **mgmtnode1 or mgmtnode2**; the state-watch loop on **mgmtnode1**.
 
 #### What IST is and when it is used
 
@@ -1927,8 +1927,8 @@ wsrep_provider_options: ... gcache.size = 536870912; ...   ← 512 MB
 #### 5.2 — Trigger a short outage and force IST
 
 ```bash
-# Step 1: Stop node3
-sudo systemctl stop mariadb   # on node3
+# Step 1: Stop mgmtnode3
+sudo systemctl stop mariadb   # on mgmtnode3
 
 # Step 2: Generate a small amount of write traffic (stays inside gcache window)
 for i in $(seq 1 20); do
@@ -1936,8 +1936,8 @@ for i in $(seq 1 20); do
 done
 sleep 3
 
-# Step 3: Check node3's last seqno before restart
-sudo cat /var/lib/mysql/grastate.dat   # on node3
+# Step 3: Check mgmtnode3's last seqno before restart
+sudo cat /var/lib/mysql/grastate.dat   # on mgmtnode3
 ```
 ```
 seqno:   892     ← last committed before outage
@@ -1955,19 +1955,19 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_last_committed';"
 +---------------------+-------+
 ```
 
-#### 5.3 — Restart node3 and watch IST execute
+#### 5.3 — Restart mgmtnode3 and watch IST execute
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo systemctl start mariadb
 
-# On node1 — watch the state progression in real time
+# On mgmtnode1 — watch the state progression in real time
 sudo watch -n1 "mysql -u root -p -e \
   \"SHOW STATUS WHERE Variable_name IN \
   ('wsrep_local_state_comment','wsrep_cluster_size','wsrep_last_committed');\" 2>/dev/null"
 ```
 
-Expected state progression on node3:
+Expected state progression on mgmtnode3:
 ```
 wsrep_local_state_comment: Joiner/Waiting       ← requesting IST from donor
 wsrep_local_state_comment: Joiner/Receiving IST ← receiving write-sets
@@ -1977,7 +1977,7 @@ wsrep_local_state_comment: Synced               ← fully caught up, rejoined cl
 
 Confirm IST (not SST) was used — IST leaves no SST lock files and the donor **stays `Synced`** throughout:
 ```bash
-# On the donor node (node1 or node2) — state must never leave Synced during IST
+# On the donor node (mgmtnode1 or mgmtnode2) — state must never leave Synced during IST
 sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"
 ```
 ```
@@ -2004,7 +2004,7 @@ sudo grep -i "IST\|incremental" /var/log/mariadb/mariadb.log | tail -5
 ```
 ```
 [Note] WSREP: Prepared IST receiver for seqno 892-912
-[Note] WSREP: 0.0 (node3): State transfer from 0.0 (node1) complete
+[Note] WSREP: 0.0 (mgmtnode3): State transfer from 0.0 (mgmtnode1) complete
 [Note] WSREP: Received IST: 20 write-sets
 [Note] WSREP: IST received
 ```
@@ -2013,7 +2013,7 @@ sudo grep -i "IST\|incremental" /var/log/mariadb/mariadb.log | tail -5
 
 ### Scenario 6: Galera SST — State Snapshot Transfer
 
-> **Runs on:** `galera.cnf` edits on **each of node1–node3** (rolling restart node3 → node2 → node1); `grastate.dat` edit, start and SST log checks on **node3**; donor checks (`wsrep_local_state_comment`, `ps … rsync`) on the donor, normally **node1**.
+> **Runs on:** `galera.cnf` edits on **each of mgmtnode1–mgmtnode3** (rolling restart mgmtnode3 → mgmtnode2 → mgmtnode1); `grastate.dat` edit, start and SST log checks on **mgmtnode3**; donor checks (`wsrep_local_state_comment`, `ps … rsync`) on the donor, normally **mgmtnode1**.
 
 #### What SST is and when it is used
 
@@ -2033,7 +2033,7 @@ gcache ring buffer on donor:
 
 #### 6.1 — Set wsrep_sst_method (choose rsync or mariabackup)
 
-Set `MARIADB_SST_METHOD` in `.env` on **all nodes** and re-run `setup_galera_node.sh`, then do a rolling restart (node3 → node2 → node1). All nodes must use the same method.
+Set `MARIADB_SST_METHOD` in `.env` on **all nodes** and re-run `setup_galera_node.sh`, then do a rolling restart (mgmtnode3 → mgmtnode2 → mgmtnode1). All nodes must use the same method.
 
 **rsync** (default — no extra packages required):
 ```
@@ -2058,7 +2058,7 @@ After setting the values, apply to all nodes and do the rolling restart:
 sudo ./mariadb-galera/setup_galera_node.sh
 
 # Rolling restart — never restart all nodes at once:
-sudo systemctl restart mariadb   # on node3 first, then node2, then node1
+sudo systemctl restart mariadb   # on mgmtnode3 first, then mgmtnode2, then mgmtnode1
 ```
 
 #### 6.2 — Force SST by making the joiner fall outside the gcache window
@@ -2074,20 +2074,20 @@ sudo mysql -u root -p -e "
 # on all Galera versions. Edit galera.cnf and restart for a guaranteed change.
 ```
 
-Or simply leave node3 offline long enough for heavy write traffic to fill and overwrite the gcache. Then:
+Or simply leave mgmtnode3 offline long enough for heavy write traffic to fill and overwrite the gcache. Then:
 
 ```bash
-# Confirm node3 is now outside the gcache window
-sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_last_committed';"   # on node1
+# Confirm mgmtnode3 is now outside the gcache window
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_last_committed';"   # on mgmtnode1
 ```
 ```
-wsrep_last_committed: 15420    ← node3 last seqno was 892 — gap far exceeds 1M gcache
+wsrep_last_committed: 15420    ← mgmtnode3 last seqno was 892 — gap far exceeds 1M gcache
 ```
 
 ```bash
-# Mark node3's state as requiring SST (clear seqno)
-sudo systemctl stop mariadb   # on node3
-sudo sed -i 's/^seqno:.*/seqno:   -1/' /var/lib/mysql/grastate.dat   # on node3
+# Mark mgmtnode3's state as requiring SST (clear seqno)
+sudo systemctl stop mariadb   # on mgmtnode3
+sudo sed -i 's/^seqno:.*/seqno:   -1/' /var/lib/mysql/grastate.dat   # on mgmtnode3
 sudo cat /var/lib/mysql/grastate.dat
 ```
 ```
@@ -2095,13 +2095,13 @@ seqno:   -1      ← forces Galera to request SST on next start
 safe_to_bootstrap: 0
 ```
 
-#### 6.3 — Start node3 and observe SST
+#### 6.3 — Start mgmtnode3 and observe SST
 
 ```bash
-sudo systemctl start mariadb   # on node3
+sudo systemctl start mariadb   # on mgmtnode3
 ```
 
-Watch state on node3:
+Watch state on mgmtnode3:
 ```bash
 sudo watch -n1 "mysql -u root -p -e \
   \"SHOW STATUS WHERE Variable_name IN \
@@ -2116,7 +2116,7 @@ wsrep_local_state_comment: Synced                  ← rejoined
 
 Watch the donor during SST — with `rsync` it will show `Donor/Desynced`:
 ```bash
-# On node1 (donor)
+# On mgmtnode1 (donor)
 sudo watch -n1 "mysql -u root -p -e \
   \"SHOW STATUS LIKE 'wsrep_local_state_comment';\" 2>/dev/null"
 ```
@@ -2135,9 +2135,9 @@ sudo grep -i "SST\|snapshot" /var/log/mariadb/mariadb.log | tail -10
 ```
 ```
 [Note] WSREP: State transfer required: own seqno -1
-[Note] WSREP: Initiating SST (rsync) from node1
+[Note] WSREP: Initiating SST (rsync) from mgmtnode1
 [Note] WSREP: SST complete, seqno: 15420
-[Note] WSREP: 0.0 (node3): State transfer from 0.0 (node1) complete
+[Note] WSREP: 0.0 (mgmtnode3): State transfer from 0.0 (mgmtnode1) complete
 ```
 
 Monitor SST data transfer rate (from a separate terminal on the donor):
@@ -2152,7 +2152,7 @@ sudo watch -n2 "ps aux | grep mariadb-backup | grep -v grep"
 
 ### Scenario 7: `gcache.size` Impact on IST vs SST
 
-> **Runs on:** config changes and restarts on **each of node1–node3** in turn (node3 → node2 → node1); the 7.3 IST/SST test on **node3**; `SET GLOBAL` in 7.4 on **all three nodes**, donor check on **node1**; 7.5 queries on any cluster member (node1, node2 or node3).
+> **Runs on:** config changes and restarts on **each of mgmtnode1–mgmtnode3** in turn (mgmtnode3 → mgmtnode2 → mgmtnode1); the 7.3 IST/SST test on **mgmtnode3**; `SET GLOBAL` in 7.4 on **all three nodes**, donor check on **mgmtnode1**; 7.5 queries on any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3).
 
 #### How gcache.size determines IST or SST
 
@@ -2205,17 +2205,17 @@ EOF
 
 Restart one node at a time (never all simultaneously):
 ```bash
-# Restart node3 first, wait for Synced, then node2, then node1
-sudo systemctl restart mariadb   # on node3
+# Restart mgmtnode3 first, wait for Synced, then mgmtnode2, then mgmtnode1
+sudo systemctl restart mariadb   # on mgmtnode3
 ```
 
-Wait until node3 is `Synced`:
+Wait until mgmtnode3 is `Synced`:
 ```bash
 sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"
 # expect: Synced
 ```
 
-Then restart node2, wait for `Synced`, then restart node1.
+Then restart mgmtnode2, wait for `Synced`, then restart mgmtnode1.
 
 Confirm new gcache.size is active:
 ```bash
@@ -2238,8 +2238,8 @@ ls -lh /var/lib/mysql/galera.cache
 
 ```bash
 # gcache.size=512M on all nodes (current config)
-# Stop node3
-sudo systemctl stop mariadb   # node3
+# Stop mgmtnode3
+sudo systemctl stop mariadb   # mgmtnode3
 
 # Generate 10,000 write-sets (well under 512M capacity)
 for i in $(seq 1 500); do
@@ -2248,8 +2248,8 @@ done
 wait
 sleep 5
 
-# Restart node3 — IST will be used
-sudo systemctl start mariadb   # node3
+# Restart mgmtnode3 — IST will be used
+sudo systemctl start mariadb   # mgmtnode3
 
 # Confirm IST in log
 sudo grep -E "IST|Received IST|write-sets" /var/log/mariadb/mariadb.log | tail -5
@@ -2266,18 +2266,18 @@ sudo grep -E "IST|Received IST|write-sets" /var/log/mariadb/mariadb.log | tail -
 # Temporarily set gcache to 1M on all nodes to guarantee overflow
 sudo mysql -u root -p -e \
   "SET GLOBAL wsrep_provider_options='gcache.size=1M';"   # on all 3 nodes
-# Note: takes effect at next restart — restart node3 first while gcache is tiny
+# Note: takes effect at next restart — restart mgmtnode3 first while gcache is tiny
 
-# Stop node3, generate heavy traffic, then restart
-sudo systemctl stop mariadb   # node3
+# Stop mgmtnode3, generate heavy traffic, then restart
+sudo systemctl stop mariadb   # mgmtnode3
 for i in $(seq 1 5000); do
   curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow2 > /dev/null
 done
 sleep 5
-sudo systemctl start mariadb   # node3
+sudo systemctl start mariadb   # mgmtnode3
 
 # SST should be triggered — watch donor go Donor/Desynced
-sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"   # node1
+sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"   # mgmtnode1
 ```
 ```
 +---------------------------+----------------+
@@ -2347,31 +2347,31 @@ SHOW STATUS WHERE Variable_name IN (
 
 ### Scenario 8: Node Failure & Virtual IP (VIP) Failover
 
-> **Runs on:** any cluster member (node1, node2 or node3) — preferably **node2 or node3**, since node1 is put into standby.
+> **Runs on:** any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3) — preferably **mgmtnode2 or mgmtnode3**, since mgmtnode1 is put into standby.
 
-1. **Put Node 1 into standby mode:**
+1. **Put Mgmt Node 1 into standby mode:**
    ```bash
-   sudo pcs node standby node1
+   sudo pcs node standby mgmtnode1
    ```
-2. **Observe Pacemaker immediately moving the Virtual IP and HAProxy to Node 2:**
+2. **Observe Pacemaker immediately moving the Virtual IP and HAProxy to Mgmt Node 2:**
    ```bash
    sudo pcs status
    ```
-   *Result:* `vip-haproxy-group` is now `Started node2`.
+   *Result:* `vip-haproxy-group` is now `Started mgmtnode2`.
 3. **Issue `curl` requests with zero downtime:**
    ```bash
    curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
    ```
-4. **Restore Node 1:**
+4. **Restore Mgmt Node 1:**
    ```bash
-   sudo pcs node unstandby node1
+   sudo pcs node unstandby mgmtnode1
    ```
 
 ---
 
 ### Scenario 9: HAProxy Real-Time Statistics Dashboard
 
-> **Runs on:** a browser or `curl` on any machine that can reach the VIP (node1–node4 or a workstation).
+> **Runs on:** a browser or `curl` on any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation).
 
 Access the live stats dashboard to view real-time frontend and backend health metrics for both the REST API and MariaDB Galera cluster:
 - **URL:** `http://${FLOWFIRST_VIP}:${HAPROXY_STATS_PORT:-9000}` (from `.env`)
@@ -2382,7 +2382,7 @@ Access the live stats dashboard to view real-time frontend and backend health me
 
 ### Scenario 10: Pacemaker Cluster Validation with `crm_mon` & `crm_resource`
 
-> **Runs on:** any cluster member (node1, node2 or node3) (`pcs`/`crm_*` commands are cluster-wide). In 10.7 the underlying fault is repaired on the affected node (node3); clean-up can run from any member.
+> **Runs on:** any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3) (`pcs`/`crm_*` commands are cluster-wide). In 10.7 the underlying fault is repaired on the affected node (mgmtnode3); clean-up can run from any member.
 
 Use these commands on **any cluster node** to confirm that all Pacemaker resources are running, correctly distributed, and healthy.
 
@@ -2398,33 +2398,33 @@ sudo crm_mon -1Ar
 ```
 Cluster Summary:
   * Stack: corosync
-  * Current DC: node1 (version 2.1.6-8.el9-6fdc9deea29) - partition with quorum
+  * Current DC: mgmtnode1 (version 2.1.6-8.el9-6fdc9deea29) - partition with quorum
   * Last updated: Mon Jun  9 12:00:00 2025
-  * Last change:  Mon Jun  9 11:50:00 2025 by root via cibadmin on node1
+  * Last change:  Mon Jun  9 11:50:00 2025 by root via cibadmin on mgmtnode1
   * 3 nodes configured
   * 14 resource instances configured
 
 Node List:
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 
 Active Resources:
   * Resource Group: vip-haproxy-group:
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node1
-    * haproxy-res (systemd:haproxy):               Started node1
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started mgmtnode1
+    * haproxy-res (systemd:haproxy):               Started mgmtnode1
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res]:
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res]:
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res]:
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res]:
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 > Key indicators:
 > - `partition with quorum` — 2-of-3 nodes agree; cluster is fully operational
 > - `vip` and `haproxy` are **grouped** and always land on the same node together
-> - All 4 process clones show `Started: [ node1 node2 node3 ]` — active on every node
+> - All 4 process clones show `Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]` — active on every node
 
 ---
 
@@ -2467,7 +2467,7 @@ sudo crm_resource -r flowfirst-p1-res-clone -C
 sudo crm_resource --resource flowfirst-vip --locate
 ```
 ```
-resource flowfirst-vip is running on: node1
+resource flowfirst-vip is running on: mgmtnode1
 ```
 
 ```bash
@@ -2475,7 +2475,7 @@ resource flowfirst-vip is running on: node1
 sudo crm_resource --resource flowfirst-p1-res-clone --locate
 ```
 ```
-resource flowfirst-p1-res-clone is running on: node1  node2  node3
+resource flowfirst-p1-res-clone is running on: mgmtnode1  mgmtnode2  mgmtnode3
 ```
 
 ---
@@ -2483,13 +2483,13 @@ resource flowfirst-p1-res-clone is running on: node1  node2  node3
 #### 10.5 — Move VIP to a Specific Node
 
 ```bash
-# Force VIP (and HAProxy group) to node2
-sudo crm_resource --resource vip-haproxy-group --move --node node2
+# Force VIP (and HAProxy group) to mgmtnode2
+sudo crm_resource --resource vip-haproxy-group --move --node mgmtnode2
 sudo crm_mon -1Ar | grep vip
 ```
 ```
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy-res (systemd:haproxy):               Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started mgmtnode2
+    * haproxy-res (systemd:haproxy):               Started mgmtnode2
 ```
 
 Remove the forced constraint to let Pacemaker re-balance freely:
@@ -2502,15 +2502,15 @@ sudo crm_resource --resource vip-haproxy-group --clear
 #### 10.6 — Node Standby & Recovery (VIP Failover Validation)
 
 ```bash
-# 1. Put node1 into standby (simulates node outage)
-sudo pcs node standby node1
+# 1. Put mgmtnode1 into standby (simulates node outage)
+sudo pcs node standby mgmtnode1
 
-# 2. Confirm VIP migrated to node2 or node3
+# 2. Confirm VIP migrated to mgmtnode2 or mgmtnode3
 sudo crm_mon -1Ar | grep -E "vip|haproxy"
 ```
 ```
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy-res (systemd:haproxy):               Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started mgmtnode2
+    * haproxy-res (systemd:haproxy):               Started mgmtnode2
 ```
 
 ```bash
@@ -2518,12 +2518,12 @@ sudo crm_mon -1Ar | grep -E "vip|haproxy"
 curl -s http://${FLOWFIRST_VIP}:8080/health | jq .handled_by_node
 ```
 ```
-"node2"
+"mgmtnode2"
 ```
 
 ```bash
-# 4. Restore node1
-sudo pcs node unstandby node1
+# 4. Restore mgmtnode1
+sudo pcs node unstandby mgmtnode1
 
 # 5. Clear any residual constraints
 sudo crm_resource -C
@@ -2532,7 +2532,7 @@ sudo crm_resource -C
 sudo crm_mon -1Ar | grep "Online:"
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ---
@@ -2546,12 +2546,12 @@ sudo pcs status | grep -A5 "Failed"
 If any resource has failed actions, the output will resemble:
 ```
 Failed Resource Actions:
-  * flowfirst-p1_start_0 on node3 'not installed' (5): call=12, status='complete',
+  * flowfirst-p1_start_0 on mgmtnode3 'not installed' (5): call=12, status='complete',
       exitreason='Could not find Python venv at /opt/flowfirst/.venv',
       last-rc-change='Mon Jun  9 11:45:10 2025', queued=0ms, exec=48ms
 ```
 
-Fix the underlying issue on `node3`, then clear the failure:
+Fix the underlying issue on `mgmtnode3`, then clear the failure:
 ```bash
 sudo crm_resource -r flowfirst-p1-res-clone -C
 sudo pcs resource refresh flowfirst-p1-res-clone
@@ -2568,35 +2568,35 @@ sudo pcs status
 Cluster name: flowfirst_cluster
 Cluster Summary:
   * Stack: corosync
-  * Current DC: node1 (version 2.1.6-8.el9) - partition with quorum
+  * Current DC: mgmtnode1 (version 2.1.6-8.el9) - partition with quorum
   * Last updated: Mon Jun  9 12:05:00 2025
-  * Last change:  Mon Jun  9 11:50:00 2025 by root via cibadmin on node1
+  * Last change:  Mon Jun  9 11:50:00 2025 by root via cibadmin on mgmtnode1
   * 3 nodes configured
   * 14 resource instances configured
 
 Node List:
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 
 Full List of Resources:
   * Resource Group: vip-haproxy-group:
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node1
-    * haproxy-res (systemd:haproxy):               Started node1
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started mgmtnode1
+    * haproxy-res (systemd:haproxy):               Started mgmtnode1
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
-    * flowfirst-p1-res (systemd:flowfirst-process1):    Started node1
-    * flowfirst-p1-res (systemd:flowfirst-process1):    Started node2
-    * flowfirst-p1-res (systemd:flowfirst-process1):    Started node3
+    * flowfirst-p1-res (systemd:flowfirst-process1):    Started mgmtnode1
+    * flowfirst-p1-res (systemd:flowfirst-process1):    Started mgmtnode2
+    * flowfirst-p1-res (systemd:flowfirst-process1):    Started mgmtnode3
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
-    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node1
-    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node2
-    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node3
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started mgmtnode1
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started mgmtnode2
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started mgmtnode3
   * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
-    * flowfirst-p3-res (systemd:flowfirst-process3):    Started node1
-    * flowfirst-p3-res (systemd:flowfirst-process3):    Started node2
-    * flowfirst-p3-res (systemd:flowfirst-process3):    Started node3
+    * flowfirst-p3-res (systemd:flowfirst-process3):    Started mgmtnode1
+    * flowfirst-p3-res (systemd:flowfirst-process3):    Started mgmtnode2
+    * flowfirst-p3-res (systemd:flowfirst-process3):    Started mgmtnode3
   * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
-    * flowfirst-p4-res (systemd:flowfirst-process4):    Started node1
-    * flowfirst-p4-res (systemd:flowfirst-process4):    Started node2
-    * flowfirst-p4-res (systemd:flowfirst-process4):    Started node3
+    * flowfirst-p4-res (systemd:flowfirst-process4):    Started mgmtnode1
+    * flowfirst-p4-res (systemd:flowfirst-process4):    Started mgmtnode2
+    * flowfirst-p4-res (systemd:flowfirst-process4):    Started mgmtnode3
 
 Daemon Status:
   corosync: active/enabled
@@ -2614,41 +2614,41 @@ These scenarios cover stopping and starting individual pipeline services, groups
 
 ### Scenario 11: Stop & Start a Single Pipeline Process on One Node
 
-> **Runs on:** any cluster member (node1, node2 or node3) (`pcs resource ban/clear` acts cluster-wide; it does not need to run on the target node). `journalctl` shows only the local node's logs.
+> **Runs on:** any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3) (`pcs resource ban/clear` acts cluster-wide; it does not need to run on the target node). `journalctl` shows only the local node's logs.
 
 This is the surgical approach: stop one process instance on one node while the clones on the other two nodes continue to serve traffic.
 
 ```bash
-# On node2: stop process2 via Pacemaker (recommended — Pacemaker restarts it automatically)
-sudo pcs resource ban flowfirst-p2-res-clone node2
+# On mgmtnode2: stop process2 via Pacemaker (recommended — Pacemaker restarts it automatically)
+sudo pcs resource ban flowfirst-p2-res-clone mgmtnode2
 
-# Confirm it is no longer running on node2
+# Confirm it is no longer running on mgmtnode2
 sudo crm_mon -1Ar | grep p2
 ```
 ```
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 2 of 3):
-    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node1
-    * flowfirst-p2-res (systemd:flowfirst-process2):    Started node3
-    * Stopped: [ node2 ]
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started mgmtnode1
+    * flowfirst-p2-res (systemd:flowfirst-process2):    Started mgmtnode3
+    * Stopped: [ mgmtnode2 ]
 ```
 
 ```bash
-# Re-allow it on node2 and verify it comes back
-sudo pcs resource clear flowfirst-p2-res-clone node2
+# Re-allow it on mgmtnode2 and verify it comes back
+sudo pcs resource clear flowfirst-p2-res-clone mgmtnode2
 sudo crm_resource -r flowfirst-p2-res-clone -C
 sleep 5
 sudo crm_mon -1Ar | grep p2
 ```
 ```
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ---
 
 ### Scenario 12: Stop & Start All Four Pipeline Processes (Cluster-Wide)
 
-> **Runs on:** any cluster member (node1, node2 or node3).
+> **Runs on:** any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3).
 
 #### 12.1 — Stop all pipeline processes on all nodes
 
@@ -2665,13 +2665,13 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 ```
 ```
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (disabled, 0 of 3):
-    * Stopped: [ node1 node2 node3 ]
+    * Stopped: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (disabled, 0 of 3):
-    * Stopped: [ node1 node2 node3 ]
+    * Stopped: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (disabled, 0 of 3):
-    * Stopped: [ node1 node2 node3 ]
+    * Stopped: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (disabled, 0 of 3):
-    * Stopped: [ node1 node2 node3 ]
+    * Stopped: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 #### 12.2 — Start all pipeline processes cluster-wide
@@ -2688,13 +2688,13 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 ```
 ```
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 #### 12.3 — Validate the REST API is serving traffic
@@ -2705,7 +2705,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 ```json
 {
   "status": "ok",
-  "handled_by_node": "node1"
+  "handled_by_node": "mgmtnode1"
 }
 ```
 
@@ -2713,49 +2713,49 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 
 ### Scenario 13: Stop & Start RabbitMQ on a Single Node
 
-> **Runs on:** stop/start on **node3**; `rabbitmqctl cluster_status` after the stop on **node1 or node2** (node3's broker is down); after the restart, any of node1–node3.
+> **Runs on:** stop/start on **mgmtnode3**; `rabbitmqctl cluster_status` after the stop on **mgmtnode1 or mgmtnode2** (mgmtnode3's broker is down); after the restart, any of mgmtnode1–mgmtnode3.
 
-#### 13.1 — Stop RabbitMQ on node3
+#### 13.1 — Stop RabbitMQ on mgmtnode3
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo systemctl stop rabbitmq-server
 
-# On node1 or node2 — verify the remaining 2-node RabbitMQ cluster still has quorum
+# On mgmtnode1 or mgmtnode2 — verify the remaining 2-node RabbitMQ cluster still has quorum
 sudo rabbitmqctl cluster_status
 ```
 ```
-Cluster name: rabbit@node1
-Disk Nodes: rabbit@node1  rabbit@node2  rabbit@node3
-Running Nodes: rabbit@node1  rabbit@node2
+Cluster name: rabbit@mgmtnode1
+Disk Nodes: rabbit@mgmtnode1  rabbit@mgmtnode2  rabbit@mgmtnode3
+Running Nodes: rabbit@mgmtnode1  rabbit@mgmtnode2
 Versions: ...
 Alarms: (none)
 ```
 
-The pipeline processes use `pika` multi-host connection parameters and will automatically reconnect to `node1` or `node2`.
+The pipeline processes use `pika` multi-host connection parameters and will automatically reconnect to `mgmtnode1` or `mgmtnode2`.
 
-#### 13.2 — Restart RabbitMQ on node3 and verify it rejoins
+#### 13.2 — Restart RabbitMQ on mgmtnode3 and verify it rejoins
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo systemctl start rabbitmq-server
 sleep 5
 sudo rabbitmqctl cluster_status | grep "Running Nodes"
 ```
 ```
-Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
+Running Nodes: rabbit@mgmtnode1  rabbit@mgmtnode2  rabbit@mgmtnode3
 ```
 
 ---
 
 ### Scenario 14: Stop & Start MariaDB Galera on a Single Node
 
-> **Runs on:** stop/start on **node2**; the `wsrep_cluster_size` check after the stop on **node1 or node3** (node2's MariaDB is down); after the restart, any of node1–node3.
+> **Runs on:** stop/start on **mgmtnode2**; the `wsrep_cluster_size` check after the stop on **mgmtnode1 or mgmtnode3** (mgmtnode2's MariaDB is down); after the restart, any of mgmtnode1–mgmtnode3.
 
-#### 14.1 — Stop MariaDB on node2
+#### 14.1 — Stop MariaDB on mgmtnode2
 
 ```bash
-# On node2
+# On mgmtnode2
 sudo systemctl stop mariadb
 
 # On any other node — confirm the cluster is still running with 2 members
@@ -2769,10 +2769,10 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 +--------------------+-------+
 ```
 
-#### 14.2 — Restart MariaDB on node2 (normal rejoin — NOT a bootstrap)
+#### 14.2 — Restart MariaDB on mgmtnode2 (normal rejoin — NOT a bootstrap)
 
 ```bash
-# On node2
+# On mgmtnode2
 sudo systemctl start mariadb
 sleep 10
 
@@ -2803,21 +2803,21 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment';"
 
 ### Scenario 15: Stop & Start HAProxy on a Single Node
 
-> **Runs on:** `pcs`/`crm_*` commands on any cluster member (node1, node2 or node3); the HAProxy stats `curl` on any machine that can reach the VIP (node1–node4 or a workstation).
+> **Runs on:** `pcs`/`crm_*` commands on any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3); the HAProxy stats `curl` on any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation).
 
 HAProxy runs under Pacemaker as part of `vip-haproxy-group`. Do **not** manipulate it directly with `systemctl` — use `pcs resource` so Pacemaker stays in control.
 
 #### 15.1 — Disable the VIP + HAProxy group (stops on current node, migrates to another)
 
 ```bash
-# Move the group away from node1 to node2
-sudo pcs resource move vip-haproxy-group node2
+# Move the group away from mgmtnode1 to mgmtnode2
+sudo pcs resource move vip-haproxy-group mgmtnode2
 sleep 5
 sudo crm_mon -1Ar | grep -E "vip|haproxy"
 ```
 ```
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy-res (systemd:haproxy):               Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started mgmtnode2
+    * haproxy-res (systemd:haproxy):               Started mgmtnode2
 ```
 
 #### 15.2 — Confirm HAProxy stats endpoint responds on the new node
@@ -2843,16 +2843,16 @@ These scenarios cover rebooting individual nodes, all nodes sequentially, and al
 
 ---
 
-### Scenario 16: Reboot a Single Node (Node3) — Zero Pipeline Downtime
+### Scenario 16: Reboot a Single Node (Mgmt Node 3) — Zero Pipeline Downtime
 
-> **Runs on:** 16.1 and 16.4 on **node1**; the 16.2 reboot on **node3**; 16.3 checks on **node1 or node2** (node3 is down).
+> **Runs on:** 16.1 and 16.4 on **mgmtnode1**; the 16.2 reboot on **mgmtnode3**; 16.3 checks on **mgmtnode1 or mgmtnode2** (mgmtnode3 is down).
 
 The cluster retains quorum (2 of 3 nodes remain) and all cloned resources continue on the surviving nodes.
 
 #### 16.1 — Pre-reboot state check
 
 ```bash
-# From node1 — record the baseline
+# From mgmtnode1 — record the baseline
 sudo crm_mon -1Ar
 sudo rabbitmqctl cluster_status | grep "Running Nodes"
 sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
@@ -2860,30 +2860,30 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 
 Expected: 3 nodes online, 3 RabbitMQ nodes running, `wsrep_cluster_size = 3`.
 
-#### 16.2 — Reboot node3
+#### 16.2 — Reboot mgmtnode3
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo reboot
 ```
 
-#### 16.3 — While node3 is rebooting — verify cluster continuity
+#### 16.3 — While mgmtnode3 is rebooting — verify cluster continuity
 
-From **node1** or **node2**:
+From **mgmtnode1** or **mgmtnode2**:
 ```bash
 sudo crm_mon -1Ar | grep "Online:"
 ```
 ```
-  * Online: [ node1 node2 ]
-  * OFFLINE: [ node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 ]
+  * OFFLINE: [ mgmtnode3 ]
 ```
 
 ```bash
-# Confirm VIP still up (it was not on node3)
+# Confirm VIP still up (it was not on mgmtnode3)
 curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 ```
 ```json
-{ "status": "ok", "handled_by_node": "node1" }
+{ "status": "ok", "handled_by_node": "mgmtnode1" }
 ```
 
 ```bash
@@ -2892,20 +2892,20 @@ sudo crm_mon -1Ar | grep "Clone Set"
 ```
 ```
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 2 of 3):
-    * Started: [ node1 node2 ]
-    * Stopped: [ node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 ]
+    * Stopped: [ mgmtnode3 ]
 ```
 
-#### 16.4 — Post-reboot: validate node3 rejoins automatically
+#### 16.4 — Post-reboot: validate mgmtnode3 rejoins automatically
 
-After node3 finishes booting (typically 60–90 seconds), Corosync and Pacemaker services start automatically (`enabled` in systemd), and Galera performs IST re-sync.
+After mgmtnode3 finishes booting (typically 60–90 seconds), Corosync and Pacemaker services start automatically (`enabled` in systemd), and Galera performs IST re-sync.
 
 ```bash
-# From node1 — poll until node3 reappears
+# From mgmtnode1 — poll until mgmtnode3 reappears
 sudo crm_mon -1Ar | grep "Online:"
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ```bash
@@ -2914,13 +2914,13 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 ```
 ```
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ```bash
@@ -2942,11 +2942,11 @@ sudo crm_resource -C
 
 ---
 
-### Scenario 17: Reboot the Node Hosting the VIP (Node1) — Forced Failover
+### Scenario 17: Reboot the Node Hosting the VIP (Mgmt Node 1) — Forced Failover
 
-> **Runs on:** 17.1–17.2 on any cluster member (node1, node2 or node3) (prefer node2); the 17.3 reboot on **node1**; 17.4 checks on **node2 or node3** while node1 is down.
+> **Runs on:** 17.1–17.2 on any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3) (prefer mgmtnode2); the 17.3 reboot on **mgmtnode1**; 17.4 checks on **mgmtnode2 or mgmtnode3** while mgmtnode1 is down.
 
-This is the highest-impact single-node reboot: the Virtual IP, HAProxy, and all process clones on node1 must migrate before node1 goes offline.
+This is the highest-impact single-node reboot: the Virtual IP, HAProxy, and all process clones on mgmtnode1 must migrate before mgmtnode1 goes offline.
 
 #### 17.1 — Identify the current VIP holder
 
@@ -2954,23 +2954,23 @@ This is the highest-impact single-node reboot: the Virtual IP, HAProxy, and all 
 sudo crm_resource --resource flowfirst-vip --locate
 ```
 ```
-resource flowfirst-vip is running on: node1
+resource flowfirst-vip is running on: mgmtnode1
 ```
 
-#### 17.2 — Gracefully evacuate node1 before rebooting (recommended)
+#### 17.2 — Gracefully evacuate mgmtnode1 before rebooting (recommended)
 
 ```bash
-# Put node1 into standby — Pacemaker migrates VIP to node2 or node3 before reboot
-sudo pcs node standby node1
+# Put mgmtnode1 into standby — Pacemaker migrates VIP to mgmtnode2 or mgmtnode3 before reboot
+sudo pcs node standby mgmtnode1
 sleep 5
 sudo crm_mon -1Ar | grep -E "vip|haproxy|Online"
 ```
 ```
-  * Online: [ node1 node2 node3 ]
-  * Standby: [ node1 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
+  * Standby: [ mgmtnode1 ]
   ...
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy-res (systemd:haproxy):               Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started mgmtnode2
+    * haproxy-res (systemd:haproxy):               Started mgmtnode2
 ```
 
 ```bash
@@ -2978,31 +2978,31 @@ sudo crm_mon -1Ar | grep -E "vip|haproxy|Online"
 curl -s http://${FLOWFIRST_VIP}:8080/health | jq .handled_by_node
 ```
 ```
-"node2"
+"mgmtnode2"
 ```
 
-#### 17.3 — Reboot node1
+#### 17.3 — Reboot mgmtnode1
 
 ```bash
-# On node1
-sudo pcs node unstandby node1   # (optional — Pacemaker will handle rejoin on boot)
+# On mgmtnode1
+sudo pcs node unstandby mgmtnode1   # (optional — Pacemaker will handle rejoin on boot)
 sudo reboot
 ```
 
-#### 17.4 — Post-reboot validation on node2 or node3
+#### 17.4 — Post-reboot validation on mgmtnode2 or mgmtnode3
 
 ```bash
-# Wait for node1 to come back (60–120 s), then:
+# Wait for mgmtnode1 to come back (60–120 s), then:
 sudo crm_mon -1Ar
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 
   * Resource Group: vip-haproxy-group:
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started node2
-    * haproxy-res (systemd:haproxy):               Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):        Started mgmtnode2
+    * haproxy-res (systemd:haproxy):               Started mgmtnode2
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   ...
 ```
 
@@ -3018,47 +3018,47 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 
 ### Scenario 18: Sequential Rolling Reboot of All Three Nodes
 
-> **Runs on:** steps 1–2 from **node1**; step 3 (node1 reboot) from **node2 or node3** — a script cannot poll for the node it is running on to come back. Post-reboot validation on any cluster member (node1, node2 or node3).
+> **Runs on:** steps 1–2 from **mgmtnode1**; step 3 (mgmtnode1 reboot) from **mgmtnode2 or mgmtnode3** — a script cannot poll for the node it is running on to come back. Post-reboot validation on any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3).
 
 Reboot one node at a time, waiting for full rejoin before rebooting the next. Quorum is maintained throughout.
 
 ```bash
-# === STEP 1: Reboot node3 (run steps 1–2 from node1) ===
-ssh node3 'sudo reboot'
+# === STEP 1: Reboot mgmtnode3 (run steps 1–2 from mgmtnode1) ===
+ssh mgmtnode3 'sudo reboot'
 
-# Wait for node3 to come back (poll from node1)
-until sudo crm_mon -1 2>/dev/null | grep -q "Online:.*node3"; do
-  echo "Waiting for node3 to rejoin..."; sleep 10
+# Wait for mgmtnode3 to come back (poll from mgmtnode1)
+until sudo crm_mon -1 2>/dev/null | grep -q "Online:.*mgmtnode3"; do
+  echo "Waiting for mgmtnode3 to rejoin..."; sleep 10
 done
-echo "node3 is back online"
+echo "mgmtnode3 is back online"
 
-sudo crm_resource -C          # clear failure history from node3 outage
+sudo crm_resource -C          # clear failure history from mgmtnode3 outage
 sleep 5
 
-# === STEP 2: Reboot node2 ===
-ssh node2 'sudo reboot'
+# === STEP 2: Reboot mgmtnode2 ===
+ssh mgmtnode2 'sudo reboot'
 
-until sudo crm_mon -1 2>/dev/null | grep -q "Online:.*node2"; do
-  echo "Waiting for node2 to rejoin..."; sleep 10
+until sudo crm_mon -1 2>/dev/null | grep -q "Online:.*mgmtnode2"; do
+  echo "Waiting for mgmtnode2 to rejoin..."; sleep 10
 done
-echo "node2 is back online"
+echo "mgmtnode2 is back online"
 
 sudo crm_resource -C
 sleep 5
 
-# === STEP 3: Reboot node1 (VIP holder — evacuate first) ===
-# Run this step from node2 or node3 — node1 is the one being rebooted
-sudo pcs node standby node1
+# === STEP 3: Reboot mgmtnode1 (VIP holder — evacuate first) ===
+# Run this step from mgmtnode2 or mgmtnode3 — mgmtnode1 is the one being rebooted
+sudo pcs node standby mgmtnode1
 sleep 10   # allow VIP migration to complete
 
-ssh node1 'sudo reboot'
+ssh mgmtnode1 'sudo reboot'
 
-until sudo crm_mon -1 2>/dev/null | grep -q "Online:.*node1"; do
-  echo "Waiting for node1 to rejoin..."; sleep 10
+until sudo crm_mon -1 2>/dev/null | grep -q "Online:.*mgmtnode1"; do
+  echo "Waiting for mgmtnode1 to rejoin..."; sleep 10
 done
-echo "node1 is back online"
+echo "mgmtnode1 is back online"
 
-sudo pcs node unstandby node1
+sudo pcs node unstandby mgmtnode1
 sudo crm_resource -C
 ```
 
@@ -3068,19 +3068,19 @@ sudo crm_resource -C
 sudo crm_mon -1Ar
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 
   * Resource Group: vip-haproxy-group:
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):   Started node2
-    * haproxy-res (systemd:haproxy):          Started node2
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):   Started mgmtnode2
+    * haproxy-res (systemd:haproxy):          Started mgmtnode2
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ```bash
@@ -3094,7 +3094,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq .                     # expect 
 
 ### Scenario 19: Simultaneous Reboot of All Three Nodes (Cluster Cold Start)
 
-> **Runs on:** 19.1–19.2 on **each of node1–node3**; 19.3 `galera_new_cluster` on the **bootstrap node only**; 19.4 on the **other two nodes**; 19.5 `pcs cluster start` on each node (or `pcs cluster start --all` from one node); 19.6 on any cluster member (node1, node2 or node3); 19.7 `curl` from any machine that can reach the VIP (node1–node4 or a workstation), `rabbitmqctl` on node1–node3.
+> **Runs on:** 19.1–19.2 on **each of mgmtnode1–mgmtnode3**; 19.3 `galera_new_cluster` on the **bootstrap node only**; 19.4 on the **other two nodes**; 19.5 `pcs cluster start` on each node (or `pcs cluster start --all` from one node); 19.6 on any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3); 19.7 `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation), `rabbitmqctl` on mgmtnode1–mgmtnode3.
 
 A complete power-cycle or simultaneous OS reboot causes the Galera cluster to lose quorum. Galera **requires a manual bootstrap** of the primary component on whichever node has the most up-to-date data before the other nodes can rejoin.
 
@@ -3132,7 +3132,7 @@ The node with `safe_to_bootstrap: 1` (or the highest `seqno`) is the **bootstrap
 sudo reboot
 ```
 
-After the nodes are back, MariaDB may already be trying to start: the setup tells node2 and node3 to `systemctl enable --now mariadb`, and with no bootstrapped primary it cannot join anything. Check each node, stop it if needed, and read the saved state:
+After the nodes are back, MariaDB may already be trying to start: the setup tells mgmtnode2 and mgmtnode3 to `systemctl enable --now mariadb`, and with no bootstrapped primary it cannot join anything. Check each node, stop it if needed, and read the saved state:
 
 ```bash
 # On each node
@@ -3146,7 +3146,7 @@ sudo cat /var/lib/mysql/grastate.dat
 After all nodes have finished booting, bring up Galera on the bootstrap node **first**:
 
 ```bash
-# On the bootstrap node (e.g., node1 — the one with safe_to_bootstrap: 1)
+# On the bootstrap node (e.g., mgmtnode1 — the one with safe_to_bootstrap: 1)
 sudo galera_new_cluster        # starts mariadb with --wsrep-new-cluster flag
 sleep 5
 
@@ -3160,19 +3160,19 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 +--------------------+-------+
 ```
 
-#### 19.4 — Rejoin node2 and node3 (normal start — NOT bootstrap)
+#### 19.4 — Rejoin mgmtnode2 and mgmtnode3 (normal start — NOT bootstrap)
 
 ```bash
-# On node2
+# On mgmtnode2
 sudo systemctl start mariadb
-# On node3
+# On mgmtnode3
 sudo systemctl start mariadb
 ```
 
 Wait for IST/SST to complete (30–120 seconds depending on data volume):
 
 ```bash
-# From node1
+# From mgmtnode1
 sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 ```
 ```
@@ -3191,14 +3191,14 @@ After a simultaneous reboot, Pacemaker may be waiting for quorum. Start the clus
 # On each node
 sudo pcs cluster start
 
-# From node1 — wait for quorum
+# From mgmtnode1 — wait for quorum
 sleep 15
 sudo pcs status | grep -E "Online:|quorum"
 ```
 ```
   * Stack: corosync
-  * Current DC: node1 (version 2.1.6-8.el9) - partition with quorum
-  * Online: [ node1 node2 node3 ]
+  * Current DC: mgmtnode1 (version 2.1.6-8.el9) - partition with quorum
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 #### 19.6 — Re-enable and validate all pipeline resources
@@ -3209,19 +3209,19 @@ Pacemaker remembers resource state from before the cold start. If resources are 
 sudo crm_mon -1Ar
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 
   * Resource Group: vip-haproxy-group:
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):   Started node1
-    * haproxy-res (systemd:haproxy):          Started node1
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):   Started mgmtnode1
+    * haproxy-res (systemd:haproxy):          Started mgmtnode1
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 If any resources did not auto-start:
@@ -3266,7 +3266,7 @@ flow3_p5_to_p2           0         1
 flow3_p2_to_p4           0         1
 ```
 
-> Each queue has exactly **one** consumer: only the ZooKeeper-elected leader of each process (and Remote Worker (Process 5) on node4) consumes, so `consumers` is `1`, not 3. A `0` means no leader is consuming that queue.
+> Each queue has exactly **one** consumer: only the ZooKeeper-elected leader of each process (and Remote Worker (Process 5) on remotenode1) consumes, so `consumers` is `1`, not 3. A `0` means no leader is consuming that queue.
 
 ---
 
@@ -3296,14 +3296,14 @@ All faults are **temporary and fully reversible**. Every sub-scenario includes t
 
 ### Scenario 20: Soft Network Degradation — Latency & Packet Loss (`tc netem`)
 
-> **Runs on:** `tc` commands affect only the local NIC: 20.1, 20.4 and 20.5 on **node2**; observation in 20.2–20.3 on **node1 or node3**; 20.6 `curl` from any machine that can reach the VIP (node1–node4 or a workstation); in 20.7, `tc` on **node2**, `crm_*` on any member.
+> **Runs on:** `tc` commands affect only the local NIC: 20.1, 20.4 and 20.5 on **mgmtnode2**; observation in 20.2–20.3 on **mgmtnode1 or mgmtnode3**; 20.6 `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation); in 20.7, `tc` on **mgmtnode2**, `crm_*` on any member.
 
 This simulates a flaky inter-node network link: high latency and packet loss that keeps the node reachable but causes Corosync token timeouts, Galera replication lag, and RabbitMQ connection retries.
 
-#### 20.1 — Inject 300 ms delay + 10 % packet loss on node2's cluster interface
+#### 20.1 — Inject 300 ms delay + 10 % packet loss on mgmtnode2's cluster interface
 
 ```bash
-# On node2 — identify the cluster-facing interface
+# On mgmtnode2 — identify the cluster-facing interface
 ip route get ${NODE1_IP} | awk '{print $5; exit}'
 # Example output: eth0
 IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
@@ -3323,7 +3323,7 @@ qdisc netem 8001: root refcnt 2 limit 1000
 
 #### 20.2 — Observe Corosync detecting the degraded link
 
-From **node1** (within 30–60 s Corosync token timeout):
+From **mgmtnode1** (within 30–60 s Corosync token timeout):
 ```bash
 sudo corosync-cfgtool -s
 ```
@@ -3334,7 +3334,7 @@ RING ID 0
     status  = ring 0 active with no faults
 
 RING ID 0
-    id      = 192.168.1.102     ← node2
+    id      = 192.168.1.102     ← mgmtnode2
     status  = Faulty            ← Corosync flagged the ring as degraded
 ```
 
@@ -3354,23 +3354,23 @@ sudo crm_mon -1Ar | grep -E "Online|OFFLINE|Stopped"
 
 With only 300 ms delay Pacemaker usually **tolerates** the degradation (no fencing) unless the token timeout is breached repeatedly. Expected:
 ```
-  * Online: [ node1 node2 node3 ]    ← cluster intact, no fencing triggered
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]    ← cluster intact, no fencing triggered
 ```
 
-If the loss is severe enough to cross the token timeout repeatedly, node2 may be fenced:
+If the loss is severe enough to cross the token timeout repeatedly, mgmtnode2 may be fenced:
 ```
-  * Online: [ node1 node3 ]
-  * OFFLINE: [ node2 ]
+  * Online: [ mgmtnode1 mgmtnode3 ]
+  * OFFLINE: [ mgmtnode2 ]
 
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 2 of 3):
-    * Started: [ node1 node3 ]
-    * Stopped: [ node2 ]
+    * Started: [ mgmtnode1 mgmtnode3 ]
+    * Stopped: [ mgmtnode2 ]
 ```
 
-#### 20.4 — Check Galera replication lag on node2
+#### 20.4 — Check Galera replication lag on mgmtnode2
 
 ```bash
-# On node2
+# On mgmtnode2
 sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_local_recv_queue_avg';"
 sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_flow_control_paused';"
 ```
@@ -3387,7 +3387,7 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_flow_control_paused';"
 #### 20.5 — Check RabbitMQ connection state
 
 ```bash
-# On node2
+# On mgmtnode2
 sudo rabbitmqctl list_connections peer_host state | grep -v "^Listing"
 ```
 ```
@@ -3409,14 +3409,14 @@ sudo rabbitmqctl list_connections peer_host send_pend | grep -v "^Listing"
 curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq .
 ```
 ```json
-{ "status": "queued", "flow": "flow1", "message_id": "abc123", "handled_by_node": "node1" }
+{ "status": "queued", "flow": "flow1", "message_id": "abc123", "handled_by_node": "mgmtnode1" }
 ```
-Messages may be processed more slowly but the pipeline continues — HAProxy routes around the degraded node2.
+Messages may be processed more slowly but the pipeline continues — HAProxy routes around the degraded mgmtnode2.
 
 #### 20.7 — Remove the degradation (cleanup)
 
 ```bash
-# On node2
+# On mgmtnode2
 sudo tc qdisc del dev ${IFACE} root
 
 # Confirm cleared
@@ -3434,19 +3434,19 @@ sudo crm_resource -C
 sudo crm_mon -1Ar | grep "Online:"
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ---
 
 ### Scenario 21: High Bandwidth Throttling — Simulating a Saturated Link
 
-> **Runs on:** **node3** (the throttled node), except `crm_resource` and `rabbitmqctl list_queues`, which can run on any cluster member (node1, node2 or node3).
+> **Runs on:** **mgmtnode3** (the throttled node), except `crm_resource` and `rabbitmqctl list_queues`, which can run on any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3).
 
-#### 21.1 — Limit node3's cluster interface to 1 Mbit/s
+#### 21.1 — Limit mgmtnode3's cluster interface to 1 Mbit/s
 
 ```bash
-# On node3
+# On mgmtnode3
 IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 sudo tc qdisc add dev ${IFACE} root tbf \
     rate 1mbit burst 32kbit latency 400ms
@@ -3460,7 +3460,7 @@ qdisc tbf 8001: root refcnt 2 rate 1Mbit burst 32Kb lat 400ms
 #### 21.2 — Monitor Galera SST/IST behaviour under bandwidth constraint
 
 ```bash
-# On node3 — watch wsrep state
+# On mgmtnode3 — watch wsrep state
 watch -n2 "sudo mysql -u root -p -e \"SHOW STATUS LIKE 'wsrep_local_state_comment';\" 2>/dev/null"
 ```
 ```
@@ -3472,21 +3472,21 @@ watch -n2 "sudo mysql -u root -p -e \"SHOW STATUS LIKE 'wsrep_local_state_commen
 #### 21.3 — Inject simultaneous packet corruption (2 %)
 
 ```bash
-# On node3 — add corruption on top of the throttle
+# On mgmtnode3 — add corruption on top of the throttle
 sudo tc qdisc change dev ${IFACE} root netem corrupt 2%
 
 # Check pipeline impact
 sudo rabbitmqctl list_queues name messages | grep -v "^Listing"
 ```
 ```
-flow1_p1_to_p2           12     ← messages backing up — the Transformer (Process 2) leader (if on node3) is struggling
+flow1_p1_to_p2           12     ← messages backing up — the Transformer (Process 2) leader (if on mgmtnode3) is struggling
 flow1_p2_to_p3           8
 ```
 
 #### 21.4 — Cleanup
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo tc qdisc del dev ${IFACE} root
 sudo crm_resource -C
 ```
@@ -3495,9 +3495,9 @@ sudo crm_resource -C
 
 ### Scenario 22: Hard Network Partition — `iptables` DROP Between Two Nodes
 
-> **Runs on:** `iptables` rules are local: in 22.2 and 22.6 they run on **node1 and node3** (both sides of the partition); 22.3–22.4 on **node2**; 22.5 on **node1**; in 22.7 `pcs cluster start` on **node3**, then checks on **node1**.
+> **Runs on:** `iptables` rules are local: in 22.2 and 22.6 they run on **mgmtnode1 and mgmtnode3** (both sides of the partition); 22.3–22.4 on **mgmtnode2**; 22.5 on **mgmtnode1**; in 22.7 `pcs cluster start` on **mgmtnode3**, then checks on **mgmtnode1**.
 
-This is the most dangerous fault: node2 can reach node1 and node3, but node1 and node3 **cannot reach each other**. This creates a split-brain candidate situation where Corosync must fence one side.
+This is the most dangerous fault: mgmtnode2 can reach mgmtnode1 and mgmtnode3, but mgmtnode1 and mgmtnode3 **cannot reach each other**. This creates a split-brain candidate situation where Corosync must fence one side.
 
 #### 22.1 — Understand the topology before partitioning
 
@@ -3505,7 +3505,7 @@ This is the most dangerous fault: node2 can reach node1 and node3, but node1 and
 sudo crm_mon -1Ar | grep "Online:"
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 Note the current DC (Designated Coordinator):
@@ -3513,59 +3513,59 @@ Note the current DC (Designated Coordinator):
 sudo pcs status | grep "Current DC"
 ```
 ```
-  * Current DC: node1 (version 2.1.6-8.el9) - partition with quorum
+  * Current DC: mgmtnode1 (version 2.1.6-8.el9) - partition with quorum
 ```
 
-#### 22.2 — Drop all cluster traffic between node1 and node3 (both directions)
+#### 22.2 — Drop all cluster traffic between mgmtnode1 and mgmtnode3 (both directions)
 
 ```bash
-# On node1 — drop all packets TO node3
+# On mgmtnode1 — drop all packets TO mgmtnode3
 sudo iptables -I INPUT  -s ${NODE3_IP} -j DROP
 sudo iptables -I OUTPUT -d ${NODE3_IP} -j DROP
 
-# On node3 — drop all packets TO node1
+# On mgmtnode3 — drop all packets TO mgmtnode1
 sudo iptables -I INPUT  -s ${NODE1_IP} -j DROP
 sudo iptables -I OUTPUT -d ${NODE1_IP} -j DROP
 ```
 
 > The cluster now has two sides:
-> - **Side A**: node1 (can reach node2 only)
-> - **Side B**: node3 (can reach node2 only)
-> - **node2**: can reach both — it holds quorum
+> - **Side A**: mgmtnode1 (can reach mgmtnode2 only)
+> - **Side B**: mgmtnode3 (can reach mgmtnode2 only)
+> - **mgmtnode2**: can reach both — it holds quorum
 
 #### 22.3 — Observe Corosync partition detection (within 10–30 s)
 
 ```bash
-# From node2 — watch Corosync reconfigure
+# From mgmtnode2 — watch Corosync reconfigure
 sudo journalctl -u corosync -f --no-pager | grep -E "partition|quorum|fenc|membership"
 ```
 ```
-corosync[1234]: [QUORUM] Members[2]: 1 2            ← node1+node2 form a partition
-corosync[1234]: [QUORUM] Members[2]: 2 3            ← node3+node2 form a partition
+corosync[1234]: [QUORUM] Members[2]: 1 2            ← mgmtnode1+mgmtnode2 form a partition
+corosync[1234]: [QUORUM] Members[2]: 2 3            ← mgmtnode3+mgmtnode2 form a partition
 corosync[1234]: [QUORUM] This node is within the primary component
 ```
 
-Corosync uses a **two-node majority rule**: each side has 2 of 3 nodes (node1+node2 and node2+node3). node2 will be in both partitions' majority. The partition that includes node2 **retains quorum**.
+Corosync uses a **two-node majority rule**: each side has 2 of 3 nodes (mgmtnode1+mgmtnode2 and mgmtnode2+mgmtnode3). mgmtnode2 will be in both partitions' majority. The partition that includes mgmtnode2 **retains quorum**.
 
 #### 22.4 — Observe Pacemaker fencing decision
 
 ```bash
-# From node2 (within 30–60 s)
+# From mgmtnode2 (within 30–60 s)
 sudo crm_mon -1Ar
 ```
 ```
 Cluster Summary:
   * Stack: corosync
-  * Current DC: node2 (version 2.1.6-8.el9) - partition with quorum
-  * Online: [ node1 node2 ]
-  * OFFLINE: [ node3 ]           ← node3 lost quorum as seen from node1+node2 partition
+  * Current DC: mgmtnode2 (version 2.1.6-8.el9) - partition with quorum
+  * Online: [ mgmtnode1 mgmtnode2 ]
+  * OFFLINE: [ mgmtnode3 ]           ← mgmtnode3 lost quorum as seen from mgmtnode1+mgmtnode2 partition
 
   * Resource Group: vip-haproxy-group:
-    * flowfirst-vip (ocf::heartbeat:IPaddr2):   Started node1
-    * haproxy-res (systemd:haproxy):          Started node1
+    * flowfirst-vip (ocf::heartbeat:IPaddr2):   Started mgmtnode1
+    * haproxy-res (systemd:haproxy):          Started mgmtnode1
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 2 of 3):
-    * Started: [ node1 node2 ]
-    * Stopped: [ node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 ]
+    * Stopped: [ mgmtnode3 ]
 ```
 
 ```bash
@@ -3574,7 +3574,7 @@ sudo pcs status | grep -A5 "Fencing"
 ```
 ```
 Fencing History:
-  * reboot of node3 (via fence_xvm)   succeeded: Mon Jun 9 12:45:01 2025
+  * reboot of mgmtnode3 (via fence_xvm)   succeeded: Mon Jun 9 12:45:01 2025
 ```
 
 > If STONITH is not configured, Pacemaker will refuse to fence and the cluster will show a warning but resources continue on the quorum side.
@@ -3582,15 +3582,15 @@ Fencing History:
 #### 22.5 — Verify VIP and pipeline are still serving
 
 ```bash
-# From node1 — API must still respond via VIP
+# From mgmtnode1 — API must still respond via VIP
 curl -s http://${FLOWFIRST_VIP}:8080/health | jq .
 ```
 ```json
-{ "status": "ok", "handled_by_node": "node1" }
+{ "status": "ok", "handled_by_node": "mgmtnode1" }
 ```
 
 ```bash
-# Galera from node1
+# Galera from mgmtnode1
 sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 ```
 ```
@@ -3602,16 +3602,16 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 ```
 
 ```bash
-# RabbitMQ from node1
+# RabbitMQ from mgmtnode1
 sudo rabbitmqctl cluster_status | grep "Running Nodes"
 ```
 ```
-Running Nodes: rabbit@node1  rabbit@node2
+Running Nodes: rabbit@mgmtnode1  rabbit@mgmtnode2
 ```
 
-> **RabbitMQ partition handling (`pause_minority`):** node2 can still reach both sides, so this is a *partial* partition. RabbitMQ logs `Partial partition detected`, turns it into a full partition, and `pause_minority` pauses **one of node1 or node3**, whichever ends up in the minority. The output above shows node3 paused. Check on each of node1 and node3:
+> **RabbitMQ partition handling (`pause_minority`):** mgmtnode2 can still reach both sides, so this is a *partial* partition. RabbitMQ logs `Partial partition detected`, turns it into a full partition, and `pause_minority` pauses **one of mgmtnode1 or mgmtnode3**, whichever ends up in the minority. The output above shows mgmtnode3 paused. Check on each of mgmtnode1 and mgmtnode3:
 > ```bash
-> # On node1 and on node3 — a paused broker has its rabbit app stopped and refuses AMQP clients
+> # On mgmtnode1 and on mgmtnode3 — a paused broker has its rabbit app stopped and refuses AMQP clients
 > sudo rabbitmq-diagnostics check_running || echo "this broker is paused (expected on one side)"
 > ```
 > When the DROP rules are removed in 22.6, the paused broker resumes and resyncs automatically. No restart is needed.
@@ -3619,27 +3619,27 @@ Running Nodes: rabbit@node1  rabbit@node2
 #### 22.6 — Restore network connectivity (cleanup)
 
 ```bash
-# On node1 — remove DROP rules
+# On mgmtnode1 — remove DROP rules
 sudo iptables -D INPUT  -s ${NODE3_IP} -j DROP
 sudo iptables -D OUTPUT -d ${NODE3_IP} -j DROP
 
-# On node3 — remove DROP rules
+# On mgmtnode3 — remove DROP rules
 sudo iptables -D INPUT  -s ${NODE1_IP} -j DROP
 sudo iptables -D OUTPUT -d ${NODE1_IP} -j DROP
 ```
 
-#### 22.7 — Re-integrate node3 into the cluster
+#### 22.7 — Re-integrate mgmtnode3 into the cluster
 
 ```bash
-# On node3 — restart cluster services (Pacemaker may have shut them down after fencing)
+# On mgmtnode3 — restart cluster services (Pacemaker may have shut them down after fencing)
 sudo pcs cluster start
 sleep 15
 
-# From node1 — confirm node3 rejoined
+# From mgmtnode1 — confirm mgmtnode3 rejoined
 sudo crm_mon -1Ar | grep "Online:"
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ```bash
@@ -3655,11 +3655,11 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 ```
 
 ```bash
-# RabbitMQ node3 rejoins
+# RabbitMQ mgmtnode3 rejoins
 sudo rabbitmqctl cluster_status | grep "Running Nodes"
 ```
 ```
-Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
+Running Nodes: rabbit@mgmtnode1  rabbit@mgmtnode2  rabbit@mgmtnode3
 ```
 
 ```bash
@@ -3671,31 +3671,31 @@ sudo crm_mon -1Ar | grep -E "p1|p2|p3|p4"
 ```
 ```
   * Clone Set: flowfirst-p1-res-clone [flowfirst-p1-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p2-res-clone [flowfirst-p2-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p3-res-clone [flowfirst-p3-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
   * Clone Set: flowfirst-p4-res-clone [flowfirst-p4-res] (active, 3 of 3):
-    * Started: [ node1 node2 node3 ]
+    * Started: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ---
 
 ### Scenario 23: Selective Port-Level Block — Corosync Ring Only
 
-> **Runs on:** `iptables` on **node1 and node2**; `corosync-cfgtool` and `mysql` checks on **node1**; 23.3 on **node1 or node3**; in 23.4 `pcs cluster start` on **node2**.
+> **Runs on:** `iptables` on **mgmtnode1 and mgmtnode2**; `corosync-cfgtool` and `mysql` checks on **mgmtnode1**; 23.3 on **mgmtnode1 or mgmtnode3**; in 23.4 `pcs cluster start` on **mgmtnode2**.
 
 Rather than dropping all traffic, this scenario blocks **only Corosync's UDP port 5405** between two nodes — simulating a misconfigured firewall rule that leaves SSH/HTTP/MariaDB/RabbitMQ intact but severs cluster heartbeats.
 
-#### 23.1 — Block Corosync UDP 5405 between node1 and node2
+#### 23.1 — Block Corosync UDP 5405 between mgmtnode1 and mgmtnode2
 
 ```bash
-# On node1 — block Corosync heartbeats to/from node2
+# On mgmtnode1 — block Corosync heartbeats to/from mgmtnode2
 sudo iptables -I INPUT  -s ${NODE2_IP} -p udp --dport 5405 -j DROP
 sudo iptables -I OUTPUT -d ${NODE2_IP} -p udp --dport 5405 -j DROP
 
-# On node2 — mirror the block
+# On mgmtnode2 — mirror the block
 sudo iptables -I INPUT  -s ${NODE1_IP} -p udp --dport 5405 -j DROP
 sudo iptables -I OUTPUT -d ${NODE1_IP} -p udp --dport 5405 -j DROP
 ```
@@ -3703,7 +3703,7 @@ sudo iptables -I OUTPUT -d ${NODE1_IP} -p udp --dport 5405 -j DROP
 #### 23.2 — Observe: Corosync loses heartbeat but application traffic flows
 
 ```bash
-# Corosync ring shows fault (from node1)
+# Corosync ring shows fault (from mgmtnode1)
 sudo corosync-cfgtool -s
 ```
 ```
@@ -3716,7 +3716,7 @@ RING ID 0
 ```
 
 ```bash
-# But RabbitMQ still connects to node2 (AMQP 5672 is not blocked)
+# But RabbitMQ still connects to mgmtnode2 (AMQP 5672 is not blocked)
 sudo rabbitmqctl list_connections peer_host state | grep ${NODE2_IP}
 ```
 ```
@@ -3724,7 +3724,7 @@ sudo rabbitmqctl list_connections peer_host state | grep ${NODE2_IP}
 ```
 
 ```bash
-# And MariaDB still replicates to node2 (3306/4567 not blocked)
+# And MariaDB still replicates to mgmtnode2 (3306/4567 not blocked)
 sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 ```
 ```
@@ -3735,57 +3735,57 @@ sudo mysql -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
 +--------------------+-------+
 ```
 
-#### 23.3 — Pacemaker detects node2 as OFFLINE
+#### 23.3 — Pacemaker detects mgmtnode2 as OFFLINE
 
 ```bash
 sudo crm_mon -1Ar | grep -E "Online|OFFLINE"
 ```
 ```
-  * Online: [ node1 node3 ]
-  * OFFLINE: [ node2 ]
+  * Online: [ mgmtnode1 mgmtnode3 ]
+  * OFFLINE: [ mgmtnode2 ]
 ```
 
-Pacemaker clones on node2 stop; node2's VIP (if held) migrates to node1 or node3. Pipeline continues on 2/3 nodes.
+Pacemaker clones on mgmtnode2 stop; mgmtnode2's VIP (if held) migrates to mgmtnode1 or mgmtnode3. Pipeline continues on 2/3 nodes.
 
 #### 23.4 — Cleanup
 
 ```bash
-# On node1
+# On mgmtnode1
 sudo iptables -D INPUT  -s ${NODE2_IP} -p udp --dport 5405 -j DROP
 sudo iptables -D OUTPUT -d ${NODE2_IP} -p udp --dport 5405 -j DROP
 
-# On node2
+# On mgmtnode2
 sudo iptables -D INPUT  -s ${NODE1_IP} -p udp --dport 5405 -j DROP
 sudo iptables -D OUTPUT -d ${NODE1_IP} -p udp --dport 5405 -j DROP
 
-# Restart cluster on node2
+# Restart cluster on mgmtnode2
 sudo pcs cluster start
 sleep 15
 sudo crm_resource -C
 sudo crm_mon -1Ar | grep "Online:"
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ---
 
 ### Scenario 24: Selective Port-Level Block — Galera Replication Only
 
-> **Runs on:** `iptables` on **node1 and node3**; the 24.2 `mysql` check runs locally on **node3** (a remote `root` login is normally denied); 24.3 queries on any node with a mariadb client.
+> **Runs on:** `iptables` on **mgmtnode1 and mgmtnode3**; the 24.2 `mysql` check runs locally on **mgmtnode3** (a remote `root` login is normally denied); 24.3 queries on any node with a mariadb client.
 
 Block Galera's wsrep replication port (4567) between two nodes while leaving Corosync and RabbitMQ intact.
 
-#### 24.1 — Block Galera replication between node1 and node3
+#### 24.1 — Block Galera replication between mgmtnode1 and mgmtnode3
 
 ```bash
-# On node1
+# On mgmtnode1
 sudo iptables -I INPUT  -s ${NODE3_IP} -p tcp --dport 4567 -j DROP
 sudo iptables -I OUTPUT -d ${NODE3_IP} -p tcp --dport 4567 -j DROP
 sudo iptables -I INPUT  -s ${NODE3_IP} -p udp --dport 4567 -j DROP
 sudo iptables -I OUTPUT -d ${NODE3_IP} -p udp --dport 4567 -j DROP
 
-# On node3 — mirror
+# On mgmtnode3 — mirror
 sudo iptables -I INPUT  -s ${NODE1_IP} -p tcp --dport 4567 -j DROP
 sudo iptables -I OUTPUT -d ${NODE1_IP} -p tcp --dport 4567 -j DROP
 sudo iptables -I INPUT  -s ${NODE1_IP} -p udp --dport 4567 -j DROP
@@ -3799,24 +3799,24 @@ sudo iptables -I OUTPUT -d ${NODE1_IP} -p udp --dport 4567 -j DROP
 sudo crm_mon -1Ar | grep "Online:"
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ```bash
-# But Galera flow control activates on node3
+# But Galera flow control activates on mgmtnode3
 sudo mysql -u root -p -h ${NODE3_IP} -e \
   "SHOW STATUS WHERE Variable_name IN
    ('wsrep_cluster_size','wsrep_local_state_comment','wsrep_flow_control_paused');"
 ```
 ```
 +---------------------------+--------+
-| wsrep_cluster_size        | 3      |   ← still 3 — routing through node2
+| wsrep_cluster_size        | 3      |   ← still 3 — routing through mgmtnode2
 | wsrep_local_state_comment | Synced |
-| wsrep_flow_control_paused | 0.418  |   ← 42% pause — replication going via node2 hop
+| wsrep_flow_control_paused | 0.418  |   ← 42% pause — replication going via mgmtnode2 hop
 +---------------------------+--------+
 ```
 
-Galera routes writes through node2 as an intermediary — degraded but functional.
+Galera routes writes through mgmtnode2 as an intermediary — degraded but functional.
 
 #### 24.3 — Observe write latency increase
 
@@ -3833,13 +3833,13 @@ real    0m0.847s     ← normally ~10ms; elevated due to Galera flow control
 #### 24.4 — Cleanup
 
 ```bash
-# On node1
+# On mgmtnode1
 for proto in tcp udp; do
   sudo iptables -D INPUT  -s ${NODE3_IP} -p ${proto} --dport 4567 -j DROP
   sudo iptables -D OUTPUT -d ${NODE3_IP} -p ${proto} --dport 4567 -j DROP
 done
 
-# On node3
+# On mgmtnode3
 for proto in tcp udp; do
   sudo iptables -D INPUT  -s ${NODE1_IP} -p ${proto} --dport 4567 -j DROP
   sudo iptables -D OUTPUT -d ${NODE1_IP} -p ${proto} --dport 4567 -j DROP
@@ -3852,23 +3852,23 @@ sudo crm_resource -C
 
 ### Scenario 25: Selective Port-Level Block — RabbitMQ AMQP Only
 
-> **Runs on:** `iptables` on **node2**; logs, `rabbitmqctl cluster_status` and `list_queues` on **node1 or node3**.
+> **Runs on:** `iptables` on **mgmtnode2**; logs, `rabbitmqctl cluster_status` and `list_queues` on **mgmtnode1 or mgmtnode3**.
 
-Block AMQP port 5672 on node2 — RabbitMQ stops accepting connections but Corosync and Galera remain intact.
+Block AMQP port 5672 on mgmtnode2 — RabbitMQ stops accepting connections but Corosync and Galera remain intact.
 
-#### 25.1 — Block AMQP traffic to/from node2
+#### 25.1 — Block AMQP traffic to/from mgmtnode2
 
 ```bash
-# On node2
+# On mgmtnode2
 sudo iptables -I INPUT  -p tcp --dport 5672 -j DROP
 sudo iptables -I OUTPUT -p tcp --sport 5672 -j DROP
 ```
 
 #### 25.2 — Observe `pika` client reconnection
 
-The pipeline processes use multi-host `ConnectionParameters`. Within `pika`'s heartbeat interval (default 60 s), or immediately on the next connection attempt, they will fail over to `node1` or `node3`.
+The pipeline processes use multi-host `ConnectionParameters`. Within `pika`'s heartbeat interval (default 60 s), or immediately on the next connection attempt, they will fail over to `mgmtnode1` or `mgmtnode3`.
 
-Check the process logs on the node whose Transformer (Process 2) was connected to node2 (the DROP rule stalls an established connection, so expect this after up to two missed heartbeats, about 2 minutes):
+Check the process logs on the node whose Transformer (Process 2) was connected to mgmtnode2 (the DROP rule stalls an established connection, so expect this after up to two missed heartbeats, about 2 minutes):
 ```bash
 sudo journalctl -u flowfirst-process2 --since "5 minutes ago" --no-pager | grep -E "raised|Restarting|not ready|RabbitMQ connected|TCP Connection attempt failed"
 ```
@@ -3877,21 +3877,21 @@ ERROR [gt] Greenthread 'p2_flow1_consumer' raised: Stream connection lost: ...
 INFO [gt] Restarting 'p2_flow1_consumer' in 2s...
 INFO [gt] [p2-flow1] RabbitMQ connected at 192.168.1.101:5672
 ```
-The consumer greenthread restarts itself and `config.get_connection()` offers the broker list in order (`NODE1_IP`, `NODE2_IP`, `NODE3_IP`), so it reconnects to node1 first; the `RabbitMQ connected at` line names the broker it chose. `[gt] [p2-flow1] RabbitMQ not ready (attempt N/20)` appears only when **no** broker answered, and a `pika` line `TCP Connection attempt failed: ... dest=(... '<node2-ip>', 5672)` only when a broker was tried and unreachable (for example when node1 is down).
+The consumer greenthread restarts itself and `config.get_connection()` offers the broker list in order (`NODE1_IP`, `NODE2_IP`, `NODE3_IP`), so it reconnects to mgmtnode1 first; the `RabbitMQ connected at` line names the broker it chose. `[gt] [p2-flow1] RabbitMQ not ready (attempt N/20)` appears only when **no** broker answered, and a `pika` line `TCP Connection attempt failed: ... dest=(... '<mgmtnode2-ip>', 5672)` only when a broker was tried and unreachable (for example when mgmtnode1 is down).
 
 > These `[gt]` / `[zk]` lines come from Python `logging`, which `gt.configure_logging()` sends to the journal at `LOG_LEVEL` (default `INFO`). `pika` and `kazoo` are held at WARNING. On a node still running units started before that change, those lines are missing; restart the processes. You can also confirm the new broker with `sudo rabbitmqctl list_connections name peer_host | grep <process-2-node-ip>`.
 
 #### 25.3 — Verify RabbitMQ cluster view
 
 ```bash
-# From node1 — node2 still in cluster config but not accepting AMQP connections
+# From mgmtnode1 — mgmtnode2 still in cluster config but not accepting AMQP connections
 sudo rabbitmqctl cluster_status
 ```
 ```
-Disk Nodes: rabbit@node1  rabbit@node2  rabbit@node3
-Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
+Disk Nodes: rabbit@mgmtnode1  rabbit@mgmtnode2  rabbit@mgmtnode3
+Running Nodes: rabbit@mgmtnode1  rabbit@mgmtnode2  rabbit@mgmtnode3
 ```
-> RabbitMQ cluster inter-node communication (port 25672) is separate from AMQP client connections (5672). The RabbitMQ cluster stays intact even though AMQP clients cannot connect to node2.
+> RabbitMQ cluster inter-node communication (port 25672) is separate from AMQP client connections (5672). The RabbitMQ cluster stays intact even though AMQP clients cannot connect to mgmtnode2.
 
 #### 25.4 — Verify pipeline queues are still being consumed
 
@@ -3899,7 +3899,7 @@ Running Nodes: rabbit@node1  rabbit@node2  rabbit@node3
 sudo rabbitmqctl list_queues name messages consumers
 ```
 ```
-flow1_p1_to_p2           0    1     ← still 1 consumer (the Transformer (Process 2) leader, now on node1 or node3 if it was on node2)
+flow1_p1_to_p2           0    1     ← still 1 consumer (the Transformer (Process 2) leader, now on mgmtnode1 or mgmtnode3 if it was on mgmtnode2)
 flow2_p1_to_p2           0    1
 flow2_p2_to_p3           0    1
 ```
@@ -3907,7 +3907,7 @@ flow2_p2_to_p3           0    1
 #### 25.5 — Cleanup
 
 ```bash
-# On node2
+# On mgmtnode2
 sudo iptables -D INPUT  -p tcp --dport 5672 -j DROP
 sudo iptables -D OUTPUT -p tcp --sport 5672 -j DROP
 
@@ -3925,14 +3925,14 @@ flow2_p2_to_p3           0    1
 
 ### Scenario 26: Intermittent Flapping — Periodic Network Glitch
 
-> **Runs on:** the flapping loop on **node3**; the monitor loop on **node1** in a second terminal; failcount checks on any cluster member (node1, node2 or node3).
+> **Runs on:** the flapping loop on **mgmtnode3**; the monitor loop on **mgmtnode1** in a second terminal; failcount checks on any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3).
 
 Simulate a network interface that glitches every 30 seconds — typical of a bad cable or switch port.
 
-#### 26.1 — Start a background glitch loop on node3
+#### 26.1 — Start a background glitch loop on mgmtnode3
 
 ```bash
-# On node3 — toggle 5% loss on/off every 30 seconds for 5 cycles
+# On mgmtnode3 — toggle 5% loss on/off every 30 seconds for 5 cycles
 IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 for i in $(seq 1 5); do
     echo "[$(date)] Injecting packet loss — cycle ${i}"
@@ -3949,18 +3949,18 @@ done
 echo "Flapping simulation complete"
 ```
 
-#### 26.2 — Watch Pacemaker react on node1 (run in a separate terminal)
+#### 26.2 — Watch Pacemaker react on mgmtnode1 (run in a separate terminal)
 
 ```bash
-# Continuous monitor — watch node3 flap
+# Continuous monitor — watch mgmtnode3 flap
 sudo crm_mon -Ar -i 5 2>&1 | grep -E "Online|OFFLINE|Stopped|Started"
 ```
 
 Expected oscillation:
 ```
-  * Online: [ node1 node2 node3 ]           ← glitch clear
-  * Online: [ node1 node2 ] OFFLINE: [node3] ← glitch injected, Pacemaker fences node3
-  * Online: [ node1 node2 node3 ]           ← glitch cleared, node3 rejoins
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]           ← glitch clear
+  * Online: [ mgmtnode1 mgmtnode2 ] OFFLINE: [mgmtnode3] ← glitch injected, Pacemaker fences mgmtnode3
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]           ← glitch cleared, mgmtnode3 rejoins
 ```
 
 #### 26.3 — Check Pacemaker failure counters building up
@@ -3970,7 +3970,7 @@ sudo pcs resource failcount show flowfirst-p1-res-clone
 ```
 ```
 Resource Fail Counts:
-  flowfirst-p1-res: node3 = 3
+  flowfirst-p1-res: mgmtnode3 = 3
 ```
 
 Once the failcount hits the `migration-threshold`, Pacemaker bans the resource from that node until the count is cleared. The setup scripts never set `migration-threshold`, so it stays at Pacemaker's default of `INFINITY` (shown as `1000000`) and a ban only happens if you set a finite value (`sudo pcs resource meta flowfirst-p1-res-clone migration-threshold=3`). Failures are still counted and visible above:
@@ -3992,7 +3992,7 @@ sudo crm_resource -C
 sudo crm_mon -1Ar | grep "Online:"
 ```
 ```
-  * Online: [ node1 node2 node3 ]
+  * Online: [ mgmtnode1 mgmtnode2 mgmtnode3 ]
 ```
 
 ---
@@ -4020,7 +4020,7 @@ sudo ./scripts/simulate_network_glitch.sh <command> [node_ip] [options]
 
 ### Post-Glitch Full Health Validation Checklist
 
-Run this on **node1** (or any other cluster member — all of these commands work on node1–node3) after any glitch scenario to confirm a clean cluster state:
+Run this on **mgmtnode1** (or any other cluster member — all of these commands work on mgmtnode1–mgmtnode3) after any glitch scenario to confirm a clean cluster state:
 
 ```bash
 # 1. Pacemaker — all 3 nodes online, all clones 3/3
@@ -4090,7 +4090,7 @@ A helper script [`scripts/tcpdump_flows.sh`](scripts/tcpdump_flows.sh) automates
 
 ### Scenario 27: Capture Setup — Identify Interfaces and Start Captures
 
-> **Runs on:** **each of node1–node3**, in its own terminal (each capture records only the local NIC).
+> **Runs on:** **each of mgmtnode1–mgmtnode3**, in its own terminal (each capture records only the local NIC).
 
 #### 27.1 — Identify the cluster-facing network interface on each node
 
@@ -4102,9 +4102,9 @@ ip -o addr show | awk -v ip="${CURRENT_NODE_IP}" '$0 ~ ip {print $2, $4}'
 ip -o addr show | awk '$3 == "inet" && $2 != "lo" {print $2, $4}'
 ```
 ```
-eth0 ${NODE1_IP}/24    # node1 — example output (IP from .env)
-eth0 ${NODE2_IP}/24    # node2
-eth0 ${NODE3_IP}/24    # node3
+eth0 ${NODE1_IP}/24    # mgmtnode1 — example output (IP from .env)
+eth0 ${NODE2_IP}/24    # mgmtnode2
+eth0 ${NODE3_IP}/24    # mgmtnode3
 ```
 
 Set a shell variable for all subsequent commands:
@@ -4117,11 +4117,11 @@ IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 Open **three SSH sessions** (one per node) and run on each:
 
 ```bash
-# On node1 — capture all cluster-relevant ports, write to timestamped pcap
+# On mgmtnode1 — capture all cluster-relevant ports, write to timestamped pcap
 IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 PCAP_DIR=/var/log/flowfirst/pcap
 sudo mkdir -p ${PCAP_DIR}
-sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node1_$(date +%Y%m%d_%H%M%S).pcap \
+sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/mgmtnode1_$(date +%Y%m%d_%H%M%S).pcap \
     'port 5672 or port 25672 or port 5405 or port 4567 or port 4568 or port 4444 or port 3306 or port 8080 or port 9000' \
     -Z root &
 TCPDUMP_PID=$!
@@ -4129,22 +4129,22 @@ echo "tcpdump PID: ${TCPDUMP_PID}"
 ```
 
 ```bash
-# On node2
+# On mgmtnode2
 IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 PCAP_DIR=/var/log/flowfirst/pcap
 sudo mkdir -p ${PCAP_DIR}
-sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node2_$(date +%Y%m%d_%H%M%S).pcap \
+sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/mgmtnode2_$(date +%Y%m%d_%H%M%S).pcap \
     'port 5672 or port 25672 or port 5405 or port 4567 or port 4568 or port 4444 or port 3306 or port 8080 or port 9000' \
     -Z root &
 TCPDUMP_PID=$!
 ```
 
 ```bash
-# On node3
+# On mgmtnode3
 IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 PCAP_DIR=/var/log/flowfirst/pcap
 sudo mkdir -p ${PCAP_DIR}
-sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/node3_$(date +%Y%m%d_%H%M%S).pcap \
+sudo tcpdump -i ${IFACE} -s 0 -w ${PCAP_DIR}/mgmtnode3_$(date +%Y%m%d_%H%M%S).pcap \
     'port 5672 or port 25672 or port 5405 or port 4567 or port 4568 or port 4444 or port 3306 or port 8080 or port 9000' \
     -Z root &
 TCPDUMP_PID=$!
@@ -4157,14 +4157,14 @@ sudo tcpdump -D    # list interfaces
 ls -lh ${PCAP_DIR}/   # confirm pcap files are growing
 ```
 ```
--rw-r--r-- 1 root root 48K Jun  9 12:00 node1_20250609_120000.pcap
+-rw-r--r-- 1 root root 48K Jun  9 12:00 mgmtnode1_20250609_120000.pcap
 ```
 
 ---
 
 ### Scenario 28: AMQP Round-Trip — Flow1 & Flow2 Pipeline Execution
 
-> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); stop each capture and analyse its pcap on the **node that captured it** (`$TCPDUMP_PID` exists only in that shell).
+> **Runs on:** `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation); stop each capture and analyse its pcap on the **node that captured it** (`$TCPDUMP_PID` exists only in that shell).
 
 With captures running from Scenario 27, trigger both pipeline flows and then examine the AMQP handshake and message delivery round-trips.
 
@@ -4181,7 +4181,7 @@ sleep 10    # allow full pipeline traversal
 
 ```bash
 sudo kill ${TCPDUMP_PID}    # stop capture on each node
-PCAP=$(ls -t /var/log/flowfirst/pcap/node1_*.pcap | head -1)
+PCAP=$(ls -t /var/log/flowfirst/pcap/mgmtnode1_*.pcap | head -1)
 ```
 
 #### 28.3 — Verify TCP three-way handshake for AMQP connections
@@ -4270,7 +4270,7 @@ sudo tcpdump -r ${PCAP} -nn 'port 5672' | grep "Flags \[F" | head -10
 #### 29.1 — Capture REST API traffic while sending requests
 
 ```bash
-# On the node currently holding the VIP (e.g., node1)
+# On the node currently holding the VIP (e.g., mgmtnode1)
 # Capture both hops: client -> HAProxy (8080) and HAProxy -> API Gateway (Process 1) backend (8082).
 # "-i any" is needed because HAProxy reaches this node's own backend over loopback,
 # which a capture on ${VIP_NIC} alone would not see.
@@ -4298,7 +4298,7 @@ sudo tcpdump -r /tmp/rest_api.pcap -nn -A 'tcp port 8080' \
 12:00:05.001100 ... Content-Type: application/json
 12:00:05.002500 ... HTTP/1.0 200 OK
 12:00:05.002600 ... Content-Length: 87
-12:00:05.002700 ... {"status":"queued","flow":"flow1","handled_by_node":"node1"}
+12:00:05.002700 ... {"status":"queued","flow":"flow1","handled_by_node":"mgmtnode1"}
 ```
 
 > ✅ HTTP `POST` request and `200 OK` response confirm REST API round-trip.
@@ -4316,15 +4316,15 @@ done
 sleep 1; sudo kill ${TCPDUMP_PID}
 ```
 ```
-node1
-node2
-node3
-node1
-node2
-node3
-node1
-node2
-node3
+mgmtnode1
+mgmtnode2
+mgmtnode3
+mgmtnode1
+mgmtnode2
+mgmtnode3
+mgmtnode1
+mgmtnode2
+mgmtnode3
 ```
 
 Confirm in the pcap that the destination backend IPs rotate. Only the first packet of each connection (SYN without ACK) is counted, so the numbers are connections, not packets (`option http-server-close` gives one backend connection per request):
@@ -4360,12 +4360,12 @@ sudo tshark -r /tmp/rest_api_rr.pcap \
 
 ### Scenario 30: Corosync Heartbeat Round-Trip Verification
 
-> **Runs on:** **node1** (capture and analysis).
+> **Runs on:** **mgmtnode1** (capture and analysis).
 
 #### 30.1 — Capture Corosync UDP heartbeats
 
 ```bash
-# On node1 — capture only Corosync UDP 5405
+# On mgmtnode1 — capture only Corosync UDP 5405
 sudo tcpdump -i ${IFACE} -s 0 -w /tmp/corosync.pcap \
     'udp port 5405' &
 TCPDUMP_PID=$!
@@ -4382,9 +4382,9 @@ sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
     | awk '{print $3}' | cut -d. -f1-4 | sort | uniq -c | sort -rn
 ```
 ```
- 148 192.168.1.101    ← node1 sent 148 Corosync messages
- 147 192.168.1.102    ← node2 sent 147
- 149 192.168.1.103    ← node3 sent 149
+ 148 192.168.1.101    ← mgmtnode1 sent 148 Corosync messages
+ 147 192.168.1.102    ← mgmtnode2 sent 147
+ 149 192.168.1.103    ← mgmtnode3 sent 149
 ```
 
 > ✅ Roughly equal message counts from all 3 nodes confirms active token-ring participation by every node.
@@ -4398,12 +4398,12 @@ sudo tcpdump -r /tmp/corosync.pcap -nn 'udp port 5405' \
     | sort -u | head -12
 ```
 ```
-192.168.1.101 -> 192.168.1.102    ← node1→node2
-192.168.1.101 -> 192.168.1.103    ← node1→node3
-192.168.1.102 -> 192.168.1.101    ← node2→node1
-192.168.1.102 -> 192.168.1.103    ← node2→node3
-192.168.1.103 -> 192.168.1.101    ← node3→node1
-192.168.1.103 -> 192.168.1.102    ← node3→node2
+192.168.1.101 -> 192.168.1.102    ← mgmtnode1→mgmtnode2
+192.168.1.101 -> 192.168.1.103    ← mgmtnode1→mgmtnode3
+192.168.1.102 -> 192.168.1.101    ← mgmtnode2→mgmtnode1
+192.168.1.102 -> 192.168.1.103    ← mgmtnode2→mgmtnode3
+192.168.1.103 -> 192.168.1.101    ← mgmtnode3→mgmtnode1
+192.168.1.103 -> 192.168.1.102    ← mgmtnode3→mgmtnode2
 ```
 
 > ✅ All 6 directed pairs present — every node is communicating with every other node in the ring.
@@ -4426,12 +4426,12 @@ avg=999.8ms  n=147     ← token circulates approximately every 1 second (Corosy
 
 ### Scenario 31: Galera wsrep Replication Round-Trip Verification
 
-> **Runs on:** **node1** (capture and analysis); the write traffic can come from any node.
+> **Runs on:** **mgmtnode1** (capture and analysis); the write traffic can come from any node.
 
 #### 31.1 — Capture Galera replication traffic during a DB write
 
 ```bash
-# On node1 — capture Galera ports, plus MariaDB client port 3306 (used by 31.4)
+# On mgmtnode1 — capture Galera ports, plus MariaDB client port 3306 (used by 31.4)
 sudo tcpdump -i ${IFACE} -s 0 -w /tmp/galera.pcap \
     'tcp port 4567 or tcp port 4568 or tcp port 4444 or tcp port 3306' &
 TCPDUMP_PID=$!
@@ -4467,8 +4467,8 @@ sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 4567 and not tcp[tcpflags] & tcp-
     | sort | uniq -c | sort -rn | head -10
 ```
 ```
-  42 192.168.1.101 -> 192.168.1.102    ← writesets from node1 to node2
-  41 192.168.1.101 -> 192.168.1.103    ← writesets from node1 to node3
+  42 192.168.1.101 -> 192.168.1.102    ← writesets from mgmtnode1 to mgmtnode2
+  41 192.168.1.101 -> 192.168.1.103    ← writesets from mgmtnode1 to mgmtnode3
   41 192.168.1.102 -> 192.168.1.101
   40 192.168.1.102 -> 192.168.1.103
   42 192.168.1.103 -> 192.168.1.101
@@ -4488,7 +4488,7 @@ sudo tcpdump -r /tmp/galera.pcap -nn 'tcp port 3306' | wc -l
 24     ← 24 TCP segments on port 3306 (query + result + EOF packets)
 ```
 
-> The number depends on which node DB Updater (Process 4) writes to. Only traffic that crosses node1's interface is captured, so a leader on node2 or node3 that writes to its own local MariaDB shows `0` here; the Galera replication packets in 31.2–31.3 still appear.
+> The number depends on which node DB Updater (Process 4) writes to. Only traffic that crosses mgmtnode1's interface is captured, so a leader on mgmtnode2 or mgmtnode3 that writes to its own local MariaDB shows `0` here; the Galera replication packets in 31.2–31.3 still appear.
 
 #### 31.5 — Examine MariaDB protocol greeting and query round-trip
 
@@ -4536,14 +4536,14 @@ sudo tshark -r /tmp/mysql.pcap -d tcp.port==3306,mysql \
 
 ### Scenario 32: Network Round-Trip During Glitch — Before/During/After Comparison
 
-> **Runs on:** captures and analysis on **node1**; `tc` impairment on **node2**.
+> **Runs on:** captures and analysis on **mgmtnode1**; `tc` impairment on **mgmtnode2**.
 
 This scenario combines Scenario 20 (latency injection) with live tcpdump to measure the actual impact of a network glitch on every protocol's round-trip time (RTT).
 
 #### 32.1 — Establish baseline RTTs (clean network)
 
 ```bash
-# On node1 — capture all protocols for 30 seconds baseline
+# On mgmtnode1 — capture all protocols for 30 seconds baseline
 sudo tcpdump -i ${IFACE} -s 0 -w /tmp/baseline.pcap \
     'port 5672 or port 5405 or port 4567 or port 3306 or port 8080' &
 TCPDUMP_PID=$!
@@ -4563,13 +4563,13 @@ sudo tshark -r /tmp/baseline.pcap -Y 'tcp.analysis.initial_rtt and tcp.port==567
 avg RTT: 0.312ms (n=6)     ← sub-millisecond baseline
 ```
 
-#### 32.2 — Inject latency on node2 and capture during glitch
+#### 32.2 — Inject latency on mgmtnode2 and capture during glitch
 
 ```bash
-# On node2 — inject 200ms delay
+# On mgmtnode2 — inject 200ms delay
 sudo tc qdisc add dev ${IFACE} root netem delay 200ms 20ms
 
-# On node1 — capture during glitch
+# On mgmtnode1 — capture during glitch
 sudo tcpdump -i ${IFACE} -s 0 -w /tmp/glitch.pcap \
     'port 5672 or port 5405 or port 4567 or port 3306 or port 8080' &
 TCPDUMP_PID=$!
@@ -4602,7 +4602,7 @@ sudo tcpdump -r /tmp/glitch.pcap -nn -tt "udp port 5405 and src ${NODE2_IP}" \
     | sort -n | tail -5
 ```
 ```
-1198.2ms     ← tokens from node2 arriving ~200ms late
+1198.2ms     ← tokens from mgmtnode2 arriving ~200ms late
 1203.5ms
 ```
 
@@ -4611,7 +4611,7 @@ sudo tcpdump -r /tmp/glitch.pcap -nn -tt "udp port 5405 and src ${NODE2_IP}" \
 #### 32.4 — Cleanup and verify RTT returns to baseline
 
 ```bash
-# On node2 — remove latency injection
+# On mgmtnode2 — remove latency injection
 sudo tc qdisc del dev ${IFACE} root
 
 # Re-run baseline measurement
@@ -4636,14 +4636,14 @@ avg RTT: 0.308ms (n=6)     ← back to sub-millisecond baseline
 
 ### Scenario 33: tcpdump-Based Full Pipeline Flow Trace
 
-> **Runs on:** captures on **each of node1–node3**; copy the pcaps to one node before running the cross-node loop (it reads only local files); 33.5 on **node3**, as shown.
+> **Runs on:** captures on **each of mgmtnode1–mgmtnode3**; copy the pcaps to one node before running the cross-node loop (it reads only local files); 33.5 on **mgmtnode3**, as shown.
 
 This scenario captures a single Flow 1 message from HTTP POST all the way to MariaDB INSERT and traces every network hop in the pcap files.
 
 #### 33.1 — Start captures on all 3 nodes simultaneously
 
 ```bash
-# Run this on node1, node2, node3 in parallel (3 SSH sessions)
+# Run this on mgmtnode1, mgmtnode2, mgmtnode3 in parallel (3 SSH sessions)
 NODE=$(hostname)
 IFACE=${VIP_NIC}   # cluster NIC for this node, set in .env (Phase 3)
 PCAP_DIR=/var/log/flowfirst/pcap
@@ -4657,7 +4657,7 @@ echo "Capture started on ${NODE}, PID=$!"
 #### 33.2 — Trigger one Flow 1 message
 
 ```bash
-# From node1 or workstation
+# From mgmtnode1 or workstation
 MSG_ID=$(curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow1 | jq -r .message_id)
 echo "Tracking message: ${MSG_ID}"
 sleep 8    # allow full pipeline: P1→P2→P3→P4→DB
@@ -4677,11 +4677,11 @@ for PCAP in /var/log/flowfirst/pcap/*flow_trace*.pcap; do
 done
 ```
 ```
-=== node1_flow_trace_120010.pcap ===
-4     ← message seen 4 times on node1 (publish flow1_queue + flow1_reflected_queue)
-=== node2_flow_trace_120010.pcap ===
-2     ← message transited node2's AMQP broker
-=== node3_flow_trace_120010.pcap ===
+=== mgmtnode1_flow_trace_120010.pcap ===
+4     ← message seen 4 times on mgmtnode1 (publish flow1_queue + flow1_reflected_queue)
+=== mgmtnode2_flow_trace_120010.pcap ===
+2     ← message transited mgmtnode2's AMQP broker
+=== mgmtnode3_flow_trace_120010.pcap ===
 2     ← final delivery to process4 and DB write
 ```
 
@@ -4698,11 +4698,11 @@ for PCAP in /var/log/flowfirst/pcap/*flow_trace*.pcap; do
 done | sort -n
 ```
 ```
-1749470410.123456  node1  AMQP hop    ← process1 publishes to flow1_queue
-1749470410.124800  node2  AMQP hop    ← process2 receives, modifies, republishes
-1749470410.126200  node1  AMQP hop    ← process3 receives on flow1_reflected_queue
-1749470410.127100  node3  AMQP hop    ← process4 receives on final queue
-1749470410.128500  node3  AMQP hop    ← DB INSERT via MariaDB (port 3306)
+1749470410.123456  mgmtnode1  AMQP hop    ← process1 publishes to flow1_queue
+1749470410.124800  mgmtnode2  AMQP hop    ← process2 receives, modifies, republishes
+1749470410.126200  mgmtnode1  AMQP hop    ← process3 receives on flow1_reflected_queue
+1749470410.127100  mgmtnode3  AMQP hop    ← process4 receives on final queue
+1749470410.128500  mgmtnode3  AMQP hop    ← DB INSERT via MariaDB (port 3306)
 ```
 
 > ✅ The full pipeline message journey — from REST POST to DB INSERT — is traced at the packet level with sub-millisecond timestamps.
@@ -4710,7 +4710,7 @@ done | sort -n
 #### 33.5 — Verify DB INSERT round-trip in the pcap
 
 ```bash
-PCAP=$(ls /var/log/flowfirst/pcap/node3_flow_trace*.pcap | head -1)
+PCAP=$(ls /var/log/flowfirst/pcap/mgmtnode3_flow_trace*.pcap | head -1)
 
 # Extract MySQL COM_QUERY and OK response
 sudo tcpdump -r ${PCAP} -nn -A 'tcp port 3306' 2>/dev/null \
@@ -4750,10 +4750,10 @@ sudo ./scripts/tcpdump_flows.sh all [iface] [vip_ip]
 
 ### Post-Capture Round-Trip Verification Checklist
 
-After running any capture scenario, use this checklist to confirm complete network round-trips for every protocol. Run it on the **node that holds the pcap** (the example uses node1's capture):
+After running any capture scenario, use this checklist to confirm complete network round-trips for every protocol. Run it on the **node that holds the pcap** (the example uses mgmtnode1's capture):
 
 ```bash
-PCAP=/var/log/flowfirst/pcap/node1_*.pcap   # adjust to your latest file
+PCAP=/var/log/flowfirst/pcap/mgmtnode1_*.pcap   # adjust to your latest file
 
 # ── 1. AMQP TCP three-way handshakes ─────────────────────────────────────────
 echo "=== 1. AMQP SYN/SYN-ACK/ACK triplets ==="
@@ -4783,7 +4783,7 @@ echo "  publishes=${PUBLISHES}  acks=${ACKS}"
 echo "=== 4. Corosync all-pairs coverage ==="
 sudo tcpdump -r ${PCAP} -nn 'udp port 5405' \
     | awk '{print $3, $5}' | sed 's/\.[0-9]*://g' | sort -u
-# expect: all 6 directed pairs (node1↔node2, node1↔node3, node2↔node3)
+# expect: all 6 directed pairs (mgmtnode1↔mgmtnode2, mgmtnode1↔mgmtnode3, mgmtnode2↔mgmtnode3)
 
 # ── 5. Galera TCP SYN→SYN-ACK on port 4567 ──────────────────────────────────
 echo "=== 5. Galera replication connections ==="
@@ -5072,7 +5072,7 @@ docker compose -f src/docker/docker-compose.yml down -v
 
 ## ZooKeeper Scenarios
 
-> **Changing runtime configuration is restricted (admin authorisation).** `GET /zk/config` is open, but every `POST /zk/config` in this chapter needs an allow-listed identity, otherwise it returns `403 Forbidden`. Set `ADMIN_ALLOWED_CNS` (certificate Common Names allowed to write, default `admin-client`) and `ADMIN_TRUSTED_PROXY_CNS` (`node1-pipeline,node2-pipeline,node3-pipeline`) in `.env`; with `TLS_API_ENABLED=true` call it with the matching client certificate:
+> **Changing runtime configuration is restricted (admin authorisation).** `GET /zk/config` is open, but every `POST /zk/config` in this chapter needs an allow-listed identity, otherwise it returns `403 Forbidden`. Set `ADMIN_ALLOWED_CNS` (certificate Common Names allowed to write, default `admin-client`) and `ADMIN_TRUSTED_PROXY_CNS` (`mgmtnode1-pipeline,mgmtnode2-pipeline,mgmtnode3-pipeline`) in `.env`; with `TLS_API_ENABLED=true` call it with the matching client certificate:
 >
 > ```bash
 > curl -s --cacert ca.crt --cert admin-client.crt --key admin-client.key \
@@ -5084,7 +5084,7 @@ docker compose -f src/docker/docker-compose.yml down -v
 
 ### Scenario 34: ZooKeeper Ensemble Health & Leader Election Verification
 
-> **Runs on:** the `nc` checks from any of node1–node4 (ZooKeeper's client port must be reachable); `curl` from any machine that can reach the VIP (node1–node4 or a workstation).
+> **Runs on:** the `nc` checks from any of mgmtnode1–remotenode1 (ZooKeeper's client port must be reachable); `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation).
 
 Verify the ensemble is healthy and identify which node holds the ZooKeeper leader role.
 
@@ -5119,10 +5119,10 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health
 ```json
 {
   "pipeline_health": {
-    "api_gateway": { "node1": {"state": "leader", ...}, "node2": {"state": "follower", ...} },
-    "transformer": { "node2": {"state": "leader", ...}, "node1": {"state": "follower", ...} },
-    "forwarder": { "node3": {"state": "leader", ...} },
-    "db_updater": { "node1": {"state": "leader", ...} }
+    "api_gateway": { "mgmtnode1": {"state": "leader", ...}, "mgmtnode2": {"state": "follower", ...} },
+    "transformer": { "mgmtnode2": {"state": "leader", ...}, "mgmtnode1": {"state": "follower", ...} },
+    "forwarder": { "mgmtnode3": {"state": "leader", ...} },
+    "db_updater": { "mgmtnode1": {"state": "leader", ...} }
   }
 }
 ```
@@ -5131,7 +5131,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health
 
 ### Scenario 35: Live Config Change via ZooKeeper — No Restart Required
 
-> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `zkCli.sh` on any of node1–node3; `journalctl` on the **current Transformer (Process 2) leader node** (see `/zk/health`).
+> **Runs on:** `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation); `zkCli.sh` on any of mgmtnode1–mgmtnode3; `journalctl` on the **current Transformer (Process 2) leader node** (see `/zk/health`).
 
 Change the Flow 2 HIGH threshold and the Flow 1 counter step at runtime. All three running
 Transformer (Process 2) instances pick up the change within seconds without any restart.
@@ -5214,7 +5214,7 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config -H "Content-Type: applica
 
 ### Scenario 36: ZooKeeper Leader Failover — Kill the Elected Leader Node
 
-> **Runs on:** A, B, E and F `curl`/`mysql` from any machine that can reach the VIP (node1–node4 or a workstation) (`mysql` needs a mariadb client); C via `ssh ${NODE2_IP}` from **node1 or node3** (or run the quoted command directly on node2); D on **node1 or node3** (the surviving candidates).
+> **Runs on:** A, B, E and F `curl`/`mysql` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation) (`mysql` needs a mariadb client); C via `ssh ${NODE2_IP}` from **mgmtnode1 or mgmtnode3** (or run the quoted command directly on mgmtnode2); D on **mgmtnode1 or mgmtnode3** (the surviving candidates).
 
 Verify that when the node holding the Transformer (Process 2) leader election crashes, the standby
 on another node automatically wins and takes over consuming without message loss.
@@ -5223,7 +5223,7 @@ on another node automatically wins and takes over consuming without message loss
 
 ```bash
 curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process2'
-# Note which node shows "state": "leader" — assume it is node2
+# Note which node shows "state": "leader" — assume it is mgmtnode2
 ```
 
 #### B. Send 5 Flow 1 messages to build up a queue backlog
@@ -5236,21 +5236,21 @@ for i in $(seq 1 5); do
 done
 ```
 
-#### C. Kill Transformer (Process 2) on the leader node (node2)
+#### C. Kill Transformer (Process 2) on the leader node (mgmtnode2)
 
 ```bash
-# From node1 or node3 — stop only process2 on node2
-ssh ${NODE2_IP} "sudo pcs resource ban flowfirst-p2-res-clone node2"
+# From mgmtnode1 or mgmtnode3 — stop only process2 on mgmtnode2
+ssh ${NODE2_IP} "sudo pcs resource ban flowfirst-p2-res-clone mgmtnode2"
 # Or forcefully kill the process:
 ssh ${NODE2_IP} "sudo systemctl stop flowfirst-process2"
 ```
 
-#### D. Watch the ZK election on node1 or node3
+#### D. Watch the ZK election on mgmtnode1 or mgmtnode3
 
 ```bash
 sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "LEADER|election|flow[12]-consumer"
 # Expected within ~10 seconds (the first line is the INFO log from zk.py):
-# INFO [zk] [process2] *** NODE node1 IS NOW LEADER ***
+# INFO [zk] [process2] *** NODE mgmtnode1 IS NOW LEADER ***
 # INFO flow1-consumer greenthread started — consuming 'flow1_p1_to_p2'
 # INFO flow2-consumer greenthread started — consuming 'flow2_p1_to_p2'
 ```
@@ -5279,7 +5279,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process2'
 
 ### Scenario 37: ZooKeeper Dedup Barrier — Prevent Double-Insert on Failover
 
-> **Runs on:** `mysql` from any node with a mariadb client; `rabbitmqadmin` and `zkCli.sh` on node1–node3; `journalctl` on the **current DB Updater (Process 4) leader node**.
+> **Runs on:** `mysql` from any node with a mariadb client; `rabbitmqadmin` and `zkCli.sh` on mgmtnode1–mgmtnode3; `journalctl` on the **current DB Updater (Process 4) leader node**.
 
 Simulate a Pacemaker failover that re-delivers an already-processed message to
 DB Updater (Process 4) and verify the ZooKeeper dedup barrier prevents a duplicate MariaDB row.
@@ -5339,7 +5339,7 @@ mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_D
 
 ### Scenario 38: ZooKeeper Service Registry — Observe Live Process Registration
 
-> **Runs on:** `zkCli.sh` on any of node1–node3; `pcs` steps from **any cluster node**; `curl` from any machine that can reach the VIP (node1–node4 or a workstation).
+> **Runs on:** `zkCli.sh` on any of mgmtnode1–mgmtnode3; `pcs` steps from **any cluster node**; `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation).
 
 Verify the ephemeral service registry updates in real time as processes start and stop.
 
@@ -5360,46 +5360,46 @@ quit
 EOF
 ```
 
-#### B. Stop Forwarder (Process 3) on node2 and observe the ephemeral znode disappear
+#### B. Stop Forwarder (Process 3) on mgmtnode2 and observe the ephemeral znode disappear
 
-Forwarder (Process 3) is managed by Pacemaker, which would restart a unit stopped with `systemctl stop` within seconds (the znode would barely disappear). Ban the clone from node2 instead; Pacemaker then stops it there and does not restart it:
+Forwarder (Process 3) is managed by Pacemaker, which would restart a unit stopped with `systemctl stop` within seconds (the znode would barely disappear). Ban the clone from mgmtnode2 instead; Pacemaker then stops it there and does not restart it:
 
 ```bash
-# Stop process3 on node2 (kept down until the ban is cleared in C)
-sudo pcs resource ban flowfirst-p3-res-clone node2
+# Stop process3 on mgmtnode2 (kept down until the ban is cleared in C)
+sudo pcs resource ban flowfirst-p3-res-clone mgmtnode2
 
-# Watch the registry — node2 should disappear within the ZK session timeout (~10s)
+# Watch the registry — mgmtnode2 should disappear within the ZK session timeout (~10s)
 sleep 12
 /opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
   ls /flowfirst/registry/process3
-# Expected: [node1, node3]  — node2 is gone
+# Expected: [mgmtnode1, mgmtnode3]  — mgmtnode2 is gone
 
 # Confirm via REST
 curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.registered_workers.process3'
-# Expected: ["node1", "node3"]
+# Expected: ["mgmtnode1", "mgmtnode3"]
 ```
 
-#### C. Restart Forwarder (Process 3) on node2 and watch it re-register
+#### C. Restart Forwarder (Process 3) on mgmtnode2 and watch it re-register
 
 ```bash
-sudo pcs resource clear flowfirst-p3-res-clone node2
+sudo pcs resource clear flowfirst-p3-res-clone mgmtnode2
 sleep 5
 
 /opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
   ls /flowfirst/registry/process3
-# Expected: [node1, node2, node3]
+# Expected: [mgmtnode1, mgmtnode2, mgmtnode3]
 
 # Inspect the registration payload
 /opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 \
-  get /flowfirst/registry/process3/node2
-# Expected JSON: {"node":"node2","pid":XXXX,"started_at":"..."}
+  get /flowfirst/registry/process3/mgmtnode2
+# Expected JSON: {"node":"mgmtnode2","pid":XXXX,"started_at":"..."}
 ```
 
 #### D. Verify the pipeline health dashboard reflects the re-registration
 
 ```bash
 curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process3'
-# Expected: node2 back with "state": "follower" (or "leader" if it won election)
+# Expected: mgmtnode2 back with "state": "follower" (or "leader" if it won election)
 ```
 
 ---
@@ -5408,7 +5408,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.pipeline_health.process3'
 
 ### Scenario 39: Verify Greenthread Startup & Pool Status
 
-> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `journalctl` and `/proc/<pid>/limits` checks on **each of node1–node3** (each node runs its own P1–P4 instances).
+> **Runs on:** `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation); `journalctl` and `/proc/<pid>/limits` checks on **each of mgmtnode1–mgmtnode3** (each node runs its own P1–P4 instances).
 
 Confirm all expected greenthreads are running in each process immediately after startup.
 
@@ -5463,7 +5463,7 @@ sudo cat /proc/$(pgrep -f src.application.process1 | head -1)/limits | grep "ope
 
 ### Scenario 40: Concurrent Batch Publishing — Greenthread Parallelism in API Gateway (Process 1)
 
-> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `rabbitmqctl` on node1–node3; `journalctl` on the **current Transformer (Process 2) leader node**.
+> **Runs on:** `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation); `rabbitmqctl` on mgmtnode1–mgmtnode3; `journalctl` on the **current Transformer (Process 2) leader node**.
 
 The `/api/batch` endpoint spawns one greenthread per message, publishing Flow 1 and
 Flow 2 messages in parallel rather than sequentially.  This scenario measures the
@@ -5529,7 +5529,7 @@ sudo journalctl -u flowfirst-process2 --since "2 minutes ago" --no-pager \
 
 ### Scenario 41: Per-Queue Greenthread Independence — Flow 1 Blockage Does Not Stall Flow 2
 
-> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `rabbitmqctl` on node1–node3; `journalctl` on the **current Transformer (Process 2) leader node**.
+> **Runs on:** `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation); `rabbitmqctl` on mgmtnode1–mgmtnode3; `journalctl` on the **current Transformer (Process 2) leader node**.
 
 Each queue in Transformer (Process 2), 3, and 4 runs in its own greenthread with its own pika
 connection.  A slow or blocked Flow 1 handler should not delay Flow 2 messages.
@@ -5587,29 +5587,29 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/zk/config \
 
 ### Scenario 42: Greenthread Auto-Restart on RabbitMQ Consumer Failure
 
-> **Runs on:** A and C on the **current Transformer (Process 2) leader** (assumed node1 below); B from node1 via `ssh` to node2 — `close_all_connections` drops every connection on node2's broker, not just Transformer (Process 2)'s.
+> **Runs on:** A and C on the **current Transformer (Process 2) leader** (assumed mgmtnode1 below); B from mgmtnode1 via `ssh` to mgmtnode2 — `close_all_connections` drops every connection on mgmtnode2's broker, not just Transformer (Process 2)'s.
 
 Consumer greenthreads are spawned with `restart_on_error=True`.  If a consumer
 greenthread crashes (e.g. RabbitMQ connection dropped), it automatically restarts
 after 2 seconds without operator intervention or process restart.
 
-#### A. Identify the RabbitMQ node that Transformer (Process 2) on node1 is connected to
+#### A. Identify the RabbitMQ node that Transformer (Process 2) on mgmtnode1 is connected to
 
 ```bash
 sudo journalctl -u flowfirst-process2 --since "1 hour ago" --no-pager | grep "RabbitMQ connected at" | tail -3
 # Example: INFO [gt] [p2-flow1] RabbitMQ connected at 192.168.1.102:5672
-# (config.get_connection() tries NODE1_IP first, so this is normally node1; it names node2 only
-#  if node1's broker was unreachable when the greenthread connected.)
+# (config.get_connection() tries NODE1_IP first, so this is normally mgmtnode1; it names mgmtnode2 only
+#  if mgmtnode1's broker was unreachable when the greenthread connected.)
 ```
 
 #### B. Force-drop the RabbitMQ connection on that node
 
 ```bash
-# On the node Transformer (Process 2) connected to (e.g. node2) — close all connections from node1
+# On the node Transformer (Process 2) connected to (e.g. mgmtnode2) — close all connections from mgmtnode1
 ssh ${NODE2_IP} "sudo rabbitmqctl close_all_connections 'greenthread restart test'"
 ```
 
-#### C. Watch Transformer (Process 2) on node1 detect the drop and auto-restart consumers
+#### C. Watch Transformer (Process 2) on mgmtnode1 detect the drop and auto-restart consumers
 
 ```bash
 sudo journalctl -u flowfirst-process2 -f --no-pager | grep -E "restart|Reconnect|consumer greenthread|not ready"
@@ -5646,7 +5646,7 @@ mysql -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_D
 
 ### Scenario 43: Greenthread Metrics Reporter — Throughput Monitoring
 
-> **Runs on:** `curl` from any machine that can reach the VIP (node1–node4 or a workstation); `ssh`/`sed`/`pcs` steps on any cluster member (node1, node2 or node3); `journalctl` on each process's **current leader node**. node4's `.env` is not changed by these steps.
+> **Runs on:** `curl` from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation); `ssh`/`sed`/`pcs` steps on any cluster member (mgmtnode1, mgmtnode2 or mgmtnode3); `journalctl` on each process's **current leader node**. remotenode1's `.env` is not changed by these steps.
 
 Each process emits a structured throughput report every `GT_METRICS_INTERVAL_S` seconds
 (default 60s).  This scenario triggers activity and then reads the metrics.
@@ -5727,25 +5727,25 @@ sudo pcs resource restart flowfirst-p4-res-clone
 
 ---
 
-### Scenario 44: Remote Node 4 / Remote Worker (Process 5) End-to-End Pipeline Execution & Database Validation
+### Scenario 44: Remote Node 1 / Remote Worker (Process 5) End-to-End Pipeline Execution & Database Validation
 
-> **Runs on:** A and C on **node4**; B, D and E from any machine that can reach the VIP (node1–node4 or a workstation) (D needs a mariadb client).
+> **Runs on:** A and C on **remotenode1**; B, D and E from any machine that can reach the VIP (mgmtnode1–remotenode1 or a workstation) (D needs a mariadb client).
 
-Demonstrates cross-node asynchronous inter-process communication spanning the core 3-node cluster and **Remote Node 4 (`node4`)**:
+Demonstrates cross-node asynchronous inter-process communication spanning the core 3-node cluster and **Remote Node 1 (`remotenode1`)**:
 1. `API Gateway (Process 1)` on one of the cluster nodes receives `POST /api/flow3` and prepares the initial message payload.
 2. `API Gateway (Process 1)` pushes the payload onto the RabbitMQ pool queue `flow3_p1_to_p5`.
-3. `Remote Worker (Process 5)` running on **Remote Node 4 (`node4`)** consumes the message from the RabbitMQ pool, applies remote transformation/computation, records audit details, and **reflects** the modified payload back to the RabbitMQ pool on `flow3_p5_to_p2`.
+3. `Remote Worker (Process 5)` running on **Remote Node 1 (`remotenode1`)** consumes the message from the RabbitMQ pool, applies remote transformation/computation, records audit details, and **reflects** the modified payload back to the RabbitMQ pool on `flow3_p5_to_p2`.
 4. `Transformer (Process 2)` on one of the cluster nodes consumes the reflected message from `flow3_p5_to_p2`, verifies the remote node processing, logs the verification step, and pushes it to `flow3_p2_to_p4`.
 5. `DB Updater (Process 4)` consumes the message, passes the ZooKeeper dedup barrier, and persists the complete audit history into both the **MariaDB Galera Cluster** (`processed_messages` table) and **Swift Object Storage**.
 
-#### A. Pre-requisite: Verify Remote Worker (Process 5) is running on Remote Node 4
+#### A. Pre-requisite: Verify Remote Worker (Process 5) is running on Remote Node 1
 
-On Remote Node 4 (`node4`), only the lightweight Python environment and `process5` run — no broker or database server daemons:
+On Remote Node 1 (`remotenode1`), only the lightweight Python environment and `process5` run — no broker or database server daemons:
 
 ```bash
-# On Remote Node 4 (node4):
+# On Remote Node 1 (remotenode1):
 sudo systemctl status flowfirst-process5
-# Confirm no cluster daemons are running on Node 4 (returns nothing):
+# Confirm no cluster daemons are running on Remote Node 1 (returns nothing):
 pgrep -a mariadbd || pgrep -a beam.smp || pgrep -a zookeeper || echo "Clean client-only node"
 ```
 
@@ -5762,9 +5762,9 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow3 \
 {
   "status": "success",
   "flow": 3,
-  "handled_by_node": "node1",
+  "handled_by_node": "mgmtnode1",
   "target_queue": "flow3_p1_to_p5",
-  "target_node": "remote_node4",
+  "target_node": "remotenode1",
   "payload": {
     "flow": 3,
     "message_id": "7b8f9a2c-d4e5-4a6b-8c1e-9f0a1b2c3d4e",
@@ -5775,19 +5775,19 @@ curl -s -X POST http://${FLOWFIRST_VIP}:8080/api/flow3 \
       {
         "stage": "process1_created",
         "timestamp": "2025-06-15 14:00:00",
-        "status": "prepared_for_remote_node4",
+        "status": "prepared_for_remotenode1",
         "source": "rest_api",
-        "published_by": "node1"
+        "published_by": "mgmtnode1"
       }
     ]
   }
 }
 ```
 
-#### C. Inspect Remote Node 4 (Remote Worker (Process 5)) Logs
+#### C. Inspect Remote Node 1 (Remote Worker (Process 5)) Logs
 
 ```bash
-# On Remote Node 4:
+# On Remote Node 1:
 sudo journalctl -u flowfirst-process5 --since "1 minute ago" --no-pager
 # Expected output:
 # INFO [Remote Node] Consumed Flow 3 item #9001 (msg_id=7b8f9a2c...)
@@ -5816,7 +5816,7 @@ initial_data: Remote telemetry batch 9001
   created_at: 2025-06-15 14:00:01
 ```
 
-Examine the full 4-stage audit trail spanning Node 1-3 and Remote Node 4:
+Examine the full 4-stage audit trail spanning Mgmt Node 1-3 and Remote Node 1:
 
 ```bash
 mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "
@@ -5831,28 +5831,28 @@ WHERE flow_id = 3 AND item_id = 9001\G"
   {
     "stage": "process1_created",
     "timestamp": "2025-06-15 14:00:00",
-    "status": "prepared_for_remote_node4",
+    "status": "prepared_for_remotenode1",
     "source": "rest_api",
-    "published_by": "node1"
+    "published_by": "mgmtnode1"
   },
   {
     "stage": "process5_remote_transformed_and_reflected",
     "timestamp": "2025-06-15 14:00:00",
-    "processed_by": "node4",
-    "node_type": "remote_node4",
+    "processed_by": "remotenode1",
+    "node_type": "remotenode1",
     "modification": "Applied remote transform (multiplier=2, computed_value=135.5)"
   },
   {
     "stage": "process2_received_from_remote_and_forwarded_to_p4",
     "timestamp": "2025-06-15 14:00:01",
-    "processed_by": "node2",
+    "processed_by": "mgmtnode2",
     "status": "remote_flow3_verified",
-    "action": "Received from node4 (computed_val=135.5) and forwarded to DB Updater (Process 4)"
+    "action": "Received from remotenode1 (computed_val=135.5) and forwarded to DB Updater (Process 4)"
   },
   {
     "stage": "process4_saved_to_mariadb",
     "timestamp": "2025-06-15 14:00:01",
-    "persisted_by": "node3",
+    "persisted_by": "mgmtnode3",
     "database_action": "INSERT/UPDATE processed_messages (flow3 remote complete)"
   }
 ]
@@ -5876,7 +5876,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/swift/object/flow3/${MSG_ID}.json | jq .
   "payload": {
     "flow": 3,
     "item_id": 9001,
-    "remote_node": "node4",
+    "remote_node": "remotenode1",
     "remote_computed_value": 135.5,
     "process2_verified_remote": true
   }
@@ -5889,14 +5889,14 @@ curl -s http://${FLOWFIRST_VIP}:8080/swift/object/flow3/${MSG_ID}.json | jq .
 
 ### Scenario 45: Reading the MariaDB Galera Error Log Across Scenarios
 
-> **Runs on:** **each of node1–node3**. Each node writes its own error log, so it shows only that node's view of the cluster. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 has no MariaDB log.
+> **Runs on:** **each of mgmtnode1–mgmtnode3**. Each node writes its own error log, so it shows only that node's view of the cluster. The cross-node loop in D runs from any of mgmtnode1–mgmtnode3 over `ssh`. remotenode1 has no MariaDB log.
 
 Use this scenario alongside Scenarios 4–7, 14, 16–24 and 31 to work out from the log what Galera did and why. Exact wording varies between Galera versions, so the commands below grep for stable keywords rather than whole lines.
 
 #### A. Locate the log
 
 ```bash
-# On node1, node2 or node3
+# On mgmtnode1, mgmtnode2 or mgmtnode3
 sudo mysql -u root -p -N -e "SELECT @@log_error;"
 # Empty or relative value → RHEL default: /var/log/mariadb/mariadb.log
 
@@ -5929,7 +5929,7 @@ sudo journalctl -u mariadb --since "30 min ago" --no-pager | grep -E "WSREP|Reco
 #### C. Build a timeline on one node
 
 ```bash
-# On the node being investigated (e.g. node3 after Scenario 5/6/16)
+# On the node being investigated (e.g. mgmtnode3 after Scenario 5/6/16)
 sudo grep -E "Shifting|New COMPONENT|non-Primary|suspecting|forgetting|state transfer|IST|SST|bootstrap|Flow-control|\[ERROR\]|Aborting" \
   /var/log/mariadb/mariadb.log | tail -60
 ```
@@ -5939,7 +5939,7 @@ Read top to bottom: peer loss (`suspecting`/`forgetting`) → new component (`me
 #### D. Correlate the same event across all three nodes
 
 ```bash
-# From any of node1–node3 (uses ssh to each node, including itself)
+# From any of mgmtnode1–mgmtnode3 (uses ssh to each node, including itself)
 SINCE="$(date -d '-15 min' '+%Y-%m-%d %H:%M')"
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
   echo "===== ${n} ====="
@@ -5948,7 +5948,7 @@ for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
 done
 ```
 
-Lines start with a `YYYY-MM-DD HH:MM:SS` timestamp, which is what the `awk` time filter compares against. Expected for Scenario 5 (IST to node3): node3 shows `JOINER` → `IST received` → `SYNCED`, the donor shows `SYNCED -> DONOR/DESYNCED` → `JOINED` → `SYNCED`, and the third node shows only `New COMPONENT ... memb_num = 3`.
+Lines start with a `YYYY-MM-DD HH:MM:SS` timestamp, which is what the `awk` time filter compares against. Expected for Scenario 5 (IST to mgmtnode3): mgmtnode3 shows `JOINER` → `IST received` → `SYNCED`, the donor shows `SYNCED -> DONOR/DESYNCED` → `JOINED` → `SYNCED`, and the third node shows only `New COMPONENT ... memb_num = 3`.
 
 #### E. Watch the log live while running another scenario
 
@@ -5961,7 +5961,7 @@ sudo tail -F /var/log/mariadb/mariadb.log \
 #### F. Temporarily increase verbosity (optional)
 
 ```bash
-# On each of node1–node3 — runtime only, lost on restart
+# On each of mgmtnode1–mgmtnode3 — runtime only, lost on restart
 sudo mysql -u root -p -e "SET GLOBAL wsrep_log_conflicts=ON;"   # log certification conflicts (see table)
 
 # Revert when finished
@@ -5974,14 +5974,14 @@ sudo mysql -u root -p -e "SET GLOBAL wsrep_log_conflicts=OFF;"
 
 ### Scenario 46: Reading the RabbitMQ Broker Log Across Scenarios
 
-> **Runs on:** **each of node1–node3**. Each broker writes its own log, so it shows only that node's view of the cluster. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 has no broker; its Remote Worker (Process 5) client-side errors are in `journalctl -u flowfirst-process5` on node4.
+> **Runs on:** **each of mgmtnode1–mgmtnode3**. Each broker writes its own log, so it shows only that node's view of the cluster. The cross-node loop in D runs from any of mgmtnode1–mgmtnode3 over `ssh`. remotenode1 has no broker; its Remote Worker (Process 5) client-side errors are in `journalctl -u flowfirst-process5` on remotenode1.
 
 Use this scenario alongside Scenarios 13, 16–25, 40–42 and 44 to work out from the log what the broker did and why. Exact wording varies between RabbitMQ versions, so the commands below grep for stable keywords rather than whole lines.
 
 #### A. Locate the log
 
 ```bash
-# On node1, node2 or node3 (the local broker must be running)
+# On mgmtnode1, mgmtnode2 or mgmtnode3 (the local broker must be running)
 sudo rabbitmq-diagnostics log_location
 # RHEL default: /var/log/rabbitmq/rabbit@<short-hostname>.log
 
@@ -6022,7 +6022,7 @@ sudo rabbitmq-diagnostics log_tail -N 50
 #### C. Build a timeline on one node
 
 ```bash
-# On the node being investigated (e.g. node3 after Scenario 13)
+# On the node being investigated (e.g. mgmtnode3 after Scenario 13)
 LOG=$(sudo rabbitmq-diagnostics log_location 2>/dev/null | grep '\.log$' | head -1)
 LOG=${LOG:-/var/log/rabbitmq/rabbit@$(hostname -s).log}
 sudo grep -E -i "Starting RabbitMQ|startup complete|asked to stop|Mnesia|node .* (up|down)|partition|minority|accepting AMQP|closing AMQP|unexpectedly closed|missed heartbeats|alarm|\[error\]" \
@@ -6034,7 +6034,7 @@ Read top to bottom: peer `down` → clients `unexpectedly closed` / reconnect to
 #### D. Correlate the same event across all three nodes
 
 ```bash
-# From any of node1–node3 (uses ssh to each node, including itself)
+# From any of mgmtnode1–mgmtnode3 (uses ssh to each node, including itself)
 SINCE="$(date -d '-15 min' '+%Y-%m-%d %H:%M')"
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
   echo "===== ${n} ====="
@@ -6044,7 +6044,7 @@ for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
 done
 ```
 
-Lines start with a `YYYY-MM-DD HH:MM:SS` timestamp, which is what the `awk` time filter compares against. Expected for Scenario 13 (stop/start on node3): node1 and node2 each show `node 'rabbit@node3' down`, then `accepting AMQP connection` from the processes that had been on node3's broker, then `node 'rabbit@node3' up`; node3 shows `asked to stop` → `Starting RabbitMQ` → `Successfully synced tables` → `Server startup complete`.
+Lines start with a `YYYY-MM-DD HH:MM:SS` timestamp, which is what the `awk` time filter compares against. Expected for Scenario 13 (stop/start on mgmtnode3): mgmtnode1 and mgmtnode2 each show `node 'rabbit@mgmtnode3' down`, then `accepting AMQP connection` from the processes that had been on mgmtnode3's broker, then `node 'rabbit@mgmtnode3' up`; mgmtnode3 shows `asked to stop` → `Starting RabbitMQ` → `Successfully synced tables` → `Server startup complete`.
 
 #### E. Watch the log live while running another scenario
 
@@ -6057,7 +6057,7 @@ sudo tail -F /var/log/rabbitmq/rabbit@$(hostname -s).log \
 #### F. Temporarily increase verbosity (optional)
 
 ```bash
-# On each of node1–node3 — runtime only, lost on broker restart
+# On each of mgmtnode1–mgmtnode3 — runtime only, lost on broker restart
 sudo rabbitmqctl set_log_level debug
 
 # Revert when finished
@@ -6072,14 +6072,14 @@ Debug level is very noisy under pipeline load; keep it on only for the duration 
 
 ### Scenario 47: Reading the ZooKeeper Server & Client Logs Across Scenarios
 
-> **Runs on:** server logs on **each of node1–node3**. Each ZooKeeper server writes its own log, so it shows only that server's view of the ensemble. Client-side logs (`journalctl -u flowfirst-processN`) are on whichever node runs that process, including **node4** for `flowfirst-process5`. The cross-node loop in D runs from any of node1–node3 over `ssh`.
+> **Runs on:** server logs on **each of mgmtnode1–mgmtnode3**. Each ZooKeeper server writes its own log, so it shows only that server's view of the ensemble. Client-side logs (`journalctl -u flowfirst-processN`) are on whichever node runs that process, including **remotenode1** for `flowfirst-process5`. The cross-node loop in D runs from any of mgmtnode1–mgmtnode3 over `ssh`.
 
 Use this scenario alongside Scenarios 16–22 and 34–38 to work out from the logs which server led the ensemble, which clients lost their sessions, and why leaders, registrations or config watches changed. Exact wording varies between ZooKeeper and kazoo versions, so the commands below grep for stable keywords rather than whole lines.
 
 #### A. Locate the logs
 
 ```bash
-# On node1, node2 or node3 — server log (ZOO_LOG_DIR set by zookeeper/setup_zookeeper.sh)
+# On mgmtnode1, mgmtnode2 or mgmtnode3 — server log (ZOO_LOG_DIR set by zookeeper/setup_zookeeper.sh)
 sudo ls -lt /var/log/zookeeper/
 # Text log:  zookeeper-zookeeper-server-<hostname>.out
 # version-2/ holds the BINARY transaction log (dataLogDir points at the same directory) — do not grep it
@@ -6094,7 +6094,7 @@ echo srvr | nc -w2 127.0.0.1 2181 | grep -E "Mode|Zxid"
 Client-side (pipeline processes, via kazoo):
 
 ```bash
-# On the node running the process (node1–node3 for P1–P4, node4 for P5)
+# On the node running the process (mgmtnode1–mgmtnode3 for P1–P4, remotenode1 for P5)
 sudo journalctl -u flowfirst-process2 --since "30 min ago" --no-pager | grep -E -i "zk|zookeeper|kazoo|connection dropped|expired|leader"
 ```
 
@@ -6102,7 +6102,7 @@ sudo journalctl -u flowfirst-process2 --since "30 min ago" --no-pager | grep -E 
 
 #### B. Message phrasebook — what each line means
 
-**Server log (`/var/log/zookeeper/*.out`, node1–node3):**
+**Server log (`/var/log/zookeeper/*.out`, mgmtnode1–mgmtnode3):**
 
 | Log keyword (grep for) | Meaning | Typical scenarios |
 |---|---|---|
@@ -6135,7 +6135,7 @@ sudo journalctl -u flowfirst-process2 --since "30 min ago" --no-pager | grep -E 
 #### C. Build a timeline on one server
 
 ```bash
-# On the server being investigated (e.g. node3 after Scenario 16)
+# On the server being investigated (e.g. mgmtnode3 after Scenario 16)
 sudo grep -h -E "LOOKING|LEADING|FOLLOWING|ELECTION TOOK|quorum of supporters|DIFF|SNAP|TRUNC|Cannot open channel|Exception when following|Expiring session|ERROR|FATAL" \
   /var/log/zookeeper/zookeeper-*.out | tail -60
 ```
@@ -6145,7 +6145,7 @@ Read top to bottom: peer loss (`Cannot open channel` / `Exception when following
 #### D. Correlate the same event across all three servers
 
 ```bash
-# From any of node1–node3 (uses ssh to each node, including itself)
+# From any of mgmtnode1–mgmtnode3 (uses ssh to each node, including itself)
 SINCE="$(date -d '-15 min' '+%Y-%m-%d %H:%M')"
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
   echo "===== ${n} ====="
@@ -6155,7 +6155,7 @@ for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
 done
 ```
 
-Lines start with a `YYYY-MM-DD HH:MM:SS,mmm [myid:N]` prefix; the `awk` time filter compares against the timestamp, and `myid` tells you which server wrote the line. Expected for Scenario 16 (reboot node3 while it is a follower): node1 and node2 show `Cannot open channel to 3`, then `Expiring session` for node3's pipeline clients, and stay `LEADING`/`FOLLOWING` without a new election; node3, after the reboot, shows `LOOKING` → `FOLLOWING` → `DIFF`. If node3 was the ZooKeeper **leader**, node1 and node2 both show `LOOKING` and one of them then shows `LEADING`.
+Lines start with a `YYYY-MM-DD HH:MM:SS,mmm [myid:N]` prefix; the `awk` time filter compares against the timestamp, and `myid` tells you which server wrote the line. Expected for Scenario 16 (reboot mgmtnode3 while it is a follower): mgmtnode1 and mgmtnode2 show `Cannot open channel to 3`, then `Expiring session` for mgmtnode3's pipeline clients, and stay `LEADING`/`FOLLOWING` without a new election; mgmtnode3, after the reboot, shows `LOOKING` → `FOLLOWING` → `DIFF`. If mgmtnode3 was the ZooKeeper **leader**, mgmtnode1 and mgmtnode2 both show `LOOKING` and one of them then shows `LEADING`.
 
 > The ZooKeeper **ensemble** leader (this log) is unrelated to the **pipeline** leader for each process (the kazoo `Election` under `/flowfirst/election/*`). A pipeline leader changes only when its session expires or closes, which appears in the server log as `Expiring session` / `Closing session` for that client's IP.
 
@@ -6172,7 +6172,7 @@ sudo tail -F /var/log/zookeeper/zookeeper-zookeeper-server-$(hostname).out \
 ZooKeeper's log level cannot be changed at runtime. Change it one server at a time so the ensemble keeps its quorum:
 
 ```bash
-# On one of node1–node3 at a time — ZooKeeper 3.9 uses logback
+# On one of mgmtnode1–mgmtnode3 at a time — ZooKeeper 3.9 uses logback
 sudo cp /opt/zookeeper/conf/logback.xml /opt/zookeeper/conf/logback.xml.bak
 sudo sed -i 's/<root level="INFO">/<root level="DEBUG">/' /opt/zookeeper/conf/logback.xml
 sudo systemctl restart zookeeper
@@ -6191,7 +6191,7 @@ Debug level logs every client request; keep it on only for the duration of the t
 
 ### Scenario 48: Reading and Managing HAProxy Logs Across Scenarios
 
-> **Runs on:** the **current VIP holder** (`sudo crm_resource --resource flowfirst-vip --locate`). Pacemaker runs HAProxy on one node at a time (`vip-haproxy-group`), so only that node writes request logs. After a failover, the older lines stay on the previous holder; to see a whole incident, read the log on **both** nodes (the loop in D runs from any of node1–node3 over `ssh`). The `curl` traffic generators can run from any machine that can reach the VIP.
+> **Runs on:** the **current VIP holder** (`sudo crm_resource --resource flowfirst-vip --locate`). Pacemaker runs HAProxy on one node at a time (`vip-haproxy-group`), so only that node writes request logs. After a failover, the older lines stay on the previous holder; to see a whole incident, read the log on **both** nodes (the loop in D runs from any of mgmtnode1–mgmtnode3 over `ssh`). The `curl` traffic generators can run from any machine that can reach the VIP.
 
 Use this scenario alongside Scenarios 1, 8–9, 15, 17, 20–25, 29 and 40–41 to work out which backend served a request, how long each stage took, and when HAProxy marked a node up or down. Exact wording varies between HAProxy versions, so the commands below grep for stable keywords rather than whole lines.
 
@@ -6208,7 +6208,7 @@ sudo ls -l /var/log/haproxy.log /var/log/haproxy/ 2>/dev/null
 sudo journalctl -u haproxy --since "30 min ago" --no-pager | tail -20     # start/stop/reload only
 ```
 
-If there is no listener on UDP 514 and no rsyslog rule for `local2`, add one. Run this on **each of node1–node3**, because any of them can become the VIP holder:
+If there is no listener on UDP 514 and no rsyslog rule for `local2`, add one. Run this on **each of mgmtnode1–mgmtnode3**, because any of them can become the VIP holder:
 
 ```bash
 sudo tee /etc/rsyslog.d/49-haproxy.conf > /dev/null << 'EOF'
@@ -6237,7 +6237,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/health | jq -r .node
 sudo grep flowfirst_api_front ${HLOG} | tail -3
 ```
 ```
-Oct 12 14:17:31 node1 haproxy[2211]: 192.168.1.50:51234 [12/Oct/2026:14:17:31.123] flowfirst_api_front flowfirst_api_back/node2 0/0/1/5/6 200 345 - - ---- 3/3/0/0/0 0/0 "GET /health HTTP/1.1"
+Oct 12 14:17:31 mgmtnode1 haproxy[2211]: 192.168.1.50:51234 [12/Oct/2026:14:17:31.123] flowfirst_api_front flowfirst_api_back/mgmtnode2 0/0/1/5/6 200 345 - - ---- 3/3/0/0/0 0/0 "GET /health HTTP/1.1"
 ```
 
 #### B. Anatomy of a log line
@@ -6288,12 +6288,12 @@ sudo grep -o 'flowfirst_api_back/[^ ]* [-0-9/]* [0-9-]*' ${HLOG} \
   | awk '{split($1,a,"/"); n[a[2]" "$3]++} END{for(k in n) print n[k], k}' | sort -k2
 ```
 ```
-118 node1 200
-121 node2 200
-120 node3 200
+118 mgmtnode1 200
+121 mgmtnode2 200
+120 mgmtnode3 200
 ```
 
-Compare both nodes after a failover (Scenarios 8, 15, 17). The loop runs from any of node1–node3:
+Compare both nodes after a failover (Scenarios 8, 15, 17). The loop runs from any of mgmtnode1–mgmtnode3:
 
 ```bash
 SINCE="$(date -d '-15 min' '+%b %e %H:%M')"
@@ -6339,7 +6339,7 @@ sudo ls -lh ${HLOG}*
 sudo test -f /etc/logrotate.d/haproxy && sudo cat /etc/logrotate.d/haproxy || echo "no logrotate rule for HAProxy"
 ```
 
-If there is no rotation rule, add one (on each of node1–node3). The path in the first line must match `HLOG`:
+If there is no rotation rule, add one (on each of mgmtnode1–mgmtnode3). The path in the first line must match `HLOG`:
 
 ```bash
 sudo tee /etc/logrotate.d/haproxy-flowfirst > /dev/null << 'EOF'
@@ -6366,14 +6366,14 @@ Raising the level from `info` to `debug` adds little for request logs and is not
 
 ### Scenario 49: Reading Pacemaker and Corosync Logs Across Scenarios
 
-> **Runs on:** log files and `journalctl` on **each of node1–node3** (each node logs its own view; **scheduler decisions are logged only on the current DC**, find it with `sudo crm_mon -1 | grep "Current DC"`). `crm_mon`, `crm_resource`, `crm_simulate` and `pcs` on **any cluster member**. Resource-agent lines (`IPaddr2`, systemd start/stop) appear on the node where the action ran. node4 is not in the cluster and has no Pacemaker or Corosync logs.
+> **Runs on:** log files and `journalctl` on **each of mgmtnode1–mgmtnode3** (each node logs its own view; **scheduler decisions are logged only on the current DC**, find it with `sudo crm_mon -1 | grep "Current DC"`). `crm_mon`, `crm_resource`, `crm_simulate` and `pcs` on **any cluster member**. Resource-agent lines (`IPaddr2`, systemd start/stop) appear on the node where the action ran. remotenode1 is not in the cluster and has no Pacemaker or Corosync logs.
 
 Use this scenario alongside Scenarios 8, 10–12, 15–26 and 38 to work out why Pacemaker moved a resource, restarted a process, or declared a node lost. Exact wording varies between Pacemaker and Corosync versions, so the commands below grep for stable keywords rather than whole lines.
 
 #### A. Locate the logs and the resource names
 
 ```bash
-# On node1, node2 or node3
+# On mgmtnode1, mgmtnode2 or mgmtnode3
 sudo grep -E "^\s*(to_logfile|logfile|to_syslog)" /etc/corosync/corosync.conf   # RHEL/pcs default: /var/log/cluster/corosync.log
 sudo ls -l /var/log/pacemaker/pacemaker.log /var/log/cluster/corosync.log
 
@@ -6466,7 +6466,7 @@ sudo pcs resource cleanup flowfirst-p1-res-clone    # reset fail counts after th
 #### F. Correlate the same event across all three nodes
 
 ```bash
-# From any of node1–node3 (uses ssh to each node, including itself); sorts all nodes into one timeline
+# From any of mgmtnode1–mgmtnode3 (uses ssh to each node, including itself); sorts all nodes into one timeline
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
   ssh "${n}" "sudo journalctl -u corosync -u pacemaker --since '15 min ago' -o short-iso --no-pager \
     | grep -E 'link: host|Token has not|Members\[|quorum (lost|regained)|state is now|peer on the DC|Set DC|Calculated transition|Result of (start|stop)|Forcing|active on 2 nodes' \
@@ -6474,7 +6474,7 @@ for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
 done | sort -k2,2
 ```
 
-This relies on synchronised clocks (chrony, Phase 0a) and the same time zone on every node. Expected for Scenario 16 (reboot node3): on node1 and node2, `link: host: 3 ... is down` → `Members[2]` → `Node node3 state is now lost` → one `Calculated transition` on the DC; later `link: host: 3 ... is up` → `Members[3]` → `Result of start operation for flowfirst-pN-res on node3: ok` for each clone. On node3 itself: boot, `Members[3]`, then the starts.
+This relies on synchronised clocks (chrony, Phase 0a) and the same time zone on every node. Expected for Scenario 16 (reboot mgmtnode3): on mgmtnode1 and mgmtnode2, `link: host: 3 ... is down` → `Members[2]` → `Node mgmtnode3 state is now lost` → one `Calculated transition` on the DC; later `link: host: 3 ... is up` → `Members[3]` → `Result of start operation for flowfirst-pN-res on mgmtnode3: ok` for each clone. On mgmtnode3 itself: boot, `Members[3]`, then the starts.
 
 #### G. Watch live and collect a support bundle
 
@@ -6495,7 +6495,7 @@ sudo crm_report --from "2026-10-12 14:00:00" --to "2026-10-12 14:30:00" /tmp/flo
 
 ### Scenario 50: Reading Swift Logs and Detecting Missing Objects
 
-> **Runs on:** client-side logs (`journalctl -u flowfirst-process4`) on the **current DB Updater (Process 4) leader node** (find it with `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health.process4`); for Flow 3, Remote Worker (Process 5) only forwards the message, so Swift errors still appear on the DB Updater (Process 4) leader. The `curl` and `mariadb` reconciliation checks in D run from **any machine that can reach the VIP** (the `mariadb` client is installed on node1–node3). Swift **server** logs (proxy, account, container and object servers, installed by Phase 2b) are in the journal of **each of node1–node3**: a request through the VIP is handled by whichever node HAProxy chose, and the object itself is written to all three nodes, so check all three.
+> **Runs on:** client-side logs (`journalctl -u flowfirst-process4`) on the **current DB Updater (Process 4) leader node** (find it with `curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq .pipeline_health.process4`); for Flow 3, Remote Worker (Process 5) only forwards the message, so Swift errors still appear on the DB Updater (Process 4) leader. The `curl` and `mariadb` reconciliation checks in D run from **any machine that can reach the VIP** (the `mariadb` client is installed on mgmtnode1–mgmtnode3). Swift **server** logs (proxy, account, container and object servers, installed by Phase 2b) are in the journal of **each of mgmtnode1–mgmtnode3**: a request through the VIP is handled by whichever node HAProxy chose, and the object itself is written to all three nodes, so check all three.
 
 Use this scenario alongside Scenarios 2, 37 and 44, and any scenario that stops RabbitMQ, MariaDB or the network, to find out whether DB Updater (Process 4) stored each payload in Swift, and why not when it did not. Swift failures are **non-fatal by design**: DB Updater (Process 4) prints a note, still writes the MariaDB row and still acknowledges the message, so a Swift outage never shows up as a stuck queue.
 
@@ -6514,7 +6514,7 @@ curl -s http://${FLOWFIRST_VIP}:8080/swift/status | jq .
 
 `"status": "error"` carries an `error` field with the underlying exception text. `"enabled": false` means `SWIFT_ENABLED` is false on the node that answered, and every object write is skipped. Because HAProxy round-robins `/swift/status`, run it a few times to see all three nodes.
 
-> **Check the URL, it is easy to get wrong:** `SWIFT_AUTH_URL` must be `http://${FLOWFIRST_VIP}:8090/auth/v1.0` (HAProxy's Swift frontend, `SWIFT_LB_PORT`), the same on every node including node4. Port `8080` on the VIP is HAProxy in front of **API Gateway (Process 1)**, which has no `/auth/v1.0` route, and a node-local proxy on `:8888` would bypass the load balancer. Confirm that `curl -sI -H "X-Auth-User: ${SWIFT_USER}" -H "X-Auth-Key: <key>" "${SWIFT_AUTH_URL}"` returns `X-Auth-Token` and `X-Storage-Url` headers before trusting any other result here.
+> **Check the URL, it is easy to get wrong:** `SWIFT_AUTH_URL` must be `http://${FLOWFIRST_VIP}:8090/auth/v1.0` (HAProxy's Swift frontend, `SWIFT_LB_PORT`), the same on every node including remotenode1. Port `8080` on the VIP is HAProxy in front of **API Gateway (Process 1)**, which has no `/auth/v1.0` route, and a node-local proxy on `:8888` would bypass the load balancer. Confirm that `curl -sI -H "X-Auth-User: ${SWIFT_USER}" -H "X-Auth-Key: <key>" "${SWIFT_AUTH_URL}"` returns `X-Auth-Token` and `X-Storage-Url` headers before trusting any other result here.
 
 #### B. Message phrasebook — what each line means
 
@@ -6546,7 +6546,7 @@ The `Auth GET failed`, `Object PUT failed`, `Container PUT failed` and `Account 
 | `GET /swift/object/<name>` returns `404` with `details.error` containing `ClientException 404` | No such object (never written, or written under a different name) |
 | `GET /swift/objects` returns `502` with `error` | Listing failed (same causes as above) |
 
-**Server side (Swift daemons on node1–node3, `journalctl` on each node):**
+**Server side (Swift daemons on mgmtnode1–mgmtnode3, `journalctl` on each node):**
 
 | Where | What to look for |
 |---|---|
@@ -6570,7 +6570,7 @@ sudo journalctl -u flowfirst-process4 --since "30 min ago" --no-pager \
 
 Read top to bottom: `Stored in Swift object storage` lines stop → first `Swift store note:` / `Failed to put object` → (fault cleared) → `Stored in Swift object storage` resumes. The messages between the first failure and the first success are the ones **missing from Swift** (see D).
 
-> **Output delay:** the unit files set `Environment=PYTHONUNBUFFERED=1`, so log output reaches the journal immediately. On a node installed **before** that line was added, the lines from `src/application/process4.py` can appear in bursts (Python block-buffers stdout when it is not a terminal). Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes (`sudo pcs resource restart flowfirst-p4-res-clone` for the clones). Check with `systemctl show flowfirst-process4 -p Environment`.
+> **Output delay:** the unit files set `Environment=PYTHONUNBUFFERED=1`, so log output reaches the journal immediately. On a node installed **before** that line was added, the lines from `src/application/process4.py` can appear in bursts (Python block-buffers stdout when it is not a terminal). Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on remotenode1), then `sudo systemctl daemon-reload` and restart the processes (`sudo pcs resource restart flowfirst-p4-res-clone` for the clones). Check with `systemctl show flowfirst-process4 -p Environment`.
 
 #### D. Reconcile MariaDB and Swift (find objects that were never stored)
 
@@ -6610,7 +6610,7 @@ sudo journalctl -u flowfirst-process4 -f --no-pager | grep --line-buffered -E "S
 
 #### F. Controlled failure test (optional)
 
-This shows the failure path without touching Swift itself. Run it from **any of node1–node3**. It changes `.env` on **all three** nodes, because the DB Updater (Process 4) leader may be re-elected on a different node when the clones restart:
+This shows the failure path without touching Swift itself. Run it from **any of mgmtnode1–mgmtnode3**. It changes `.env` on **all three** nodes, because the DB Updater (Process 4) leader may be re-elected on a different node when the clones restart:
 
 ```bash
 # 1. Disable Swift on every node (the units read /opt/flowfirst/.env on start), then restart the P4 clone
@@ -6639,7 +6639,7 @@ Item 9501 now exists in MariaDB but not in Swift; use D to confirm. There is no 
 
 ### Scenario 51: Reading `/var/log/messages` and the systemd Journal Across Scenarios
 
-> **Runs on:** **each of node1–node3, and node4** for its own host-level events (reboots, OOM kills, SELinux denials, NIC changes, time steps). System logs are strictly **per host**: a reboot, kernel message or `tc`/`iptables` change appears only on the node where it happened. The cross-node loop in D runs from any of node1–node3 over `ssh` (add `${NODE4_IP}` if node4 is reachable from there).
+> **Runs on:** **each of mgmtnode1–mgmtnode3, and remotenode1** for its own host-level events (reboots, OOM kills, SELinux denials, NIC changes, time steps). System logs are strictly **per host**: a reboot, kernel message or `tc`/`iptables` change appears only on the node where it happened. The cross-node loop in D runs from any of mgmtnode1–mgmtnode3 over `ssh` (add `${NODE4_IP}` if remotenode1 is reachable from there).
 
 Use this scenario alongside Scenarios 16–26 (reboots and network faults), and whenever a service stops without an obvious cause, to work out what the operating system itself did: why a node rebooted, whether the kernel killed a process, which firewall rule dropped traffic, and whether SELinux denied an action. Exact wording varies between kernel, systemd and RHEL minor versions, so the commands below grep for stable keywords rather than whole lines.
 
@@ -6653,7 +6653,7 @@ Use this scenario alongside Scenarios 16–26 (reboots and network faults), and 
 | `dmesg` / `journalctl -k` | `sudo dmesg -T` | Kernel ring buffer: NIC link changes, OOM killer, disk errors, `iptables` LOG targets |
 | Per-service files | See Scenarios 45–50 | `/var/log/mariadb/`, `/var/log/rabbitmq/`, `/var/log/zookeeper/`, `/var/log/pacemaker/`, `/var/log/cluster/` |
 
-**FlowFirst process output in the journal and in `/var/log/messages`.** Each process unit sets `SyslogIdentifier=flowfirst-pN` (`flowfirst-p1` … `flowfirst-p5`; Remote Worker (Process 5) runs on node4). A node installed before Remote Worker (Process 5)'s unit had this line tags its lines `python`: re-run `systemd/install_services.sh /opt/flowfirst --remote` and restart the unit, or use `-u flowfirst-process5`. `gt.configure_logging()` sends every FlowFirst logger (the five processes, `gt`, `zk` and `swift_storage`) to stdout, so the lines go into the journal, and from there into `/var/log/messages` via rsyslog. It also writes them to a rotating file per process (Scenario 60). Three consequences:
+**FlowFirst process output in the journal and in `/var/log/messages`.** Each process unit sets `SyslogIdentifier=flowfirst-pN` (`flowfirst-p1` … `flowfirst-p5`; Remote Worker (Process 5) runs on remotenode1). A node installed before Remote Worker (Process 5)'s unit had this line tags its lines `python`: re-run `systemd/install_services.sh /opt/flowfirst --remote` and restart the unit, or use `-u flowfirst-process5`. `gt.configure_logging()` sends every FlowFirst logger (the five processes, `gt`, `zk` and `swift_storage`) to stdout, so the lines go into the journal, and from there into `/var/log/messages` via rsyslog. It also writes them to a rotating file per process (Scenario 60). Three consequences:
 
 - **Filter by identifier or unit.** `sudo journalctl -t flowfirst-p4 --since "30 min ago"` (or `-u flowfirst-process4`) works on the journal; in `/var/log/messages` grep for `flowfirst-p4\[`.
 - **Severity is not preserved.** journald stores every stdout line as priority `info`, so `journalctl -p warning` does **not** list FlowFirst `WARNING`/`ERROR` lines. Search for the level prefix instead: `journalctl -u flowfirst-process4 --no-pager | grep -E "(WARNING|ERROR) "`. The journal line carries only a level prefix and the message (no timestamp or logger name; the file in `/var/log/flowfirst/` has both). The prefix comes from `LOG_LEVEL` (default `INFO`; set `DEBUG` in `.env` and restart the processes for more, `WARNING` for less).
@@ -6754,7 +6754,7 @@ If the denial is for a FlowFirst component, first check the booleans and file co
 #### E. Correlate the same event across hosts
 
 ```bash
-# From any of node1–node3 (uses ssh to each node, including itself); one merged timeline
+# From any of mgmtnode1–mgmtnode3 (uses ssh to each node, including itself); one merged timeline
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
   ssh "${n}" "sudo journalctl --since '15 min ago' -o short-iso --no-pager \
     | grep -E 'Reached target Shutdown|-- Boot|Out of memory|oom-kill|Main process exited|Failed with result|Link is (Up|Down)|NIC Link|System clock wrong|avc: +denied' \
@@ -6762,7 +6762,7 @@ for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
 done | sort -k2,2
 ```
 
-This relies on synchronised clocks (chrony, Phase 0a) and the same time zone on every node. Expected for Scenario 16 (reboot node3): node3 shows `Reached target Shutdown`, then (in the **next** boot, so read it after the node is back) `-- Boot` lines and a `chronyd ... Selected source`; node1 and node2 show no OS-level event at all, which proves the others did not restart.
+This relies on synchronised clocks (chrony, Phase 0a) and the same time zone on every node. Expected for Scenario 16 (reboot mgmtnode3): mgmtnode3 shows `Reached target Shutdown`, then (in the **next** boot, so read it after the node is back) `-- Boot` lines and a `chronyd ... Selected source`; mgmtnode1 and mgmtnode2 show no OS-level event at all, which proves the others did not restart.
 
 #### F. Watch live, and add temporary packet logging
 
@@ -6822,7 +6822,7 @@ sudo du -sh /var/log /var/log/journal          # who is using the space
 
 ## Swift Cluster Scenarios
 
-These scenarios exercise the Swift cluster installed by Phase 2b. They assume `SWIFT_ENABLED=true`, Swift running on node1–node3 and HAProxy serving `swift_front` on the VIP. Each one can leave the cluster changed, so the last step of every scenario restores it. Scenario 50 explains how to read the client-side symptoms.
+These scenarios exercise the Swift cluster installed by Phase 2b. They assume `SWIFT_ENABLED=true`, Swift running on mgmtnode1–mgmtnode3 and HAProxy serving `swift_front` on the VIP. Each one can leave the cluster changed, so the last step of every scenario restores it. Scenario 50 explains how to read the client-side symptoms.
 
 Set these once in each shell (`/opt/flowfirst/.env` provides the rest):
 
@@ -6842,7 +6842,7 @@ Scenarios 52–58 use `${SWIFT_VIP_URL}`, `${TOKEN}` and `${ACCT}` from this blo
 
 ### Scenario 52: Swift Cluster Health, Ring Consistency & Replica Placement
 
-> **Runs on:** **any of node1–node3** for the `swift-ring-builder`, `swift-get-nodes` and `swift-recon` commands (they read `/etc/swift/*.ring.gz` locally, and `swift-recon` queries the other nodes' object servers over HTTP). The `ssh` loops run from any of node1–node3. The `curl` checks run from **any machine that can reach the VIP**.
+> **Runs on:** **any of mgmtnode1–mgmtnode3** for the `swift-ring-builder`, `swift-get-nodes` and `swift-recon` commands (they read `/etc/swift/*.ring.gz` locally, and `swift-recon` queries the other nodes' object servers over HTTP). The `ssh` loops run from any of mgmtnode1–mgmtnode3. The `curl` checks run from **any machine that can reach the VIP**.
 
 Use this after Phase 2b, after any node reboot (Scenarios 16–19), and before any other Swift scenario, to prove the cluster is healthy and that every object really has one copy on each node.
 
@@ -6884,7 +6884,7 @@ for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
   curl -s -o /dev/null -w "${n} %{http_code}\n" "http://${n}:${SWIFT_PROXY_PORT:-8888}/healthcheck"
 done
 
-# A token issued by node1's proxy must be accepted by every proxy (shared memcached)
+# A token issued by mgmtnode1's proxy must be accepted by every proxy (shared memcached)
 TOKEN1=$(curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" \
   "http://${NODE1_IP}:${SWIFT_PROXY_PORT:-8888}/auth/v1.0" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-auth-token"{print $2}')
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
@@ -6893,7 +6893,7 @@ for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
 done
 ```
 
-*Expected:* every `/healthcheck` returns `200`, and the account `HEAD` returns `204` on all three nodes. A `401` on node2 or node3 for a token issued by node1 means the proxies are not sharing the same memcached servers (compare `memcache_servers` in `/etc/swift/proxy-server.conf` on each node, and see Scenario 56).
+*Expected:* every `/healthcheck` returns `200`, and the account `HEAD` returns `204` on all three nodes. A `401` on mgmtnode2 or mgmtnode3 for a token issued by mgmtnode1 means the proxies are not sharing the same memcached servers (compare `memcache_servers` in `/etc/swift/proxy-server.conf` on each node, and see Scenario 56).
 
 #### 52.4 — Store one object, then find all three copies
 
@@ -6928,26 +6928,26 @@ curl -s -o /dev/null -w "DELETE %{http_code}\n" -X DELETE -H "X-Auth-Token: ${TO
 
 ### Scenario 53: Swift Node Loss — Writes Continue on 2 of 3 Replicas, Then Catch-Up
 
-> **Runs on:** stop and start on **node3** (the node being failed); the `curl`, `swift-get-nodes` and `swift-recon` checks run from **node1 or node2** (node3's Swift is down) and `curl` from any machine that can reach the VIP. The DB Updater (Process 4) log check runs on the **current DB Updater (Process 4) leader**.
+> **Runs on:** stop and start on **mgmtnode3** (the node being failed); the `curl`, `swift-get-nodes` and `swift-recon` checks run from **mgmtnode1 or mgmtnode2** (mgmtnode3's Swift is down) and `curl` from any machine that can reach the VIP. The DB Updater (Process 4) log check runs on the **current DB Updater (Process 4) leader**.
 
-Swift needs `floor(3/2)+1 = 2` replica writes to accept a PUT, so one node can be lost without an outage. This scenario takes node3's Swift down **without** stopping the rest of node3 (Pacemaker, MariaDB and the pipeline keep running), writes objects while it is down, brings it back, and confirms the replicators copy the missing objects to it. Scenarios 17 and 18 already cover whole-node reboots; use this one to study Swift's own behaviour.
+Swift needs `floor(3/2)+1 = 2` replica writes to accept a PUT, so one node can be lost without an outage. This scenario takes mgmtnode3's Swift down **without** stopping the rest of mgmtnode3 (Pacemaker, MariaDB and the pipeline keep running), writes objects while it is down, brings it back, and confirms the replicators copy the missing objects to it. Scenarios 17 and 18 already cover whole-node reboots; use this one to study Swift's own behaviour.
 
-#### 53.1 — Stop Swift on node3 and watch HAProxy remove it
+#### 53.1 — Stop Swift on mgmtnode3 and watch HAProxy remove it
 
 ```bash
-# On node3 — stop the proxy and the storage servers (keep memcached and rsyncd running)
+# On mgmtnode3 — stop the proxy and the storage servers (keep memcached and rsyncd running)
 sudo systemctl stop openstack-swift-proxy openstack-swift-object openstack-swift-container openstack-swift-account
 
-# On the VIP holder — swift_back should mark node3 DOWN within about 6 s (inter 3s, fall 2)
+# On the VIP holder — swift_back should mark mgmtnode3 DOWN within about 6 s (inter 3s, fall 2)
 echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | awk -F, '$1=="swift_back"{print $1,$2,$18}'
 ```
 
-*Expected:* `swift_back node1 UP`, `swift_back node2 UP`, `swift_back node3 DOWN` (and the `BACKEND` line stays `UP`).
+*Expected:* `swift_back mgmtnode1 UP`, `swift_back mgmtnode2 UP`, `swift_back mgmtnode3 DOWN` (and the `BACKEND` line stays `UP`).
 
 #### 53.2 — The pipeline and manual PUTs still work
 
 ```bash
-# Manual PUTs through the VIP while node3's Swift is down
+# Manual PUTs through the VIP while mgmtnode3's Swift is down
 for i in 1 2 3 4 5; do
   curl -s -o /dev/null -w "PUT $i %{http_code}\n" -X PUT -H "X-Auth-Token: ${TOKEN}" --data-binary "outage-$i" \
     "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/outage/obj${i}.txt"
@@ -6963,32 +6963,32 @@ sleep 10
 sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep -E "Stored in Swift|Swift store note"
 ```
 
-*Expected:* all `PUT` lines return `201`; DB Updater (Process 4) prints `Stored in Swift object storage: flow1/<message_id>.json` for each message and no `Swift store note:`. A request that reaches node3's stopped proxy before HAProxy marks it down is a refused connection, which HAProxy re-dispatches to another node (`option redispatch`, `retries 3` in the template defaults); if a client still sees a `5xx`, `swiftclient` retries it (`retries=3`).
+*Expected:* all `PUT` lines return `201`; DB Updater (Process 4) prints `Stored in Swift object storage: flow1/<message_id>.json` for each message and no `Swift store note:`. A request that reaches mgmtnode3's stopped proxy before HAProxy marks it down is a refused connection, which HAProxy re-dispatches to another node (`option redispatch`, `retries 3` in the template defaults); if a client still sees a `5xx`, `swiftclient` retries it (`retries=3`).
 
-#### 53.3 — Only two copies exist while node3 is down
+#### 53.3 — Only two copies exist while mgmtnode3 is down
 
 ```bash
 sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" outage/obj1.txt
-# Run the printed "ssh <ip> ls" lines for node1 and node2 (each has a .data file) and for node3 (no such directory)
+# Run the printed "ssh <ip> ls" lines for mgmtnode1 and mgmtnode2 (each has a .data file) and for mgmtnode3 (no such directory)
 ```
 
-*Expected:* node1 and node2 list the `.data` file; on node3 `ls` reports `No such file or directory` for that object's directory. The proxy would send a missing copy to a **handoff** node, but a 3-node ring with 3 replicas has no spare device, so the object stays at 2 copies until node3 returns. The container listing update for node3's container server is queued as an async pending on the other nodes (`sudo swift-recon object -a`) and is delivered by the `object-updater` after node3 is back (its pass interval is 300 s by default).
+*Expected:* mgmtnode1 and mgmtnode2 list the `.data` file; on mgmtnode3 `ls` reports `No such file or directory` for that object's directory. The proxy would send a missing copy to a **handoff** node, but a 3-node ring with 3 replicas has no spare device, so the object stays at 2 copies until mgmtnode3 returns. The container listing update for mgmtnode3's container server is queued as an async pending on the other nodes (`sudo swift-recon object -a`) and is delivered by the `object-updater` after mgmtnode3 is back (its pass interval is 300 s by default).
 
-#### 53.4 — Start node3 and wait for the replicators
+#### 53.4 — Start mgmtnode3 and wait for the replicators
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo systemctl start openstack-swift-account openstack-swift-container openstack-swift-object openstack-swift-proxy
 
-# Replicator passes run every 30 s by default (object-replicator interval); to force one pass now, on node1 AND node2:
+# Replicator passes run every 30 s by default (object-replicator interval); to force one pass now, on mgmtnode1 AND mgmtnode2:
 sudo -u swift swift-object-replicator /etc/swift/object-server.conf once -v
 
-# Then check node3 received them
+# Then check mgmtnode3 received them
 sudo swift-recon object -r
 ssh ${NODE3_IP} "sudo find /srv/node/flowfirst/objects -name '*.data' | wc -l"
 ```
 
-*Expected:* with `-v` the replicator logs to the console and ends with `Object replication complete (once)`. Replication is push-based, which is why it runs on both nodes that hold the objects. `sudo swift-recon object -r` reports `[replication_failure]` and `[replication_attempted]` counters; the failure total can still include the pass during which node3 was down, so judge it after a later full pass. The `.data` count on node3 now includes the `outage/obj1..5.txt` objects. Re-run the `ssh ... ls` lines from 53.3 to see all three copies. HAProxy marks node3 `UP` again after 2 passed checks (`rise 2`, about 6 s).
+*Expected:* with `-v` the replicator logs to the console and ends with `Object replication complete (once)`. Replication is push-based, which is why it runs on both nodes that hold the objects. `sudo swift-recon object -r` reports `[replication_failure]` and `[replication_attempted]` counters; the failure total can still include the pass during which mgmtnode3 was down, so judge it after a later full pass. The `.data` count on mgmtnode3 now includes the `outage/obj1..5.txt` objects. Re-run the `ssh ... ls` lines from 53.3 to see all three copies. HAProxy marks mgmtnode3 `UP` again after 2 passed checks (`rise 2`, about 6 s).
 
 #### 53.5 — Clean up
 
@@ -7005,28 +7005,28 @@ Items 531–533 exist in both MariaDB and Swift (Scenario 50 D finds no gap), be
 
 ### Scenario 54: Swift Device Failure — HTTP 507, Error Limiting and Recovery
 
-> **Runs on:** the device fault is created and removed on **node3**; the `curl` calls run from any machine that can reach the VIP; `swift-get-nodes` and the proxy and replicator log checks run on **node1 or node2** (read the journal on each of node1–node3, as the proxy that served a request may be any of them).
+> **Runs on:** the device fault is created and removed on **mgmtnode3**; the `curl` calls run from any machine that can reach the VIP; `swift-get-nodes` and the proxy and replicator log checks run on **mgmtnode1 or mgmtnode2** (read the journal on each of mgmtnode1–mgmtnode3, as the proxy that served a request may be any of them).
 
 A Swift device that disappears is answered with `507 Insufficient Storage` by that node's storage servers. The proxy then **error-limits** the node (skips it for a while), so writes carry on with the remaining two replicas. With the default install (`SWIFT_MOUNT_CHECK=false`) Swift only checks that `/srv/node/flowfirst` is a directory, so renaming it is a safe way to simulate a lost disk. With `SWIFT_MOUNT_CHECK=true` (dedicated XFS mount) unmounting the filesystem has the same effect.
 
-#### 54.1 — Take the device away on node3
+#### 54.1 — Take the device away on mgmtnode3
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo mv /srv/node/flowfirst /srv/node/flowfirst.off
 ```
 
 #### 54.2 — The object server answers 507 directly
 
 ```bash
-# On node1 or node2 — find the object server URL for an existing object and HEAD node3 directly
+# On mgmtnode1 or mgmtnode2 — find the object server URL for an existing object and HEAD mgmtnode3 directly
 sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" diskfail/obj1.txt | grep "XHEAD"
 # Run the printed curl line whose address is ${NODE3_IP}:6200
 ```
 
-*Expected:* `HTTP/1.1 507 Insufficient Storage` from node3 (the object may not exist yet; a missing device is checked before the object is looked up). The same command against node1 or node2 returns `404 Not Found`.
+*Expected:* `HTTP/1.1 507 Insufficient Storage` from mgmtnode3 (the object may not exist yet; a missing device is checked before the object is looked up). The same command against mgmtnode1 or mgmtnode2 returns `404 Not Found`.
 
-#### 54.3 — Writes still succeed, and the proxy limits node3
+#### 54.3 — Writes still succeed, and the proxy limits mgmtnode3
 
 ```bash
 for i in 1 2 3 4 5; do
@@ -7034,56 +7034,56 @@ for i in 1 2 3 4 5; do
     "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/diskfail/obj${i}.txt"
 done
 
-# On each of node1-node3 (whichever proxies served the PUTs)
+# On each of mgmtnode1-mgmtnode3 (whichever proxies served the PUTs)
 sudo journalctl -t proxy-server --since "2 minutes ago" --no-pager | grep -E "error limited|Insufficient Storage"
 ```
 
-*Expected:* every `PUT` returns `201`. The first PUT served by each proxy logs a line of the form `ERROR Node will be error limited for 60.00s: <NODE3_IP>:6200/flowfirst, error: ERROR Insufficient Storage` (`error_suppression_interval` defaults to 60 s). While the node is limited the proxy skips it without trying, so there is no further log line and no added latency. After 60 s the proxy tries node3 again and gets another `507`, so the line repeats at most once a minute per proxy, and only while requests keep arriving.
+*Expected:* every `PUT` returns `201`. The first PUT served by each proxy logs a line of the form `ERROR Node will be error limited for 60.00s: <NODE3_IP>:6200/flowfirst, error: ERROR Insufficient Storage` (`error_suppression_interval` defaults to 60 s). While the node is limited the proxy skips it without trying, so there is no further log line and no added latency. After 60 s the proxy tries mgmtnode3 again and gets another `507`, so the line repeats at most once a minute per proxy, and only while requests keep arriving.
 
 Pipeline messages sent now (`/api/flow1`) are stored by DB Updater (Process 4) as usual: the `Stored in Swift object storage` line appears and no `Swift store note:` is printed.
 
 #### 54.4 — The replicators notice
 
 ```bash
-# On node1 and node2: force a replication pass, then look for the unmounted-device message
+# On mgmtnode1 and mgmtnode2: force a replication pass, then look for the unmounted-device message
 sudo -u swift swift-object-replicator /etc/swift/object-server.conf once -v 2>&1 | grep -E "responded as unmounted|complete"
 ```
 
-*Expected:* `<NODE3_IP>:6200/flowfirst responded as unmounted` followed by `Object replication complete (once)`. Nothing can be pushed to node3 until the device returns, and no handoff is used because the 3-node ring has no spare device.
+*Expected:* `<NODE3_IP>:6200/flowfirst responded as unmounted` followed by `Object replication complete (once)`. Nothing can be pushed to mgmtnode3 until the device returns, and no handoff is used because the 3-node ring has no spare device.
 
 > **Do not use `swift-recon -u` or `-d` to confirm this test.** The recon middleware lists the directories under `/srv/node`, not the devices in the ring. The renamed directory `flowfirst.off` (which still contains the `.ismount` stub) is listed as a healthy extra device and the missing `flowfirst` is not mentioned at all, so `-u` stays silent. On a dedicated XFS mount (`SWIFT_MOUNT_CHECK=true`) a real unmount is reported correctly as `Not mounted: flowfirst on <ip>:6200`. The `507` from 54.2 and the log lines in 54.3 and 54.4 are the reliable signals here.
 
 #### 54.5 — Restore the device and let the replicators catch up
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo mv /srv/node/flowfirst.off /srv/node/flowfirst
 
-# On node1 and node2
+# On mgmtnode1 and mgmtnode2
 sudo -u swift swift-object-replicator /etc/swift/object-server.conf once -v 2>&1 | grep complete
 
-# Check node3 now holds the objects written during the fault, then delete the test objects
-sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" diskfail/obj1.txt | grep "ls -lah"   # run the node3 line
+# Check mgmtnode3 now holds the objects written during the fault, then delete the test objects
+sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" diskfail/obj1.txt | grep "ls -lah"   # run the mgmtnode3 line
 for i in 1 2 3 4 5; do
   curl -s -o /dev/null -w "DELETE $i %{http_code}\n" -X DELETE -H "X-Auth-Token: ${TOKEN}" \
     "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/diskfail/obj${i}.txt"
 done
 ```
 
-*Expected:* the node3 `ls` shows the `.data` file for `diskfail/obj1.txt` after the replication pass; `DELETE` returns `204`. The proxies stop limiting node3 on their own within 60 s of the next successful request, so no restart is needed. The renamed directory must keep its original name, owner (`swift`) and SELinux label (`rsync_data_t`); a `mv` back preserves all three.
+*Expected:* the mgmtnode3 `ls` shows the `.data` file for `diskfail/obj1.txt` after the replication pass; `DELETE` returns `204`. The proxies stop limiting mgmtnode3 on their own within 60 s of the next successful request, so no restart is needed. The renamed directory must keep its original name, owner (`swift`) and SELinux label (`rsync_data_t`); a `mv` back preserves all three.
 
 ---
 
 ### Scenario 55: Swift Object Corruption — Auditor Quarantine and Replica Repair
 
-> **Runs on:** the corruption and the auditor run on **node3**; `swift-get-nodes` and the replicator passes run on **node1 and node2** (the replicators on the nodes holding the good copies push the repair); the `curl` calls run from any machine that can reach the VIP.
+> **Runs on:** the corruption and the auditor run on **mgmtnode3**; `swift-get-nodes` and the replicator passes run on **mgmtnode1 and mgmtnode2** (the replicators on the nodes holding the good copies push the repair); the `curl` calls run from any machine that can reach the VIP.
 
 Swift detects a damaged replica in two ways: the **object auditor** scans the disk on a schedule, and a GET compares the stored metadata with the file it reads. A damaged file is moved to `<device>/quarantined/` (not deleted), and the replicators then copy a good version back from another node. This scenario damages one replica on purpose.
 
-#### 55.1 — Store an object and locate the node3 copy
+#### 55.1 — Store an object and locate the mgmtnode3 copy
 
 ```bash
-# On node1 or node2
+# On mgmtnode1 or mgmtnode2
 curl -s -o /dev/null -w "PUT %{http_code}\n" -X PUT -H "X-Auth-Token: ${TOKEN}" --data-binary "corruption test payload" \
   "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/corrupt/obj1.txt"
 sudo swift-get-nodes /etc/swift/object.ring.gz "${ACCT}" "${SWIFT_CONTAINER}" corrupt/obj1.txt > /tmp/corrupt-nodes.txt
@@ -7094,9 +7094,9 @@ OBJDIR="/srv/node/flowfirst/objects/${PART}/${HASH: -3}/${HASH}"
 ssh ${NODE3_IP} "sudo ls -l ${OBJDIR}"
 ```
 
-*Expected:* `PUT 201` and one `<timestamp>.data` file in `${OBJDIR}` on node3 (it is the same path on all three nodes).
+*Expected:* `PUT 201` and one `<timestamp>.data` file in `${OBJDIR}` on mgmtnode3 (it is the same path on all three nodes).
 
-#### 55.2 — Corrupt the node3 replica
+#### 55.2 — Corrupt the mgmtnode3 replica
 
 ```bash
 # Append one byte: the file no longer matches the Content-Length stored in its extended attributes
@@ -7105,10 +7105,10 @@ ssh ${NODE3_IP} "sudo sh -c 'printf x >> ${OBJDIR}/*.data'; sudo ls -l ${OBJDIR}
 
 *Expected:* the `.data` file is now one byte larger than before (24 bytes instead of 23 for the payload above).
 
-#### 55.3 — Run the auditor on node3
+#### 55.3 — Run the auditor on mgmtnode3
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo -u swift swift-object-auditor /etc/swift/object-server.conf once -v 2>&1 | grep -E "quarantined|completed"
 sudo ls /srv/node/flowfirst/quarantined/objects/
 sudo ls "${OBJDIR}" 2>&1 | head -2          # the object directory is gone from objects/
@@ -7117,22 +7117,22 @@ sudo ls "${OBJDIR}" 2>&1 | head -2          # the object directory is gone from 
 *Expected:* an `ERROR Object ... failed audit and was quarantined: metadata content-length 23 does not match actual object size 24` line, then an `Object audit (...) "once" mode completed: ... Total quarantined: 1` line. The quarantine directory holds a directory named after the object hash, and `${OBJDIR}` no longer lists the `.data` file. The continuous `openstack-swift-object-auditor` service does the same on its own schedule; the `once` run just does not wait for it.
 
 ```bash
-# From node1 or node2
+# From mgmtnode1 or mgmtnode2
 sudo swift-recon object -q
 ```
 
-*Expected:* `[quarantined_objects] low: 0, high: 1, avg: 0.3, total: 1 ...` (node3 reports 1).
+*Expected:* `[quarantined_objects] low: 0, high: 1, avg: 0.3, total: 1 ...` (mgmtnode3 reports 1).
 
 #### 55.4 — Repair from the good replicas
 
 ```bash
-# On node1 and node2
+# On mgmtnode1 and mgmtnode2
 sudo -u swift swift-object-replicator /etc/swift/object-server.conf once -v 2>&1 | grep complete
 ssh ${NODE3_IP} "sudo ls -l ${OBJDIR}"
 curl -s -H "X-Auth-Token: ${TOKEN}" "${SWIFT_VIP_URL}/v1/${ACCT}/${SWIFT_CONTAINER}/corrupt/obj1.txt"; echo
 ```
 
-*Expected:* node3 again holds a 23-byte `.data` file (restored by node1's or node2's replicator) and the GET returns `corruption test payload`. Reads were never affected during this test: the proxy returned the data from node1 or node2 regardless of node3's state.
+*Expected:* mgmtnode3 again holds a 23-byte `.data` file (restored by mgmtnode1's or mgmtnode2's replicator) and the GET returns `corruption test payload`. Reads were never affected during this test: the proxy returned the data from mgmtnode1 or mgmtnode2 regardless of mgmtnode3's state.
 
 #### 55.5 — Clean up
 
@@ -7148,7 +7148,7 @@ Quarantined files are kept until you remove them. In a real incident leave them 
 
 ### Scenario 56: Swift Token Cache (memcached) Failure — 401 Re-Auth, Then 503 When All Caches Are Down
 
-> **Runs on:** `systemctl stop|start memcached` on **node3** (then on all three nodes for 56.3); the `curl` calls run from any machine that can reach the VIP; the client-side check runs on the **current DB Updater (Process 4) leader**; the proxy log check runs on **each of node1–node3**.
+> **Runs on:** `systemctl stop|start memcached` on **mgmtnode3** (then on all three nodes for 56.3); the `curl` calls run from any machine that can reach the VIP; the client-side check runs on the **current DB Updater (Process 4) leader**; the proxy log check runs on **each of mgmtnode1–mgmtnode3**.
 
 tempauth keeps its tokens **only in memcached**, and all three proxies share the same three memcached servers (`memcache_servers` in `/etc/swift/proxy-server.conf`). Token lifetime is 24 hours. This scenario shows what a lost cache server does to clients: one lost server costs a re-login, losing all of them stops logins.
 
@@ -7163,10 +7163,10 @@ done
 
 *Expected:* `204` from all three.
 
-#### 56.2 — Stop memcached on node3 only
+#### 56.2 — Stop memcached on mgmtnode3 only
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo systemctl stop memcached
 
 # From any machine: the same token, three proxies
@@ -7178,7 +7178,7 @@ done
 curl -s -o /dev/null -w "login %{http_code}\n" -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" "${SWIFT_VIP_URL}/auth/v1.0"
 ```
 
-*Expected:* the old token returns `204` on every proxy **if its cache entry lived on node1 or node2** and `401` on every proxy if the entry was held by node3's memcached (the entry is found by hashing the token, so all proxies agree). The login returns `200`. Run the loop with a few different tokens (log in again, repeat) to see both outcomes. A `401` here is not an error in Swift: the token was lost with the cache server. The proxies log `Error connecting to memcached: <NODE3_IP>:11211` lines (`sudo journalctl -t proxy-server --since "2 minutes ago" | grep memcached`); after 10 errors in 60 s a proxy stops trying that server for 60 s.
+*Expected:* the old token returns `204` on every proxy **if its cache entry lived on mgmtnode1 or mgmtnode2** and `401` on every proxy if the entry was held by mgmtnode3's memcached (the entry is found by hashing the token, so all proxies agree). The login returns `200`. Run the loop with a few different tokens (log in again, repeat) to see both outcomes. A `401` here is not an error in Swift: the token was lost with the cache server. The proxies log `Error connecting to memcached: <NODE3_IP>:11211` lines (`sudo journalctl -t proxy-server --since "2 minutes ago" | grep memcached`); after 10 errors in 60 s a proxy stops trying that server for 60 s.
 
 **What the pipeline sees:** `python-swiftclient` handles a `401` itself: it logs in again once and repeats the request, so DB Updater (Process 4) keeps writing and prints `Stored in Swift object storage` with no `Swift store note:`.
 
@@ -7197,7 +7197,7 @@ sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep 
 #### 56.3 — Stop memcached on all three nodes
 
 ```bash
-# On each of node1, node2, node3
+# On each of mgmtnode1, mgmtnode2, mgmtnode3
 sudo systemctl stop memcached
 
 curl -s -D - -o /dev/null -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" "${SWIFT_VIP_URL}/auth/v1.0" | head -1
@@ -7221,7 +7221,7 @@ sudo journalctl -u flowfirst-process4 --since "2 minutes ago" --no-pager | grep 
 #### 56.4 — Restore
 
 ```bash
-# On each of node1, node2, node3
+# On each of mgmtnode1, mgmtnode2, mgmtnode3
 sudo systemctl start memcached
 curl -s -o /dev/null -w "login %{http_code}\n" -H "X-Storage-User: ${SWIFT_USER}" -H "X-Storage-Pass: ${SWIFT_KEY}" "${SWIFT_VIP_URL}/auth/v1.0"
 ```
@@ -7232,7 +7232,7 @@ curl -s -o /dev/null -w "login %{http_code}\n" -H "X-Storage-User: ${SWIFT_USER}
 
 ### Scenario 57: Swift Credential Failures — Wrong Key, Key Rotation and Token Lifetime
 
-> **Runs on:** the `curl` and `swift_storage` checks (A, B) on **any node** that has `/opt/flowfirst` and its `.venv` (node1–node3; node4 has them too but does not call Swift); the `.env` change in C on **all of node1–node3** (DB Updater (Process 4) can run on any of them); the `proxy-server.conf` change in D on **all of node1–node3**.
+> **Runs on:** the `curl` and `swift_storage` checks (A, B) on **any node** that has `/opt/flowfirst` and its `.venv` (mgmtnode1–mgmtnode3; remotenode1 has them too but does not call Swift); the `.env` change in C on **all of mgmtnode1–mgmtnode3** (DB Updater (Process 4) can run on any of them); the `proxy-server.conf` change in D on **all of mgmtnode1–mgmtnode3**.
 
 Credentials sit in two places: `user_<account>_<user> = <key> .admin` in `/etc/swift/proxy-server.conf` on each node (server side), and `SWIFT_USER` / `SWIFT_KEY` in `.env` on each node (client side). A mismatch gives `401` and, because Swift writes are non-fatal, only a `Swift store note:` line, so nothing alerts you.
 
@@ -7259,7 +7259,7 @@ print(swift_storage.get_swift_status())"
 #### C. Break and fix the client key on the DB Updater (Process 4) side
 
 ```bash
-# On each of node1-node3 (the P4 leader can move when the clone restarts)
+# On each of mgmtnode1-mgmtnode3 (the P4 leader can move when the clone restarts)
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
   ssh "${n}" "sudo sed -i 's/^SWIFT_KEY=.*/SWIFT_KEY=wrong-key/' /opt/flowfirst/.env"
 done
@@ -7306,14 +7306,14 @@ curl -s -o /dev/null -w "old token: %{http_code}\n" -I -H "X-Auth-Token: ${TOKEN
 
 ### Scenario 58: Total Swift Outage During the Pipeline — Detect and Back-Fill from MariaDB
 
-> **Runs on:** the stop and start of the proxies on **each of node1–node3**; the message sends and the reconciliation from **any machine with a `mariadb` client that can reach the VIP** (node1–node3 have it); the log check on the **current DB Updater (Process 4) leader**.
+> **Runs on:** the stop and start of the proxies on **each of mgmtnode1–mgmtnode3**; the message sends and the reconciliation from **any machine with a `mariadb` client that can reach the VIP** (mgmtnode1–mgmtnode3 have it); the log check on the **current DB Updater (Process 4) leader**.
 
 Swift writes are best-effort (Scenario 50), so a Swift outage never stops the pipeline: MariaDB rows are written, messages are acknowledged, and objects are missing afterwards. `put_message_object()` is not retried later and a redelivered message is skipped by the ZooKeeper dedup barrier, so the gap persists until someone fills it. DB Updater (Process 4) stores the same JSON in MariaDB (`raw_payload`) as in Swift, so the missing objects can be rebuilt from the table.
 
 #### 58.1 — Stop every Swift proxy
 
 ```bash
-# On each of node1, node2, node3
+# On each of mgmtnode1, mgmtnode2, mgmtnode3
 sudo systemctl stop openstack-swift-proxy
 
 # HAProxy needs about 6 s (inter 3s, fall 2) to mark all three servers DOWN
@@ -7340,7 +7340,7 @@ sudo journalctl -u flowfirst-process4 --since "3 minutes ago" --no-pager | grep 
 #### 58.3 — Restore Swift
 
 ```bash
-# On each of node1, node2, node3
+# On each of mgmtnode1, mgmtnode2, mgmtnode3
 sudo systemctl start openstack-swift-proxy
 sleep 8
 curl -s -o /dev/null -w "VIP swift: %{http_code}\n" "${SWIFT_VIP_URL}/healthcheck"      # 200 once two checks pass
@@ -7381,14 +7381,14 @@ curl -s "http://${FLOWFIRST_VIP}:8080/swift/object/flow1/$(M -N -B -e 'SELECT me
 
 ### Scenario 59: Reading the REST API (HTTP) Request Log Across Scenarios
 
-> **Runs on:** the `curl` traffic generators from any machine that can reach the VIP. The log itself lives on **each of node1–node3**: every node runs its own API Gateway (Process 1), and HAProxy sends each request to one of them, so a single node's journal holds only the requests that node served. The cross-node loop in D runs from any of node1–node3 over `ssh`. node4 runs no API Gateway (Process 1) and has no REST API log.
+> **Runs on:** the `curl` traffic generators from any machine that can reach the VIP. The log itself lives on **each of mgmtnode1–mgmtnode3**: every node runs its own API Gateway (Process 1), and HAProxy sends each request to one of them, so a single node's journal holds only the requests that node served. The cross-node loop in D runs from any of mgmtnode1–mgmtnode3 over `ssh`. remotenode1 runs no API Gateway (Process 1) and has no REST API log.
 
 API Gateway (Process 1) is the only FlowFirst component that speaks HTTP to clients. It has no access-log file: each request becomes one `INFO [http]` line, written by `RestApiHandler.log_message` in [`src/application/process1.py`](src/application/process1.py). Scenario 48 covers the HAProxy side of the same requests. Use this scenario alongside Scenarios 1, 11, 12, 29 and 40–41, and 56–58 for the Swift endpoints, to see which node served a request, what status it returned, and why a request failed. Exact wording of Python's own error lines varies between Python versions, so the commands below grep for stable keywords.
 
 #### A. Locate the log and generate some traffic
 
 ```bash
-# On node1, node2 or node3. -o cat prints the bare message without the journal prefix.
+# On mgmtnode1, mgmtnode2 or mgmtnode3. -o cat prints the bare message without the journal prefix.
 sudo journalctl -u flowfirst-process1 -o cat --since "5 min ago" --no-pager | grep -F '[http]' | tail -5
 ```
 ```
@@ -7445,13 +7445,13 @@ sudo journalctl -u flowfirst-process1 -o cat --since "1 min ago" --no-pager | gr
      20 GET /health HTTP/1.0
 ```
 
-Filter out only the probes with `grep -v "GET /health HTTP/1.0"`. Use `grep -v "GET /health"` to drop both probes and manual health checks (the form used in Scenario 48). Because the probes come from the VIP holder, the client IP of the `HTTP/1.0` lines on node2 and node3 tells you which node holds HAProxy right now; it should match `sudo crm_resource --resource flowfirst-vip --locate`.
+Filter out only the probes with `grep -v "GET /health HTTP/1.0"`. Use `grep -v "GET /health"` to drop both probes and manual health checks (the form used in Scenario 48). Because the probes come from the VIP holder, the client IP of the `HTTP/1.0` lines on mgmtnode2 and mgmtnode3 tells you which node holds HAProxy right now; it should match `sudo crm_resource --resource flowfirst-vip --locate`.
 
 To see a request that **bypassed** HAProxy, call a node directly on its backend port. The client IP in the log is then your own machine:
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" http://${NODE2_IP}:8082/health         # from a workstation; no HAProxy involved
-# On node2
+# On mgmtnode2
 sudo journalctl -u flowfirst-process1 -o cat --since "1 min ago" --no-pager | grep -F 'GET /health HTTP/1.1'
 ```
 
@@ -7495,7 +7495,7 @@ sudo journalctl -u flowfirst-process1 -o cat --since "15 min ago" --no-pager \
   1 192.168.1.11 POST /api/flow1 500
 ```
 
-Compare the three nodes. This shows whether round-robin is even, and which node served a failing request. The loop runs from any of node1–node3:
+Compare the three nodes. This shows whether round-robin is even, and which node served a failing request. The loop runs from any of mgmtnode1–mgmtnode3:
 
 ```bash
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do
@@ -7525,7 +7525,7 @@ sudo grep -E 'POST /api/flow1' ${HLOG} | tail -3
 sudo journalctl -u flowfirst-process1 -o short-iso --since "2 min ago" --no-pager | grep -F 'POST /api/flow1'
 ```
 
-HAProxy's `flowfirst_api_back/node2` field and the `handled_by_node` value in the response must name the same node as the journal you are reading. Read the two sides together:
+HAProxy's `flowfirst_api_back/mgmtnode2` field and the `handled_by_node` value in the response must name the same node as the journal you are reading. Read the two sides together:
 
 | HAProxy log | API Gateway (Process 1) journal | Likely cause |
 |---|---|---|
@@ -7561,7 +7561,7 @@ sudo journalctl --since "1 hour ago" --no-pager | grep -E "Suppressed [0-9]+ mes
 
 ### Scenario 60: Pipeline Process Log Files (`/var/log/flowfirst`)
 
-> **Runs on:** **each node that runs a pipeline process**: node1–node3 for Processes 1–4, and node4 for Remote Worker (Process 5). Each node's files hold only what that node's processes did. The cross-node trace in D runs from any of node1–node4 over `ssh`.
+> **Runs on:** **each node that runs a pipeline process**: mgmtnode1–mgmtnode3 for Processes 1–4, and remotenode1 for Remote Worker (Process 5). Each node's files hold only what that node's processes did. The cross-node trace in D runs from any of mgmtnode1–remotenode1 over `ssh`.
 
 Every pipeline process logs through Python's `logging` module and writes each record twice: to stdout (the systemd journal) and to its own rotating file, `<LOG_DIR>/processN.log`. The file adds what the journal line lacks: a timestamp, the logger name, and the full traceback of every caught error. Scenarios 47–51 and 59 read the journal; this scenario reads the files.
 
@@ -7574,7 +7574,7 @@ Settings in `.env` (see `src/config/.env.example`), all optional:
 | `LOG_MAX_BYTES` | `52428800` (50 MiB) | A file is rotated when it reaches this size. |
 | `LOG_BACKUP_COUNT` | `7` | Rotated files kept per process (`processN.log.1` … `.7`), so at most 8 files per process. |
 
-The unit files set `LogsDirectory=flowfirst`, so systemd creates `/var/log/flowfirst` owned by `flowuser` when a process starts. Under the service sandbox (Phase 4, Step 4c) this is the only directory the process can write, and new log files are mode `0640`: a user who is not `flowuser` needs `sudo` or the `flowuser` group to read them. Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on node4), then `sudo systemctl daemon-reload` and restart the processes on a node installed before this change.
+The unit files set `LogsDirectory=flowfirst`, so systemd creates `/var/log/flowfirst` owned by `flowuser` when a process starts. Under the service sandbox (Phase 4, Step 4c) this is the only directory the process can write, and new log files are mode `0640`: a user who is not `flowuser` needs `sudo` or the `flowuser` group to read them. Re-run `sudo ./systemd/install_services.sh /opt/flowfirst` (add `--remote` on remotenode1), then `sudo systemctl daemon-reload` and restart the processes on a node installed before this change.
 
 #### A. Find the files and confirm logging started
 
@@ -7586,7 +7586,7 @@ sudo head -3 /var/log/flowfirst/api_gateway.log
 ```
 2026-06-15 14:00:01,214 INFO     flowfirst: [gt] Logging to /var/log/flowfirst/api_gateway.log (level=INFO, rotate at 52428800 bytes, keep 7)
 2026-06-15 14:00:01,215 INFO     src.gt.gt: [gt] eventlet monkey-patch applied.
-2026-06-15 14:00:01,300 INFO     flowfirst.p1: Starting (node=node1, pool=1000) ...
+2026-06-15 14:00:01,300 INFO     flowfirst.p1: Starting (node=mgmtnode1, pool=1000) ...
 ```
 
 If the directory is missing, empty, or the first line is absent, check in this order:
@@ -7646,7 +7646,7 @@ Every message carries a `message_id`, and DB Updater (Process 4) and Remote Work
 # On the node that handled the POST (handled_by_node in the response)
 sudo grep -h "#9001" /var/log/flowfirst/api_gateway.log
 
-# From any of node1–node4: every log line that mentions the item, in time order
+# From any of mgmtnode1–remotenode1: every log line that mentions the item, in time order
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
   ssh "${n}" "sudo grep -H 'item #9001' /var/log/flowfirst/process*.log 2>/dev/null"
 done | sed -E 's#^/var/log/flowfirst/##' | sort -t: -k2
@@ -7668,7 +7668,7 @@ sudo tail -F /var/log/flowfirst/process*.log | grep --line-buffered -E " (WARNIN
 ```bash
 # Example: more detail on one node
 sudo sed -i 's/^LOG_LEVEL=.*/LOG_LEVEL=DEBUG/' /opt/flowfirst/.env
-sudo pcs resource restart flowfirst-p4-res-clone      # on node4: sudo systemctl restart flowfirst-process5
+sudo pcs resource restart flowfirst-p4-res-clone      # on remotenode1: sudo systemctl restart flowfirst-process5
 # Revert when finished
 sudo sed -i 's/^LOG_LEVEL=.*/LOG_LEVEL=INFO/' /opt/flowfirst/.env
 ```
@@ -7694,7 +7694,7 @@ Rotation renames `process4.log` to `process4.log.1`, shifts the older ones up, a
 
 ### Scenario 61: Scalability Test — Thousands of Concurrent API Invocations (Four-Node Cluster)
 
-> **Runs on:** the load generator on a **separate client host** that can reach the VIP (not a cluster node: it would use the CPU you are trying to measure; if you have no spare host, use node4, which runs only Remote Worker (Process 5)). It needs Python 3.9+ and a copy of this repository, but **no `pip install`** (`scripts/load_test_api.py` uses only the standard library). Observation commands run on **node1–node3** (HAProxy on the VIP holder; RabbitMQ, MariaDB and ZooKeeper on any of them) and on **node4** for Remote Worker (Process 5). Tuning changes are made on **all four nodes**.
+> **Runs on:** the load generator on a **separate client host** that can reach the VIP (not a cluster node: it would use the CPU you are trying to measure; if you have no spare host, use remotenode1, which runs only Remote Worker (Process 5)). It needs Python 3.9+ and a copy of this repository, but **no `pip install`** (`scripts/load_test_api.py` uses only the standard library). Observation commands run on **mgmtnode1–mgmtnode3** (HAProxy on the VIP holder; RabbitMQ, MariaDB and ZooKeeper on any of them) and on **remotenode1** for Remote Worker (Process 5). Tuning changes are made on **all four nodes**.
 
 This scenario answers one question: *how many API calls can the four-node deployment accept at the same time, how many messages per second can the pipeline actually finish, and which setting limits each?* It uses the other scenarios as building blocks: Scenario 1 (REST API), 9 (HAProxy dashboard), 40 (batch publishing), 43 (metrics), 45–51 and 60 (logs).
 
@@ -7730,7 +7730,7 @@ All have defaults that reproduce the previous fixed behaviour, so doing nothing 
 
 The load generator has its own `LOAD_*` variables (target, `LOAD_STEPS`, `LOAD_STEP_DURATION_S`, `LOAD_RAMP_S`, `LOAD_FLOW_MIX`, `LOAD_THINK_MS`, `LOAD_TIMEOUT_S`, `LOAD_KEEPALIVE`, `LOAD_SLO_P95_MS`, `LOAD_MAX_ERROR_PCT`, `LOAD_ITEM_ID_BASE`, `LOAD_DRAIN_TIMEOUT_S`, `LOAD_REPORT_INTERVAL_S`, `RABBITMQ_MGMT_PORT`). Each is explained next to its default in `src/config/.env.example`, and each can be overridden on the command line (`python3 scripts/load_test_api.py --help`).
 
-> **What the code implies for scale-out (check it, do not assume it).** Each process wraps its work in a ZooKeeper leader election (`LeaderElection(...).run(callback)`), and kazoo's `Election.run` holds a lock for the whole callback. Read literally, that means **only the elected leader of each of Processes 1–4 does the work**, and the other nodes wait as standbys; Remote Worker (Process 5) on node4 has no election. If that is what your cluster does, adding nodes adds failover, not capacity, and the levers are the per-process parameters above. Section A measures which case you have.
+> **What the code implies for scale-out (check it, do not assume it).** Each process wraps its work in a ZooKeeper leader election (`LeaderElection(...).run(callback)`), and kazoo's `Election.run` holds a lock for the whole callback. Read literally, that means **only the elected leader of each of Processes 1–4 does the work**, and the other nodes wait as standbys; Remote Worker (Process 5) on remotenode1 has no election. If that is what your cluster does, adding nodes adds failover, not capacity, and the levers are the per-process parameters above. Section A measures which case you have.
 
 #### A. Pre-flight: limits that cap the test before the application does
 
@@ -7739,7 +7739,7 @@ The load generator has its own `LOAD_*` variables (target, `LOAD_STEPS`, `LOAD_S
 ulimit -n                      # needs to exceed your largest LOAD_STEPS value + ~200; the script raises the soft limit up to the hard limit
 ulimit -n 65536                # or raise it in /etc/security/limits.d/ for a permanent change
 
-# 2. On node1, node2, node3: kernel accept queue (caps API_LISTEN_BACKLOG) and open-file limit of API Gateway (Process 1)
+# 2. On mgmtnode1, mgmtnode2, mgmtnode3: kernel accept queue (caps API_LISTEN_BACKLOG) and open-file limit of API Gateway (Process 1)
 sysctl net.core.somaxconn
 sudo cat /proc/$(pgrep -f 'src.application.process1' | head -1)/limits | grep "open files"     # 65536 from the unit file
 
@@ -7778,7 +7778,7 @@ Each step prints one line; the format is shown below with **illustrative numbers
 ```
 Step 250 concurrent ...
   FAIL    250 VUs     312.4 req/s  p50    712  p95   1840  p99   2210  max   3105 ms  err  0.00%  queue 0 -> 2150 (max 2150)
-        served by: node1=10931
+        served by: mgmtnode1=10931
         reason : p95 1840 ms > 1000 ms
 ```
 
@@ -7803,11 +7803,11 @@ The script exits `0` when the last step passed, `1` when a step failed, and `2` 
 
 With [Monitoring and Alerting](#monitoring-and-alerting) enabled, `FlowFirstQueueBacklog`, `FlowFirstQueueNoConsumers` and `FlowFirstApi5xxRate` raise the same symptoms outside a load test; the levers below are the same.
 
-To tell MariaDB from Swift as the DB Updater (Process 4) limit, run the same step twice: once normally and once after setting `SWIFT_ENABLED=false` on node1–node3 and restarting DB Updater (Process 4) (restart as in C). DB Updater (Process 4) does a ZooKeeper write, a MariaDB insert on a new connection, and, with Swift enabled, a container check plus an object upload through a fresh Swift connection for every message, so Swift is a likely cost. Set it back to `true` afterwards; with it off nothing is written to Swift.
+To tell MariaDB from Swift as the DB Updater (Process 4) limit, run the same step twice: once normally and once after setting `SWIFT_ENABLED=false` on mgmtnode1–mgmtnode3 and restarting DB Updater (Process 4) (restart as in C). DB Updater (Process 4) does a ZooKeeper write, a MariaDB insert on a new connection, and, with Swift enabled, a container check plus an object upload through a fresh Swift connection for every message, so Swift is a likely cost. Set it back to `true` afterwards; with it off nothing is written to Swift.
 
 #### C. Apply a tuning change and re-run
 
-Change parameters on **every** node (node4 too, for Remote Worker (Process 5)), restart, and repeat B. The helper below replaces an existing `KEY=` line or appends the key when it is missing, so running it twice does not create duplicates. Run it from any of node1–node4 with passwordless `ssh` and `sudo`:
+Change parameters on **every** node (remotenode1 too, for Remote Worker (Process 5)), restart, and repeat B. The helper below replaces an existing `KEY=` line or appends the key when it is missing, so running it twice does not create duplicates. Run it from any of mgmtnode1–remotenode1 with passwordless `ssh` and `sudo`:
 
 ```bash
 setenv() {   # usage: setenv KEY VALUE   — applies to all four nodes
@@ -7824,11 +7824,11 @@ setenv GT_PREFETCH_COUNT 10
 setenv HAPROXY_MAXCONN 20000
 setenv HAPROXY_FRONTEND_MAXCONN 10000
 
-# Restart the pipeline processes (Pacemaker manages P1-P4; P5 on node4 is a plain systemd unit)
+# Restart the pipeline processes (Pacemaker manages P1-P4; P5 on remotenode1 is a plain systemd unit)
 for p in 1 2 3 4; do sudo pcs resource restart flowfirst-p${p}-res-clone; done
 ssh ${NODE4_IP} "sudo systemctl restart flowfirst-process5"
 
-# HAProxy limits are baked into /etc/haproxy/haproxy.cfg: regenerate on each of node1-node3, validate, then restart on the VIP holder
+# HAProxy limits are baked into /etc/haproxy/haproxy.cfg: regenerate on each of mgmtnode1-mgmtnode3, validate, then restart on the VIP holder
 for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do ssh "${n}" "cd /opt/flowfirst && sudo ./haproxy/setup_haproxy.sh >/dev/null && sudo haproxy -c -f /etc/haproxy/haproxy.cfg"; done
 sudo pcs resource restart haproxy-res          # brief interruption for new connections; see Scenarios 15 and 17
 ```
@@ -7851,7 +7851,7 @@ Open these in separate terminals while a step is running.
 echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | awk -F, 'NR==1{sub(/^# /,""); for(i=1;i<=NF;i++) c[$i]=i; next}
   $1 ~ /^flowfirst_api_(front|back)$/ {printf "%-20s %-9s %-5s scur=%s smax=%s slim=%s qcur=%s qmax=%s ereq=%s econ=%s 5xx=%s\n",$1,$2,$c["status"],$c["scur"],$c["smax"],$c["slim"],$c["qcur"],$c["qmax"],$c["ereq"],$c["econ"],$c["hrsp_5xx"]}'
 
-# RabbitMQ (any of node1-node3): backlog per queue; 'unacked' is messages currently being worked on
+# RabbitMQ (any of mgmtnode1-mgmtnode3): backlog per queue; 'unacked' is messages currently being worked on
 watch -n 5 "sudo rabbitmqctl list_queues name messages messages_ready messages_unacknowledged consumers"
 
 # CPU of the pipeline processes (every node): a process pinned at ~100% is out of single-core headroom.
@@ -7929,7 +7929,7 @@ ZooKeeper dedup znodes expire on their own. The Swift objects from the run stay 
 
 ### Scenario 62: Performance Test — Measured Latency, Throughput and Freshness for Client Expectations
 
-> **Runs on:** the same **separate client host** as Scenario 61 (Python 3.9+, a copy of this repository, `.env` with the VIP and node IPs, passwordless `ssh` and `sudo` to node1–node4, and a `mariadb` client). Resource sampling runs on **node1–node4**; `pidstat` and `sar` come from the `sysstat` package (`sudo dnf install -y sysstat` on each node). Run it only after Scenario 61, because the profiles below must sit **below** the capacity found there.
+> **Runs on:** the same **separate client host** as Scenario 61 (Python 3.9+, a copy of this repository, `.env` with the VIP and node IPs, passwordless `ssh` and `sudo` to mgmtnode1–remotenode1, and a `mariadb` client). Resource sampling runs on **mgmtnode1–remotenode1**; `pidstat` and `sar` come from the `sysstat` package (`sudo dnf install -y sysstat` on each node). Run it only after Scenario 61, because the profiles below must sit **below** the capacity found there.
 
 > **Status of the numbers in this document.** Nothing in this scenario is a measurement. The procedure was assembled from the code and its helper commands were checked against a mock HTTP server and sample text only. Nothing was run on a real four-node cluster, and `pidstat`, `sar`, `ssh` and `mariadb` were not available where it was prepared. The result table in H is a template: every number that goes to a client must come from your own runs on your hardware, stated together with the conditions it was measured under.
 
@@ -8052,7 +8052,7 @@ Read it with these limits in mind:
 Sample CPU and memory of the pipeline processes, plus system CPU, memory, network and disk, during the whole run. Start it just before `perf_run`, with a length that covers the ramp, the measurement and the drain (below: 12 minutes for a 5-minute run):
 
 ```bash
-perf_sample_start() {   # usage: perf_sample_start <label> <seconds>  — samples every 10 s on node1-node4
+perf_sample_start() {   # usage: perf_sample_start <label> <seconds>  — samples every 10 s on mgmtnode1-remotenode1
   local n=$(( $2 / 10 )) ip
   for ip in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP} ${NODE4_IP}; do
     ssh "${ip}" "nohup sudo pidstat -u -r -h -l 10 ${n} > /tmp/perf_$1_pid.txt 2>&1 < /dev/null &
@@ -8135,7 +8135,7 @@ Clients also need to know what performance looks like during a fault, because hi
 
 | Fault | Procedure | What you learn |
 |---|---|---|
-| VIP and HAProxy fail over | Scenario 8 (`pcs node standby node1`) | How long the API is unreachable or slow |
+| VIP and HAProxy fail over | Scenario 8 (`pcs node standby mgmtnode1`) | How long the API is unreachable or slow |
 | One pipeline process stopped on one node | Scenario 11 (`pcs resource ban …`) | Effect on throughput and freshness while the leader changes |
 | A node reboots | Scenario 16 | The full-node case, including Galera and RabbitMQ rejoining |
 | ZooKeeper leader killed | Scenario 36 | Effect of re-election on all four processes |
@@ -8144,7 +8144,7 @@ Clients also need to know what performance looks like during a fault, because hi
 export PERF_INTERVAL=10
 perf_sample_start fault1 720
 perf_run fault 4 250 2500 1 480 &                # 8 minutes of measurement, in the background
-sleep 150; date +%T                              # note this time, then trigger the fault (for example: sudo pcs node standby node1)
+sleep 150; date +%T                              # note this time, then trigger the fault (for example: sudo pcs node standby mgmtnode1)
 wait                                             # for the run and drain to finish
 grep "measuring from" perf_fault_run1.log      # t=0 of the windows; fault time minus this = fault offset in seconds
 
@@ -8200,7 +8200,7 @@ Keep the `perf_*.csv`, `perf_*.log`, `perf_conditions.txt` and the `perf_*_pid.t
 
 ### Scenario 63: TLS Everywhere — Private CA, Mutual-TLS REST API and Encrypted Internal Traffic
 
-> **Runs on:** a trusted **admin/CA host** (the laptop or jump host that holds `security/` and the CA key; Bash 3.2+, OpenSSL 1.1.1+ or 3.x, passwordless `ssh` and `sudo` to node1–node4 if you want `install_certs.sh` to push files) and then **each cluster node** (node1–3 for the server-side `enable_*_tls.sh` scripts, node4 for its client identity only).
+> **Runs on:** a trusted **admin/CA host** (the laptop or jump host that holds `security/` and the CA key; Bash 3.2+, OpenSSL 1.1.1+ or 3.x, passwordless `ssh` and `sudo` to mgmtnode1–remotenode1 if you want `install_certs.sh` to push files) and then **each cluster node** (mgmtnode1–3 for the server-side `enable_*_tls.sh` scripts, remotenode1 for its client identity only).
 
 > **Status — read this first.** Everything below was built and tested in pieces on a workstation, with containers for RabbitMQ, MariaDB, ZooKeeper, HAProxy and Swift. **It was never run on a real four-node RHEL cluster.** Section L lists exactly what was tested and what was not. Do the rollout on a test cluster first, one component at a time, with the plain-text listeners left on until each step is proven.
 
@@ -8230,22 +8230,22 @@ The following two diagrams give the same information split into focused views.
 |---|---|---|---|---|
 | External client → REST API (VIP) | 8080 (HTTPS) | `flowfirst-vip` on HAProxy | **Yes** — a certificate from the FlowFirst CA (mutual TLS) | HAProxy `verify required` |
 | HAProxy → API Gateway (Process 1) | 8082 (HTTPS) | `<node>-api` | `<node>-pipeline` (HAProxy's own identity) | API Gateway (Process 1) `CERT_REQUIRED` |
-| Processes 1–4 and node4's Remote Worker (Process 5) → RabbitMQ | 5671 (AMQPS) | `<node>-rabbitmq` | `pipeline` identity | RabbitMQ `fail_if_no_peer_cert` |
+| Processes 1–4 and remotenode1's Remote Worker (Process 5) → RabbitMQ | 5671 (AMQPS) | `<node>-rabbitmq` | `pipeline` identity | RabbitMQ `fail_if_no_peer_cert` |
 | Processes → MariaDB (through the VIP/HAProxy TCP pass-through) | 3306 / 3307 | `<node>-mariadb` | `pipeline` identity if `--require-client-cert` was run | MariaDB `REQUIRE X509` |
 | Processes → ZooKeeper | 2281 (secure client port) | `<node>-zookeeper` | `pipeline` identity | ZooKeeper `clientAuth=need` |
 | Processes → Swift (via HAProxy) | 8090 → 8888 | `flowfirst-vip`, `<node>-swift` | `pipeline` identity **at HAProxy only** | HAProxy (see limit L-3) |
 | RabbitMQ / Galera / ZooKeeper node ↔ node | 25672, 4567–4568, 2888/3888 | `peer` certificates | peer certificate | optional flags `--inter-node`, `--galera`, `--quorum` |
 
-The three certificate profiles: **server** (`serverAuth`: something clients connect to), **client** (`clientAuth`: an identity that connects, such as an API user, a pipeline process or node4) and **peer** (both: node-to-node traffic).
+The three certificate profiles: **server** (`serverAuth`: something clients connect to), **client** (`clientAuth`: an identity that connects, such as an API user, a pipeline process or remotenode1) and **peer** (both: node-to-node traffic).
 
-`issue_all.sh` creates 21 certificates: `flowfirst-vip`; for each of node1–3 `<node>-api`, `-rabbitmq`, `-mariadb`, `-zookeeper`, `-swift` and `-pipeline`; `node4-pipeline`; and `admin-client`. The MariaDB and RabbitMQ node certificates also carry the VIP name and IP in their SAN, because `MARIADB_HOST` and `RABBITMQ_HOST` point at the VIP.
+`issue_all.sh` creates 21 certificates: `flowfirst-vip`; for each of mgmtnode1–3 `<node>-api`, `-rabbitmq`, `-mariadb`, `-zookeeper`, `-swift` and `-pipeline`; `remotenode1-pipeline`; and `admin-client`. The MariaDB and RabbitMQ node certificates also carry the VIP name and IP in their SAN, because `MARIADB_HOST` and `RABBITMQ_HOST` point at the VIP.
 
 #### B. Components added to the repository
 
 | Path | Purpose |
 |---|---|
 | `security/init_ca.sh`, `issue_cert.sh`, `issue_all.sh`, `install_certs.sh`, `revoke_cert.sh`, `list_certs.sh`, `lib.sh` | Self-signed root CA, leaf certificates, per-node distribution, revocation, expiry report |
-| `security/enable_rabbitmq_tls.sh`, `enable_mariadb_tls.sh`, `enable_zookeeper_tls.sh`, `enable_swift_tls.sh` | Server-side TLS configuration for each product (run on node1–3) |
+| `security/enable_rabbitmq_tls.sh`, `enable_mariadb_tls.sh`, `enable_zookeeper_tls.sh`, `enable_swift_tls.sh` | Server-side TLS configuration for each product (run on mgmtnode1–3) |
 | `security/verify_tls.sh` | Probes every TLS endpoint and prints PASS/FAIL |
 | `src/tls/tls.py` | Python TLS contexts for all clients; fails closed |
 | `haproxy/setup_haproxy.sh`, `haproxy/haproxy.cfg.template` | HTTPS frontend with client certificates, re-encrypted backends, TLS pass-through for MariaDB and RabbitMQ |
@@ -8277,7 +8277,7 @@ Key handling rules:
 
 ```bash
 ./security/install_certs.sh --stage /tmp/flowfirst-stage   # review the per-node trees first, no ssh
-./security/install_certs.sh                                # push to node1..4 over ssh + sudo
+./security/install_certs.sh                                # push to mgmtnode1..4 over ssh + sudo
 ./security/install_certs.sh --node 4                       # or one node at a time
 ```
 
@@ -8287,9 +8287,9 @@ Layout on each node (`TLS_DIR`, default `/etc/flowfirst/tls`):
 |---|---|---|
 | `ca.crt`, `ca.crl` | `root` 644 | all |
 | `pipeline/pipeline.{crt,key}` | `flowuser` (key 600) | all — this is the client identity of Processes 1–5 |
-| `api/api.{crt,key}` | `flowuser` | node1–3 |
-| `haproxy/vip.pem`, `haproxy/backend.pem` | `haproxy` | node1–3 |
-| `rabbitmq/…`, `mariadb/…`, `zookeeper/…`, `swift/…` | the service account | node1–3 |
+| `api/api.{crt,key}` | `flowuser` | mgmtnode1–3 |
+| `haproxy/vip.pem`, `haproxy/backend.pem` | `haproxy` | mgmtnode1–3 |
+| `rabbitmq/…`, `mariadb/…`, `zookeeper/…`, `swift/…` | the service account | mgmtnode1–3 |
 
 If a service account does not exist yet, that file stays `root:root` 600 and the script prints a notice. Install the product first, then **re-run `install_certs.sh`**. The `systemd` units run as `flowuser`, so Processes 1–5 read `pipeline/` and `api/` through ownership; the units themselves need no change.
 
@@ -8320,14 +8320,14 @@ Every step keeps the plain-text listeners on until the encrypted path is proven,
 | Step | Where | Command | How to undo |
 |---|---|---|---|
 | 1 | admin host | `init_ca.sh`, `issue_all.sh`, `install_certs.sh` (sections C–D) | delete `/etc/flowfirst/tls` |
-| 2 | node1, then node2, then node3 | `sudo ./security/enable_rabbitmq_tls.sh` | remove the `BEGIN/END FLOWFIRST TLS` block in `rabbitmq.conf`, restart |
-| 3 | node1–3 | `sudo ./security/enable_zookeeper_tls.sh`, one node at a time (two of three must stay up) | restore `zoo.cfg.pre-tls` |
-| 4 | node1–3 | `sudo ./security/enable_mariadb_tls.sh`, one node at a time | delete `zz-flowfirst-tls.cnf`, restart |
-| 5 | node1–3 | `sudo ./security/enable_swift_tls.sh` | remove the `cert_file`/`key_file` lines from `[DEFAULT]` |
-| 6 | node1–4 | set `TLS_RABBITMQ_ENABLED`, `TLS_ZK_ENABLED`, `TLS_MARIADB_ENABLED`, `TLS_SWIFT_ENABLED` to `true` in `.env` (one switch at a time) and restart the processes | set back to `false` |
-| 7 | node1–3 | `TLS_API_ENABLED=true`, restart API Gateway (Process 1) (Pacemaker), then `sudo ./haproxy/setup_haproxy.sh` | set back to `false` and re-run the setup script |
+| 2 | mgmtnode1, then mgmtnode2, then mgmtnode3 | `sudo ./security/enable_rabbitmq_tls.sh` | remove the `BEGIN/END FLOWFIRST TLS` block in `rabbitmq.conf`, restart |
+| 3 | mgmtnode1–3 | `sudo ./security/enable_zookeeper_tls.sh`, one node at a time (two of three must stay up) | restore `zoo.cfg.pre-tls` |
+| 4 | mgmtnode1–3 | `sudo ./security/enable_mariadb_tls.sh`, one node at a time | delete `zz-flowfirst-tls.cnf`, restart |
+| 5 | mgmtnode1–3 | `sudo ./security/enable_swift_tls.sh` | remove the `cert_file`/`key_file` lines from `[DEFAULT]` |
+| 6 | mgmtnode1–4 | set `TLS_RABBITMQ_ENABLED`, `TLS_ZK_ENABLED`, `TLS_MARIADB_ENABLED`, `TLS_SWIFT_ENABLED` to `true` in `.env` (one switch at a time) and restart the processes | set back to `false` |
+| 7 | mgmtnode1–3 | `TLS_API_ENABLED=true`, restart API Gateway (Process 1) (Pacemaker), then `sudo ./haproxy/setup_haproxy.sh` | set back to `false` and re-run the setup script |
 | 8 | one node | `sudo ./security/enable_mariadb_tls.sh --require-client-cert` (replicates to the others) | `ALTER USER … REQUIRE NONE` |
-| 9 | node1–3 | optional hardening: `--disable-plain` on the RabbitMQ and ZooKeeper scripts | re-run without the flag |
+| 9 | mgmtnode1–3 | optional hardening: `--disable-plain` on the RabbitMQ and ZooKeeper scripts | re-run without the flag |
 
 Notes that matter in practice:
 
@@ -8357,19 +8357,19 @@ Rules:
 - A refused connection shows up as `curl: (35)` or `(56)` (no or bad certificate), `(60)` (server not trusted or wrong name) or `(7)` (port closed). Exact codes vary with the curl and OpenSSL versions; read the message text, and confirm with `openssl s_client`.
 - Test scripts: `scripts/test_flows_and_inspect_db.sh` and `scripts/load_test_api.py` use the node's `pipeline` certificate by default; from an admin host set `TLS_CA_FILE`, `TLS_CLIENT_CERT` and `TLS_CLIENT_KEY` (or `LOAD_CACERT`, `LOAD_CERT`, `LOAD_KEY`) to the admin files.
 
-#### H. Remote node4 (Remote Worker (Process 5))
+#### H. Remote remotenode1 (Remote Worker (Process 5))
 
-Node4 is outside the Pacemaker cluster and only **connects out**, so it gets one identity: `node4-pipeline`, installed as `pipeline/pipeline.{crt,key}` plus `ca.crt` and `ca.crl`. `install_certs.sh --node 4` does exactly that; no server key ever reaches node4.
+Remotenode1 is outside the Pacemaker cluster and only **connects out**, so it gets one identity: `remotenode1-pipeline`, installed as `pipeline/pipeline.{crt,key}` plus `ca.crt` and `ca.crl`. `install_certs.sh --node 4` does exactly that; no server key ever reaches remotenode1.
 
 - Its `.env` is identical to the other nodes except `NODE_NAME` and `CURRENT_NODE_IP`, so the same `TLS_*` switches apply, and it reaches RabbitMQ (5671), ZooKeeper (2281), MariaDB and Swift with its own certificate.
-- The firewall between node4 and node1–3 must allow the TLS ports (5671, 2281, plus the existing MariaDB, Swift and HAProxy ports).
-- If node4 is compromised, revoke `node4-pipeline` (section I) and also rotate the RabbitMQ and MariaDB application passwords, because revocation is not enforced by every component (section L).
+- The firewall between remotenode1 and mgmtnode1–3 must allow the TLS ports (5671, 2281, plus the existing MariaDB, Swift and HAProxy ports).
+- If remotenode1 is compromised, revoke `remotenode1-pipeline` (section I) and also rotate the RabbitMQ and MariaDB application passwords, because revocation is not enforced by every component (section L).
 
 #### I. Rotation, expiry and revocation
 
 ```bash
 ./security/list_certs.sh --warn-days 30      # exit 1 if anything is expiring or revoked: run it from cron
-./security/issue_cert.sh --name node2-api --profile server --san "…" --force     # re-issue one certificate
+./security/issue_cert.sh --name mgmtnode2-api --profile server --san "…" --force     # re-issue one certificate
 ./security/install_certs.sh --node 2         # copy the new files
 sudo systemctl restart flowfirst-process1    # or: restart the service that uses the certificate
 ```
@@ -8509,7 +8509,7 @@ Limits: this protects the one config-write endpoint. It is not general role-base
 2. The `sudo`, restart and firewall paths of the `enable_*_tls.sh` scripts, the ssh push of `install_certs.sh`, and the ZooKeeper keystore step inside the script (the same commands were run by hand). The HAProxy-to-MariaDB/RabbitMQ TLS pass-through was designed as TCP pass-through and not run end to end with Galera.
 3. **Swift is not mutual TLS at the proxy**: Swift 2.38 hardcodes `ssl.CERT_NONE`, and prints that SSL there is for testing only. This is in the upstream Swift code and cannot be changed from this repository. Client certificates are enforced by HAProxy; the HAProxy-to-proxy hop is encrypted. For stronger isolation put stunnel or nginx in front of the proxy. Anyone who can reach port 8888 on a node directly can talk to the proxy without a client certificate: firewall it to the HAProxy hosts.
 4. **Revocation** is not enforced by RabbitMQ or ZooKeeper (see I). It is enforced by HAProxy, API Gateway (Process 1) and (with `ssl_crl`) MariaDB client connections; whether Galera replication traffic honours the CRL was not tested. Every component that does enforce it fails closed when the CRL expires (see I).
-5. **Galera SST with `rsync` is not encrypted** by Galera TLS, and blocks the donor. Switch to `MARIADB_SST_METHOD=mariabackup` (non-blocking, no extra encryption by default) and add `MARIADB_SST_ENCRYPT=true` to encrypt the stream with the cluster's own TLS certificates. All nodes must use the same method; change it with a rolling restart (node3 → node2 → node1). This has not been tested on a real cluster.
+5. **Galera SST with `rsync` is not encrypted** by Galera TLS, and blocks the donor. Switch to `MARIADB_SST_METHOD=mariabackup` (non-blocking, no extra encryption by default) and add `MARIADB_SST_ENCRYPT=true` to encrypt the stream with the cluster's own TLS certificates. All nodes must use the same method; change it with a rolling restart (mgmtnode3 → mgmtnode2 → mgmtnode1). This has not been tested on a real cluster.
 6. `--inter-node`, `--galera` and `--quorum` were not tested.
 7. Pacemaker/Corosync (and pcsd) traffic uses their own mechanisms and is not covered here.
 8. Leaf keys are not passphrase-protected, so protect `/etc/flowfirst/tls` with filesystem permissions and disk encryption. The CA key is protected only by its passphrase and the admin host.
@@ -8546,7 +8546,7 @@ NOTIFICATIONS_ENABLED=true
 Then restart DB Updater (Process 4) so it picks up the change:
 
 ```bash
-# Under Pacemaker (Nodes 1–3):
+# Under Pacemaker (Mgmt Nodes 1–3):
 sudo pcs resource restart flowfirst-process4
 
 # Verify it came back up on the leader node:
@@ -8574,8 +8574,8 @@ source /opt/flowfirst/.venv/bin/activate
 
 | Where | `RMQ_HOST` setting | Notes |
 |---|---|---|
-| **Node 1, 2, or 3** (recommended for quick tests) | `127.0.0.1` (default — no need to set it) | Connects directly to the local broker; no firewall rules needed. |
-| **Node 4** (remote worker node) | Set `RMQ_HOST=<VIP or any cluster node IP>` | Node 4 has no RabbitMQ broker, so it must connect over the network. |
+| **Mgmt Node 1, 2, or 3** (recommended for quick tests) | `127.0.0.1` (default — no need to set it) | Connects directly to the local broker; no firewall rules needed. |
+| **Remote Node 1** (remote worker node) | Set `RMQ_HOST=<VIP or any cluster node IP>` | Remote Node 1 has no RabbitMQ broker, so it must connect over the network. |
 | **Your laptop or CI machine** | Set `RMQ_HOST=<VIP or any cluster node IP>` | Port 5672 (or 5673 for the HAProxy LB) must be reachable. Use the VIP for automatic failover. |
 
 > Two processes sharing the same `RMQ_QUEUE` name **compete** for messages (round-robin — each gets half). To receive every notification independently on multiple machines, give each a different `RMQ_QUEUE` value.
@@ -8585,8 +8585,8 @@ source /opt/flowfirst/.venv/bin/activate
 ### Step 1 — Run on a cluster node (simplest)
 
 ```bash
-# SSH to any of Node 1, 2, or 3:
-ssh node1
+# SSH to any of Mgmt Node 1, 2, or 3:
+ssh mgmtnode1
 
 # Set the password (must match RABBITMQ_PASSWORD in .env):
 export RMQ_PASSWORD=<your RABBITMQ_PASSWORD>
@@ -8644,7 +8644,7 @@ A Flow 1 notification looks like this:
 ```
 ────────────────────────────────────────────────────────────────────────
 ▶ telemetry.processed  flow=1  entity=message:101
-  occurred=2025-07-14 11:30:06  node=node2
+  occurred=2025-07-14 11:30:06  node=mgmtnode2
   notification_id=3f7a9c12-4b2e-41a8-9c3d-7f8e1b2a6d5c
   message_id=c1d2e3f4-5a6b-7c8d-9e0f-1a2b3c4d5e6f
   payload:
@@ -8662,7 +8662,7 @@ A Flow 4 (device create) notification:
 ```
 ────────────────────────────────────────────────────────────────────────
 ▶ device.created  flow=4  entity=device:a8b2c3d4-1234-5678-abcd-ef0123456789
-  occurred=2025-07-14 11:30:08  node=node1
+  occurred=2025-07-14 11:30:08  node=mgmtnode1
   notification_id=9a1b2c3d-...
   message_id=d4e5f6a7-...
   payload:
@@ -8792,21 +8792,21 @@ sudo rabbitmqctl delete_queue flowfirst.notifications.listener
 
 ## Where to run the demos (Scenarios 69–75)
 
-Every demo script runs from **one terminal on one node**, and talks to the other nodes over the network. **Default: log in to node1 as `flowadmin`, then `cd /opt/flowfirst && source .venv/bin/activate`, and run the command there.** You never have to start a demo on node2 or node3 (except `failover` in Scenario 75, see below). Each command block in Scenarios 69–75 carries an `# On nodeX` comment or a heading note; if a block has none, it runs on node1.
+Every demo script runs from **one terminal on one node**, and talks to the other nodes over the network. **Default: log in to mgmtnode1 as `flowadmin`, then `cd /opt/flowfirst && source .venv/bin/activate`, and run the command there.** You never have to start a demo on mgmtnode2 or mgmtnode3 (except `failover` in Scenario 75, see below). Each command block in Scenarios 69–75 carries an `# On nodeX` comment or a heading note; if a block has none, it runs on mgmtnode1.
 
 | Scenario | Script | Run it on | Needs a second terminal on another node? | Cannot run on |
 |---|---|---|---|---|
-| [69](#scenario-69-database-writeread-demo-across-nodes-mariadb-galera) Galera | `db_replication_demo.py` | **node1** | Only in C (stop/start MariaDB on **node3**) | – |
-| [70](#scenario-70-zookeeper-coordination-demo-across-nodes) ZooKeeper | `zk_coordination_demo.py` | **node1** (`zkCli.sh` also on node1) | Only in C (stop/start ZooKeeper on **node3**) | – |
-| [71](#scenario-71-rabbitmq-queue-demo-across-nodes) RabbitMQ | `rabbitmq_queue_demo.py` | **node1** (`rabbitmqctl` also on node1) | Only in D (stop/start RabbitMQ on **node3**) | – |
-| [72](#scenario-72-greenthread-eventlet-demo-locally-and-across-nodes) Greenthreads | `greenthread_demo.py` | **node1** (the local stages also run on a workstation) | Only in C (stop/start RabbitMQ on **node3**) | – |
-| [73](#scenario-73-swift-object-storage-demo-across-nodes) Swift | `swift_object_demo.py` | **node1** | Only in D (stop/start the Swift proxy on **node3**) | – |
-| [74](#scenario-74-haproxy-load-balancing-demo-across-nodes) HAProxy | `haproxy_lb_demo.py` | **node1** (any node works: it talks to the VIP, wherever the VIP is) | In D, terminal 2 runs `pcs resource ban/clear` on node1 or node2 (cluster-wide) | – |
-| [75](#scenario-75-pacemaker-cluster-demo-across-nodes) Pacemaker | `pacemaker_cluster_demo.py` | **node1**; start `failover` from **node2 or node3** when node1 holds the VIP | No (`ban --node node3` names a target, you do not log in to it) | **node4 and workstations** (no Pacemaker there) |
+| [69](#scenario-69-database-writeread-demo-across-nodes-mariadb-galera) Galera | `db_replication_demo.py` | **mgmtnode1** | Only in C (stop/start MariaDB on **mgmtnode3**) | – |
+| [70](#scenario-70-zookeeper-coordination-demo-across-nodes) ZooKeeper | `zk_coordination_demo.py` | **mgmtnode1** (`zkCli.sh` also on mgmtnode1) | Only in C (stop/start ZooKeeper on **mgmtnode3**) | – |
+| [71](#scenario-71-rabbitmq-queue-demo-across-nodes) RabbitMQ | `rabbitmq_queue_demo.py` | **mgmtnode1** (`rabbitmqctl` also on mgmtnode1) | Only in D (stop/start RabbitMQ on **mgmtnode3**) | – |
+| [72](#scenario-72-greenthread-eventlet-demo-locally-and-across-nodes) Greenthreads | `greenthread_demo.py` | **mgmtnode1** (the local stages also run on a workstation) | Only in C (stop/start RabbitMQ on **mgmtnode3**) | – |
+| [73](#scenario-73-swift-object-storage-demo-across-nodes) Swift | `swift_object_demo.py` | **mgmtnode1** | Only in D (stop/start the Swift proxy on **mgmtnode3**) | – |
+| [74](#scenario-74-haproxy-load-balancing-demo-across-nodes) HAProxy | `haproxy_lb_demo.py` | **mgmtnode1** (any node works: it talks to the VIP, wherever the VIP is) | In D, terminal 2 runs `pcs resource ban/clear` on mgmtnode1 or mgmtnode2 (cluster-wide) | – |
+| [75](#scenario-75-pacemaker-cluster-demo-across-nodes) Pacemaker | `pacemaker_cluster_demo.py` | **mgmtnode1**; start `failover` from **mgmtnode2 or mgmtnode3** when mgmtnode1 holds the VIP | No (`ban --node mgmtnode3` names a target, you do not log in to it) | **remotenode1 and workstations** (no Pacemaker there) |
 
-- **node4** runs no MariaDB, RabbitMQ, ZooKeeper, Swift or Pacemaker. It can run demos 69–74 only as a plain client over the network, and the commands that touch a local service (`rabbitmqctl`, `zkCli.sh -server 127.0.0.1`, `swift-get-nodes`, `pcs`, `crm_mon`) do not work there.
-- The commands that **stop a service** (`systemctl stop ...`) always target **node3**, so node1 and node2 keep the quorum (2 of 3). Start the service again on node3 before you continue.
-- A `--node node3` / `--nodes node1,node2` option names the **server the demo talks to**. It does not mean you must be logged in to that node.
+- **remotenode1** runs no MariaDB, RabbitMQ, ZooKeeper, Swift or Pacemaker. It can run demos 69–74 only as a plain client over the network, and the commands that touch a local service (`rabbitmqctl`, `zkCli.sh -server 127.0.0.1`, `swift-get-nodes`, `pcs`, `crm_mon`) do not work there.
+- The commands that **stop a service** (`systemctl stop ...`) always target **mgmtnode3**, so mgmtnode1 and mgmtnode2 keep the quorum (2 of 3). Start the service again on mgmtnode3 before you continue.
+- A `--node mgmtnode3` / `--nodes mgmtnode1,mgmtnode2` option names the **server the demo talks to**. It does not mean you must be logged in to that node.
 
 ---
 
@@ -8814,9 +8814,9 @@ Every demo script runs from **one terminal on one node**, and talks to the other
 
 > **Goal:** show, with a small piece of code you can read, that a row written through **any** MariaDB Galera node can be read from **every** node. The script is `scripts/db_replication_demo.py`. It talks to MariaDB directly (no REST API, no RabbitMQ, no pipeline process), so it isolates the database layer. For the full pipeline path see Scenarios 2 and 3.
 >
-> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/db_replication_demo.py ...` command there.** The only steps that run elsewhere are the stop/start of MariaDB on **node3** in C, and the plain-SQL commands in E (any machine with a `mariadb` client).
+> **Short answer: log in to mgmtnode1 as `flowadmin` and run every `python3 scripts/db_replication_demo.py ...` command there.** The only steps that run elsewhere are the stop/start of MariaDB on **mgmtnode3** in C, and the plain-SQL commands in E (any machine with a `mariadb` client).
 >
-> **Runs on:** node1, node2 or node3 (as `flowadmin`, in `/opt/flowfirst` with the venv active), or **node4** or a workstation as a client (it needs only TCP 3306 to the three Galera nodes and the same `.env`). Node 4 runs no MariaDB, so it can only act as a client.
+> **Runs on:** mgmtnode1, mgmtnode2 or mgmtnode3 (as `flowadmin`, in `/opt/flowfirst` with the venv active), or **remotenode1** or a workstation as a client (it needs only TCP 3306 to the three Galera nodes and the same `.env`). Remote Node 1 runs no MariaDB, so it can only act as a client.
 
 ### What it does
 
@@ -8835,10 +8835,10 @@ The demo uses its **own table**, so `processed_messages`, `devices` and the pipe
 - `.env` holds `MARIADB_USER`, `MARIADB_PASSWORD`, `MARIADB_DB`, `NODE1_IP`..`NODE3_IP`. The script refuses to start with a weak or empty password (the same rule as the pipeline).
 - The MariaDB user may `CREATE TABLE`, `INSERT`, `SELECT`, `DELETE` in `MARIADB_DB`. The pipeline user created by `bootstrap_galera.sh` has `ALL PRIVILEGES` on that database.
 
-### A. Run the full demo (on **node1**)
+### A. Run the full demo (on **mgmtnode1**)
 
 ```bash
-# On node1
+# On mgmtnode1
 cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/db_replication_demo.py
 ```
@@ -8848,26 +8848,26 @@ Expected shape of the output (ids, times and server names will differ):
 ```text
 == FlowFirst Galera write/read demo ==
 run id : 5c1f0a7e-...
-nodes  : node1 (10.10.1.128), node2 (10.10.1.129), node3 (10.10.1.130)
-client : node1
+nodes  : mgmtnode1 (10.10.1.128), mgmtnode2 (10.10.1.129), mgmtnode3 (10.10.1.130)
+client : mgmtnode1
 
 [1] Create the demo table on the first node (replicated to the others by Galera)
     table `replication_demo` is ready
 
 [2] Write one row through EACH node
-    wrote id=1      via node1  (server node1)
-    wrote id=5      via node2  (server node2)
-    wrote id=9      via node3  (server node3)
+    wrote id=1      via mgmtnode1  (server mgmtnode1)
+    wrote id=5      via mgmtnode2  (server mgmtnode2)
+    wrote id=9      via mgmtnode3  (server mgmtnode3)
 
 [3] Read the rows back from EVERY node
 
-    -- node1 (10.10.1.128) server=node1 wsrep=node1 cluster_size=3 -- 3/3 rows, visible after 0 ms
+    -- mgmtnode1 (10.10.1.128) server=mgmtnode1 wsrep=mgmtnode1 cluster_size=3 -- 3/3 rows, visible after 0 ms
     id  written via  server  client  message                    written at
     --  -----------  ------  ------  -------------------------  ---------------
-    1   node1        node1   node1   hello from node1 via node1 14:02:11.120344
-    5   node2        node2   node1   hello from node1 via node2 14:02:11.131920
-    9   node3        node3   node1   hello from node1 via node3 14:02:11.143077
-    ... the same three rows are printed for node2 and node3 ...
+    1   mgmtnode1        mgmtnode1   mgmtnode1   hello from mgmtnode1 via mgmtnode1 14:02:11.120344
+    5   mgmtnode2        mgmtnode2   mgmtnode1   hello from mgmtnode1 via mgmtnode2 14:02:11.131920
+    9   mgmtnode3        mgmtnode3   mgmtnode1   hello from mgmtnode1 via mgmtnode3 14:02:11.143077
+    ... the same three rows are printed for mgmtnode2 and mgmtnode3 ...
 
 [4] Result
     PASS: all 3 rows written through 3 different nodes are readable on every node.
@@ -8877,57 +8877,57 @@ Exit code is `0` on PASS, `1` if any row did not appear within `--timeout` secon
 
 > **Why the `id` values jump (1, 5, 9 …):** Galera sets `auto_increment_increment` to the cluster size and gives each node its own `auto_increment_offset`, so two nodes never generate the same id while both accept writes. The gaps are normal. Identify a row by `entry_id` (a UUID), not by `id`.
 
-### B. Write on one node, read on another (manual; run on **node1**)
+### B. Write on one node, read on another (manual; run on **mgmtnode1**)
 
-`--node` chooses which database server is written to or read from; the command itself always runs on node1.
+`--node` chooses which database server is written to or read from; the command itself always runs on mgmtnode1.
 
 ```bash
-# On node1: write through node2 only. Prints a run id.
-python3 scripts/db_replication_demo.py write --node node2 --message "written via node2"
+# On mgmtnode1: write through mgmtnode2 only. Prints a run id.
+python3 scripts/db_replication_demo.py write --node mgmtnode2 --message "written via mgmtnode2"
 
-# Read it back from node3 only, then from all three:
-python3 scripts/db_replication_demo.py read --node node3 --run-id <run id from the write>
+# Read it back from mgmtnode3 only, then from all three:
+python3 scripts/db_replication_demo.py read --node mgmtnode3 --run-id <run id from the write>
 python3 scripts/db_replication_demo.py read --node all
 ```
 
-`--node` accepts `node1`, `node2`, `node3`, `vip` (HAProxy at `MARIADB_HOST`: the write lands on whichever node HAProxy picks, and the `server` column shows which) or a literal IP.
+`--node` accepts `mgmtnode1`, `mgmtnode2`, `mgmtnode3`, `vip` (HAProxy at `MARIADB_HOST`: the write lands on whichever node HAProxy picks, and the `server` column shows which) or a literal IP.
 
 ### C. Prove it with a node down
 
-Galera keeps accepting writes with two of three nodes. This needs two terminals: **node3** (the node you stop) and **node1** (where the demo runs).
+Galera keeps accepting writes with two of three nodes. This needs two terminals: **mgmtnode3** (the node you stop) and **mgmtnode1** (where the demo runs).
 
 ```bash
-# On node3: stop MariaDB (see Scenario 14)
+# On mgmtnode3: stop MariaDB (see Scenario 14)
 sudo systemctl stop mariadb
 
-# On node1:
-python3 scripts/db_replication_demo.py run --nodes node1,node2 --keep      # works: quorum is 2 of 3
-python3 scripts/db_replication_demo.py read --node node3                   # ERROR: cannot connect (exit 1)
+# On mgmtnode1:
+python3 scripts/db_replication_demo.py run --nodes mgmtnode1,mgmtnode2 --keep      # works: quorum is 2 of 3
+python3 scripts/db_replication_demo.py read --node mgmtnode3                   # ERROR: cannot connect (exit 1)
 
-# On node3: start it again and wait for Synced
+# On mgmtnode3: start it again and wait for Synced
 sudo systemctl start mariadb
 
-# On node1:
-python3 scripts/db_replication_demo.py read --node node3 --run-id <run id> # the rows written while it was down are here
+# On mgmtnode1:
+python3 scripts/db_replication_demo.py read --node mgmtnode3 --run-id <run id> # the rows written while it was down are here
 ```
 
 The last command shows the node catching up through IST (Scenario 5) with no manual copy.
 
-### D. Clean up (on **node1**)
+### D. Clean up (on **mgmtnode1**)
 
 ```bash
 python3 scripts/db_replication_demo.py cleanup           # delete every demo row
 python3 scripts/db_replication_demo.py cleanup --drop    # drop the table (replicated to all nodes)
 ```
 
-### E. The same thing in plain SQL (run on **node1**, or any machine with a `mariadb` client that can reach the nodes)
+### E. The same thing in plain SQL (run on **mgmtnode1**, or any machine with a `mariadb` client that can reach the nodes)
 
 ```bash
 set -a && source /opt/flowfirst/.env && set +a
-# Write on node1 ...
+# Write on mgmtnode1 ...
 mariadb -h ${NODE1_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
-  -e "INSERT INTO replication_demo (run_id, entry_id, written_via, message) VALUES ('manual', UUID(), 'node1', 'by hand');"
-# ... read on node3
+  -e "INSERT INTO replication_demo (run_id, entry_id, written_via, message) VALUES ('manual', UUID(), 'mgmtnode1', 'by hand');"
+# ... read on mgmtnode3
 mariadb -h ${NODE3_IP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} \
   -e "SELECT id, entry_id, written_via, message FROM replication_demo WHERE run_id = 'manual';"
 ```
@@ -8942,7 +8942,7 @@ conn = pymysql.connect(host=node_ip, port=MARIADB_PORT, user=MARIADB_USER, passw
                        connect_timeout=5, ssl=mysql_ssl())
 with conn.cursor() as cur:
     cur.execute("INSERT INTO replication_demo (run_id, entry_id, written_via, message) VALUES (%s, %s, %s, %s)",
-                (run_id, entry_id, "node2", "hello"))          # parameters, never string formatting
+                (run_id, entry_id, "mgmtnode2", "hello"))          # parameters, never string formatting
 ...
 with other_conn.cursor() as cur:                                # a connection to a DIFFERENT node
     cur.execute("SELECT * FROM replication_demo WHERE entry_id = %s", (entry_id,))
@@ -8964,15 +8964,15 @@ For application code that should survive a node failure, use `src/db/db.py:get_d
 
 > **Goal:** demonstrate, in an isolated executable script (`scripts/zk_coordination_demo.py`), how Apache ZooKeeper coordinates distributed state across nodes in the FlowFirst cluster. It exercises the four core primitives used throughout the pipeline (leader election with failover, dynamic configuration hot-reloading via `DataWatch`, ephemeral service registry, and atomic deduplication barriers) directly against the ZooKeeper 3-node ensemble without requiring MariaDB, RabbitMQ, or the REST API.
 >
-> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/zk_coordination_demo.py ...` command and the `zkCli.sh` session there.** The only step that runs elsewhere is the stop/start of ZooKeeper on **node3** in C.
+> **Short answer: log in to mgmtnode1 as `flowadmin` and run every `python3 scripts/zk_coordination_demo.py ...` command and the `zkCli.sh` session there.** The only step that runs elsewhere is the stop/start of ZooKeeper on **mgmtnode3** in C.
 >
-> **Runs on:** node1, node2, or node3 (as `flowadmin` with the `.venv` active), or **node4** or a workstation as a client (needs network access to TCP 2181/2281 on `NODE1_IP`..`NODE3_IP` and the same `.env`).
+> **Runs on:** mgmtnode1, mgmtnode2, or mgmtnode3 (as `flowadmin` with the `.venv` active), or **remotenode1** or a workstation as a client (needs network access to TCP 2181/2281 on `NODE1_IP`..`NODE3_IP` and the same `.env`).
 
 ### What it does
 
 | Step | Primitive / Capability | Action Across Nodes | Code Reference |
 |---|---|---|---|
-| 1 | **Ensemble Status & Quorum Inspection** | Connects to `node1`, `node2`, and `node3` independently; queries `mntr` 4-letter words and Kazoo sessions to verify ensemble roles (`leader` / `follower`), latency, znode count, and synced followers. | `stage_ensemble_status()`, `get_node_status()` |
+| 1 | **Ensemble Status & Quorum Inspection** | Connects to `mgmtnode1`, `mgmtnode2`, and `mgmtnode3` independently; queries `mntr` 4-letter words and Kazoo sessions to verify ensemble roles (`leader` / `follower`), latency, znode count, and synced followers. | `stage_ensemble_status()`, `get_node_status()` |
 | 2 | **Distributed Leader Election & Failover** | Simulates contender worker processes on distinct ensemble nodes competing under `/flowfirst/zk_demo/<run_id>/election`. Demonstrates sequential ephemeral znodes, standby follower queueing, active leader execution, and instant automatic leader handover when the leader steps down. | `stage_leader_election()`, `kazoo.recipe.election.Election` |
 | 3 | **Dynamic Runtime Config Propagation** | Registers `DataWatch` callbacks on multiple nodes watching `/flowfirst/zk_demo/<run_id>/config/threshold`. Writes config updates from one node and verifies instant sub-millisecond broadcast to all watching nodes without polling or process restart. | `stage_config_watches()`, `zk.DataWatch` |
 | 4 | **Ephemeral Service Registry & Auto-Cleanup** | Multiple worker instances register ephemeral znodes under `/flowfirst/zk_demo/<run_id>/registry`. A third node reads the live worker directory. When a worker process terminates or drops its session, ZooKeeper automatically purges its registration znode within seconds. | `stage_service_registry()`, `zk.create(..., ephemeral=True)` |
@@ -8986,10 +8986,10 @@ The demo uses its own isolated root namespace (`/flowfirst/zk_demo`), so product
 - The ZooKeeper ensemble is installed and in quorum (`echo ruok | nc 127.0.0.1 2181` returns `imok` on nodes 1–3).
 - `.env` contains `NODE1_IP`, `NODE2_IP`, `NODE3_IP`, `ZK_CLIENT_PORT` (default 2181), and optionally `TLS_ZK_ENABLED=true` / `ZK_TLS_CLIENT_PORT=2281`.
 
-### A. Run the full demo (on **node1**)
+### A. Run the full demo (on **mgmtnode1**)
 
 ```bash
-# On node1
+# On mgmtnode1
 cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/zk_coordination_demo.py
 ```
@@ -8999,42 +8999,42 @@ Expected output shape:
 ```text
 == FlowFirst ZooKeeper Coordination Demo ==
 run id   : run_b8f2a1
-ensemble : node1 (10.10.1.128:2181), node2 (10.10.1.129:2181), node3 (10.10.1.130:2181)
-client   : node1
+ensemble : mgmtnode1 (10.10.1.128:2181), mgmtnode2 (10.10.1.129:2181), mgmtnode3 (10.10.1.130:2181)
+client   : mgmtnode1
 tls mode : OFF (plain TCP)
 
 [1] Inspect ZooKeeper Ensemble & Quorum State
     node   endpoint           role      synced followers  avg latency  znodes
     -----  -----------------  --------  ----------------  -----------  ------
-    node1  10.10.1.128:2181  leader    2                 0.1 ms       18
-    node2  10.10.1.129:2181  follower  n/a               0.1 ms       18
-    node3  10.10.1.130:2181  follower  n/a               0.1 ms       18
+    mgmtnode1  10.10.1.128:2181  leader    2                 0.1 ms       18
+    mgmtnode2  10.10.1.129:2181  follower  n/a               0.1 ms       18
+    mgmtnode3  10.10.1.130:2181  follower  n/a               0.1 ms       18
 
 [2] Multi-Node Leader Election & Standby Failover
     stage                 active leader  standby queue  time (ms)  result
     --------------------  -------------  -------------  ---------  ------------------------------------------
-    1. Initial Election   node1          none           2.4        PASS: Elected as Leader
-    2. Standby Queueing   node1          node2, node3   —          PASS: 3 contenders queued in sequence
-    3. Leader Failover    node2          node3          1.8        PASS: Instant handover to node2
+    1. Initial Election   mgmtnode1          none           2.4        PASS: Elected as Leader
+    2. Standby Queueing   mgmtnode1          mgmtnode2, mgmtnode3   —          PASS: 3 contenders queued in sequence
+    3. Leader Failover    mgmtnode2          mgmtnode3          1.8        PASS: Instant handover to mgmtnode2
 
 [3] Dynamic Runtime Config Propagation (DataWatch)
     action                 written via  observed on  latency (ms)  status
     ---------------------  -----------  -----------  ------------  --------------------------------------
-    Set threshold = 38.5   node1        all 3 nodes  1.2           PASS: Broadcast via DataWatch
-    Set threshold = 45.0   node3        all 3 nodes  0.9           PASS: Hot-reloaded without restart
+    Set threshold = 38.5   mgmtnode1        all 3 nodes  1.2           PASS: Broadcast via DataWatch
+    Set threshold = 45.0   mgmtnode3        all 3 nodes  0.9           PASS: Hot-reloaded without restart
 
 [4] Ephemeral Service Discovery & Auto-Cleanup
     event                          query node  live workers  status
     -----------------------------  ----------  ------------  ----------------------------------
-    Register 2 ephemeral workers   node3       node1, node2  PASS: Discovered across ensemble
-    Disconnect node1 session       node3       node2         PASS: Ephemeral auto-pruned
+    Register 2 ephemeral workers   mgmtnode3       mgmtnode1, mgmtnode2  PASS: Discovered across ensemble
+    Disconnect mgmtnode1 session       mgmtnode3       mgmtnode2         PASS: Ephemeral auto-pruned
 
 [5] Atomic Deduplication Barrier Across Nodes
     message id    delivery via  action                              decision                  status
     ------------  ------------  ----------------------------------  ------------------------  ------------------------------
-    msg_a93f120c  node1         First arrival (Process 4 insert)    PROCEED                   PASS: First-seen accepted
-    msg_a93f120c  node2         Duplicate redelivery (Failover)     SKIP (Duplicate blocked)  PASS: Dedup barrier blocked insert
-    msg_a93f120c  node3         Duplicate redelivery (Node 3)       SKIP (Duplicate blocked)  PASS: Dedup barrier verified
+    msg_a93f120c  mgmtnode1         First arrival (Process 4 insert)    PROCEED                   PASS: First-seen accepted
+    msg_a93f120c  mgmtnode2         Duplicate redelivery (Failover)     SKIP (Duplicate blocked)  PASS: Dedup barrier blocked insert
+    msg_a93f120c  mgmtnode3         Duplicate redelivery (Mgmt Node 3)       SKIP (Duplicate blocked)  PASS: Dedup barrier verified
 
 [6] Summary & Result
     PASS: All ZooKeeper coordination primitives verified across cluster nodes.
@@ -9042,7 +9042,7 @@ tls mode : OFF (plain TCP)
     Cleaned up 12 demo znode(s) (use --keep to retain for inspection).
 ```
 
-### B. Run individual subcommands (on **node1**)
+### B. Run individual subcommands (on **mgmtnode1**)
 
 ```bash
 # 1. Ensemble role and quorum check:
@@ -9066,28 +9066,28 @@ python3 scripts/zk_coordination_demo.py cleanup --all
 
 ### C. Prove coordination during a node outage
 
-ZooKeeper maintains consensus and serves reads/writes as long as a strict majority (2 of 3 nodes) is online. This needs two terminals: **node3** (the node you stop) and **node1** (where the demo runs).
+ZooKeeper maintains consensus and serves reads/writes as long as a strict majority (2 of 3 nodes) is online. This needs two terminals: **mgmtnode3** (the node you stop) and **mgmtnode1** (where the demo runs).
 
 ```bash
-# On node3: stop ZooKeeper (see Scenario 36)
+# On mgmtnode3: stop ZooKeeper (see Scenario 36)
 sudo systemctl stop zookeeper
 
-# On node1: run the coordination demo across the remaining 2 nodes
-python3 scripts/zk_coordination_demo.py run --nodes node1,node2
+# On mgmtnode1: run the coordination demo across the remaining 2 nodes
+python3 scripts/zk_coordination_demo.py run --nodes mgmtnode1,mgmtnode2
 
-# On node3: restart ZooKeeper
+# On mgmtnode3: restart ZooKeeper
 sudo systemctl start zookeeper
 
-# On node1: verify automatic sync
+# On mgmtnode1: verify automatic sync
 python3 scripts/zk_coordination_demo.py status
 ```
 
 ### D. Manual inspection with zkCli.sh
 
-Run the demo with `--keep` to leave the znodes in place. Everything here runs on **node1**: `zkCli.sh -server 127.0.0.1:2181` talks to the ZooKeeper server on the machine you are logged in to, so it works only on node1–node3.
+Run the demo with `--keep` to leave the znodes in place. Everything here runs on **mgmtnode1**: `zkCli.sh -server 127.0.0.1:2181` talks to the ZooKeeper server on the machine you are logged in to, so it works only on mgmtnode1–mgmtnode3.
 
 ```bash
-# On node1
+# On mgmtnode1
 python3 scripts/zk_coordination_demo.py run --keep
 # Note the run id printed, e.g., run_b8f2a1
 
@@ -9112,7 +9112,7 @@ zk = KazooClient(hosts="10.10.1.128:2181,10.10.1.129:2181,10.10.1.130:2181", tim
 zk.start()
 
 # 2. Leader Election: block until elected, run worker callback
-election = Election(zk, "/flowfirst/election/process2", identifier="node1")
+election = Election(zk, "/flowfirst/election/process2", identifier="mgmtnode1")
 election.run(my_worker_callback)
 
 # 3. Dynamic Configuration Watch: instant live updates without polling
@@ -9123,7 +9123,7 @@ def on_config_change(data, stat, event=None):
         print(f"Hot-reloaded threshold to {new_val}")
 
 # 4. Ephemeral Service Registration: auto-deregisters on process exit or crash
-zk.create("/flowfirst/registry/process2/node1", b'{"status": "ready"}', ephemeral=True)
+zk.create("/flowfirst/registry/process2/mgmtnode1", b'{"status": "ready"}', ephemeral=True)
 
 # 5. Atomic Deduplication Barrier: insert only if first-seen
 try:
@@ -9144,21 +9144,21 @@ except NodeExistsError:
 
 ## Scenario 71: RabbitMQ Queue Demo Across Nodes
 
-> **Goal:** show, with a small piece of code you can read, how to use RabbitMQ queues from several cluster nodes. The script is `scripts/rabbitmq_queue_demo.py`. It opens one connection **per broker node** (node1, node2, node3; no HAProxy, no REST API, no pipeline process), so you see exactly which node publishes and which node consumes. For the real pipeline path see Scenarios 2 and 28.
+> **Goal:** show, with a small piece of code you can read, how to use RabbitMQ queues from several cluster nodes. The script is `scripts/rabbitmq_queue_demo.py`. It opens one connection **per broker node** (mgmtnode1, mgmtnode2, mgmtnode3; no HAProxy, no REST API, no pipeline process), so you see exactly which node publishes and which node consumes. For the real pipeline path see Scenarios 2 and 28.
 >
-> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/rabbitmq_queue_demo.py ...` command and the `rabbitmqctl` commands there.** The only step that runs elsewhere is the stop/start of RabbitMQ on **node3** in D.
+> **Short answer: log in to mgmtnode1 as `flowadmin` and run every `python3 scripts/rabbitmq_queue_demo.py ...` command and the `rabbitmqctl` commands there.** The only step that runs elsewhere is the stop/start of RabbitMQ on **mgmtnode3** in D.
 >
-> **Runs on:** node1, node2, node3 (as `flowadmin` with the `.venv` active), or node4 / a workstation as a client (needs TCP 5672, or 5671 with TLS, to `NODE1_IP`..`NODE3_IP`, and the same `.env`).
+> **Runs on:** mgmtnode1, mgmtnode2, mgmtnode3 (as `flowadmin` with the `.venv` active), or remotenode1 / a workstation as a client (needs TCP 5672, or 5671 with TLS, to `NODE1_IP`..`NODE3_IP`, and the same `.env`).
 
 ### What it does
 
 | Stage | Pattern | What happens across the nodes | Code |
 |---|---|---|---|
 | 1 `status` | Connectivity | Connects to each broker on its own and prints the RabbitMQ version and cluster name. | `stage_status()` |
-| 2 `work` | **Work queue** | Messages are published round-robin **through node1, node2, node3** to one durable queue; all are read back **through node3**. Every publish uses publisher confirms and `mandatory=True`. | `stage_work_queue()`, `publish()` |
+| 2 `work` | **Work queue** | Messages are published round-robin **through mgmtnode1, mgmtnode2, mgmtnode3** to one durable queue; all are read back **through mgmtnode3**. Every publish uses publisher confirms and `mandatory=True`. | `stage_work_queue()`, `publish()` |
 | 3 `compete` | **Competing consumers** | One consumer per node (each thread owns its connection) on the **same** queue, `prefetch_count=1`, manual ack after the work. Each message is handled by exactly one consumer. | `stage_competing_consumers()` |
-| 4 `fanout` | **Publish/subscribe** | A durable fanout exchange; one queue per node (each declared through its own node) is bound to it. One publish through node1 puts a copy into every queue. | `stage_fanout()` |
-| 5 `redeliver` | **At-least-once delivery** | Consumer A (node1) takes a message and drops its connection without acknowledging; consumer B (node2) receives it again with `redelivered=True`, acknowledges it, and the queue is empty. | `stage_redelivery()` |
+| 4 `fanout` | **Publish/subscribe** | A durable fanout exchange; one queue per node (each declared through its own node) is bound to it. One publish through mgmtnode1 puts a copy into every queue. | `stage_fanout()` |
+| 5 `redeliver` | **At-least-once delivery** | Consumer A (mgmtnode1) takes a message and drops its connection without acknowledging; consumer B (mgmtnode2) receives it again with `redelivered=True`, acknowledges it, and the queue is empty. | `stage_redelivery()` |
 
 Safety properties of the demo:
 
@@ -9172,10 +9172,10 @@ Safety properties of the demo:
 - RabbitMQ cluster running on nodes 1–3 (`sudo rabbitmqctl cluster_status` lists all three, Scenario 13).
 - `.env` has `NODE1_IP`..`NODE3_IP`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD` (and optionally `TLS_RABBITMQ_ENABLED`, `RABBITMQ_QUEUE_TYPE`).
 
-### A. Run the full demo (on **node1**)
+### A. Run the full demo (on **mgmtnode1**)
 
 ```bash
-# On node1
+# On mgmtnode1
 cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/rabbitmq_queue_demo.py
 ```
@@ -9185,48 +9185,48 @@ Expected output shape (illustrative: the layout is real, the numbers will differ
 ```text
 == FlowFirst RabbitMQ Queue Demo ==
 run id     : 3f9c1a7e
-brokers    : node1 (10.10.1.128:5672), node2 (10.10.1.129:5672), node3 (10.10.1.130:5672)
-client     : node1
+brokers    : mgmtnode1 (10.10.1.128:5672), mgmtnode2 (10.10.1.129:5672), mgmtnode3 (10.10.1.130:5672)
+client     : mgmtnode1
 queue type : classic  (a classic queue lives on the node that declared it)
 tls mode   : OFF (plain TCP)
 
 [1] Broker nodes reachable one by one
     node   endpoint           status     connect (ms)  rabbitmq  cluster name
     -----  -----------------  ---------  ------------  --------  ---------------
-    node1  10.10.1.128:5672   reachable  6             3.13.x    rabbit@node1
-    node2  10.10.1.129:5672   reachable  4             3.13.x    rabbit@node1
-    node3  10.10.1.130:5672   reachable  4             3.13.x    rabbit@node1
+    mgmtnode1  10.10.1.128:5672   reachable  6             3.13.x    rabbit@mgmtnode1
+    mgmtnode2  10.10.1.129:5672   reachable  4             3.13.x    rabbit@mgmtnode1
+    mgmtnode3  10.10.1.130:5672   reachable  4             3.13.x    rabbit@mgmtnode1
 
 [2] Work queue: publish through every node, consume through one
     seq  published via  confirmed  consumed via  result
     ---  -------------  ---------  ------------  ---------------
-    1    node1          yes        node3         PASS: delivered
-    2    node2          yes        node3         PASS: delivered
-    3    node3          yes        node3         PASS: delivered
+    1    mgmtnode1          yes        mgmtnode3         PASS: delivered
+    2    mgmtnode2          yes        mgmtnode3         PASS: delivered
+    3    mgmtnode3          yes        mgmtnode3         PASS: delivered
     ...
 
 [3] Competing consumers: one per node, same queue
     consumer node  processed  share  result
     -------------  ---------  -----  ----------------------------------------
-    node1          4          33%    PASS: consuming
-    node2          4          33%    PASS: consuming
-    node3          4          33%    PASS: consuming
+    mgmtnode1          4          33%    PASS: consuming
+    mgmtnode2          4          33%    PASS: consuming
+    mgmtnode3          4          33%    PASS: consuming
     TOTAL          12/12      -      PASS: each message handled exactly once
 
 [4] Publish/subscribe: fanout exchange, one queue per node
     node   queue      published via  received  result
     -----  ---------  -------------  --------  -------------------
-    node1  events.n1  node1          yes       PASS: copy received
-    node2  events.n2  node1          yes       PASS: copy received
-    node3  events.n3  node1          yes       PASS: copy received
+    mgmtnode1  events.n1  mgmtnode1          yes       PASS: copy received
+    mgmtnode2  events.n2  mgmtnode1          yes       PASS: copy received
+    mgmtnode3  events.n3  mgmtnode1          yes       PASS: copy received
 
 [5] Redelivery after a consumer dies without ack
     step                    node   redelivered  result
     ----------------------  -----  -----------  ----------------------------------
-    1. publish              node1  -            PASS: confirmed by broker
-    2. consumer A takes it  node1  no           PASS: delivered, NOT acknowledged
-    3. consumer B takes it  node2  yes          PASS: broker redelivered it
-    4. after ack            node2  -            PASS: queue empty
+    1. publish              mgmtnode1  -            PASS: confirmed by broker
+    2. consumer A takes it  mgmtnode1  no           PASS: delivered, NOT acknowledged
+    3. consumer B takes it  mgmtnode2  yes          PASS: broker redelivered it
+    4. after ack            mgmtnode2  -            PASS: queue empty
 
 [6] Summary & Result
     PASS: RabbitMQ queues verified across cluster nodes.
@@ -9236,7 +9236,7 @@ tls mode   : OFF (plain TCP)
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error.
 
-### B. Run one stage (on **node1**)
+### B. Run one stage (on **mgmtnode1**)
 
 ```bash
 python3 scripts/rabbitmq_queue_demo.py status
@@ -9249,10 +9249,10 @@ python3 scripts/rabbitmq_queue_demo.py run --queue-type quorum # replicated demo
 
 In the competing-consumers stage a fast consumer may take more than its third; with `prefetch_count=1` the work is shared by speed, not strictly round-robin. A consumer with `0` messages is not an error as long as the TOTAL line passes.
 
-### C. Look at the queues while it runs (on **node1**; `rabbitmqctl` talks to the local broker, so it works only on node1–node3)
+### C. Look at the queues while it runs (on **mgmtnode1**; `rabbitmqctl` talks to the local broker, so it works only on mgmtnode1–mgmtnode3)
 
 ```bash
-# On node1
+# On mgmtnode1
 python3 scripts/rabbitmq_queue_demo.py run --keep      # prints the run id
 sudo rabbitmqctl list_queues name type messages consumers | grep flowfirst_demo
 sudo rabbitmqctl list_exchanges name type | grep flowfirst_demo
@@ -9262,17 +9262,17 @@ python3 scripts/rabbitmq_queue_demo.py cleanup --run-id <run id>
 
 ### D. Prove it works with a node down
 
-A RabbitMQ cluster keeps serving the nodes that are up (with `pause_minority`, as long as a majority of 2 of 3 is up). Stop the broker on node3 (Scenario 13) and run the demo against the remaining nodes. This needs two terminals: **node3** (the node you stop) and **node1** (where the demo runs).
+A RabbitMQ cluster keeps serving the nodes that are up (with `pause_minority`, as long as a majority of 2 of 3 is up). Stop the broker on mgmtnode3 (Scenario 13) and run the demo against the remaining nodes. This needs two terminals: **mgmtnode3** (the node you stop) and **mgmtnode1** (where the demo runs).
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo systemctl stop rabbitmq-server
 
-# On node1
-python3 scripts/rabbitmq_queue_demo.py run --nodes node1,node2
-python3 scripts/rabbitmq_queue_demo.py status                # node3 shows "unreachable (...)", exit code 1
+# On mgmtnode1
+python3 scripts/rabbitmq_queue_demo.py run --nodes mgmtnode1,mgmtnode2
+python3 scripts/rabbitmq_queue_demo.py status                # mgmtnode3 shows "unreachable (...)", exit code 1
 
-# On node3
+# On mgmtnode3
 sudo systemctl start rabbitmq-server
 ```
 
@@ -9324,9 +9324,9 @@ Rules that apply in this project (see `AGENTS.md`): one connection per thread or
 
 > **Goal:** show, with a small piece of code you can read, how the greenthread helpers in `src/gt/gt.py` are used, first on one machine and then across the cluster nodes. The script is `scripts/greenthread_demo.py`. The pipeline processes (P1–P5) use exactly these building blocks (Scenarios 39–43 observe them in a running cluster); this scenario lets you see them in isolation, without the REST API, HAProxy or a pipeline process.
 >
-> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/greenthread_demo.py ...` command there.** The three *local* stages need no cluster at all and also run on a workstation. The only step that runs elsewhere is the stop/start of RabbitMQ on **node3** in C.
+> **Short answer: log in to mgmtnode1 as `flowadmin` and run every `python3 scripts/greenthread_demo.py ...` command there.** The three *local* stages need no cluster at all and also run on a workstation. The only step that runs elsewhere is the stop/start of RabbitMQ on **mgmtnode3** in C.
 >
-> **Runs on:** the three *local* stages run anywhere the `.venv` is installed (a workstation is fine, no cluster needed). The two *cluster* stages run on node1, node2, node3 (as `flowadmin` with the `.venv` active) or node4 / a workstation as a client (needs TCP to `NODE1_IP`..`NODE3_IP`: RabbitMQ 5672 (5671 with TLS), ZooKeeper 2181 (2281 with TLS), MariaDB 3306, and the same `.env`).
+> **Runs on:** the three *local* stages run anywhere the `.venv` is installed (a workstation is fine, no cluster needed). The two *cluster* stages run on mgmtnode1, mgmtnode2, mgmtnode3 (as `flowadmin` with the `.venv` active) or remotenode1 / a workstation as a client (needs TCP to `NODE1_IP`..`NODE3_IP`: RabbitMQ 5672 (5671 with TLS), ZooKeeper 2181 (2281 with TLS), MariaDB 3306, and the same `.env`).
 
 ### The idea in five lines
 
@@ -9343,8 +9343,8 @@ Rules that apply in this project (see `AGENTS.md`): one connection per thread or
 | 1 `interleave` | **Cooperative scheduling** (local) | Three greenthreads each record three steps. With `gt.sleep(0)` after every step they take turns (`A1 B1 C1 A2 …`); without it the first runs to the end before the next starts (`A1 A2 A3 B1 …`). | `run_interleave()`, `stage_interleave()` |
 | 2 `concurrency` | **Many waits on one thread** (local) | `--tasks` greenthreads each call the standard `time.sleep(--delay)`. They finish in about *one* delay, not *tasks × delay*, while a `gt.periodic()` heartbeat keeps ticking. Defaults: 20 tasks × 1 s. | `stage_concurrency()` |
 | 3 `restart` | **Crash handling** (local) | A worker that raises on its first run: with `restart_on_error=False` it stays down (1 run), with `True` `gt` re-spawns it after 2 s (2 runs). | `stage_restart()` |
-| 4 `probe` | **Greenthreads across the nodes** | One greenthread per *(node, service)* opens a TCP connection to RabbitMQ, ZooKeeper and MariaDB on node1–node3 (9 probes at once in an `eventlet.GreenPool`), then the same probes one after the other for comparison. | `stage_probe()`, `probe_tcp()` |
-| 5 `consume` | **Consumers and publishers across the nodes** | Per RabbitMQ node: one *consumer* greenthread and one *publisher* greenthread, all in this one OS thread, each with its **own** connection. Publishers use confirms and `mandatory=True` and together publish `--count` messages (default 30) through node1, node2 and node3; consumers (`prefetch_count=1`, ack after the work) share them. | `stage_consume()` |
+| 4 `probe` | **Greenthreads across the nodes** | One greenthread per *(node, service)* opens a TCP connection to RabbitMQ, ZooKeeper and MariaDB on mgmtnode1–mgmtnode3 (9 probes at once in an `eventlet.GreenPool`), then the same probes one after the other for comparison. | `stage_probe()`, `probe_tcp()` |
+| 5 `consume` | **Consumers and publishers across the nodes** | Per RabbitMQ node: one *consumer* greenthread and one *publisher* greenthread, all in this one OS thread, each with its **own** connection. Publishers use confirms and `mandatory=True` and together publish `--count` messages (default 30) through mgmtnode1, mgmtnode2 and mgmtnode3; consumers (`prefetch_count=1`, ack after the work) share them. | `stage_consume()` |
 
 Safety properties of the demo:
 
@@ -9358,10 +9358,10 @@ Safety properties of the demo:
 - Local stages: `pip install --require-hashes -r requirements.txt` in the `.venv` (eventlet is a pipeline dependency already).
 - Cluster stages: RabbitMQ cluster running on nodes 1–3 (Scenario 13), `.env` with `NODE1_IP`..`NODE3_IP`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`.
 
-### A. Run the local stages (on **node1**, or on a workstation: no cluster needed)
+### A. Run the local stages (on **mgmtnode1**, or on a workstation: no cluster needed)
 
 ```bash
-# On node1
+# On mgmtnode1
 cd /opt/flowfirst && source .venv/bin/activate      # or the .venv of your workstation checkout
 python3 scripts/greenthread_demo.py local
 python3 scripts/greenthread_demo.py concurrency --tasks 200 --delay 0.5
@@ -9371,7 +9371,7 @@ Output (captured from a real run of `local --tasks 50 --delay 0.5` on a workstat
 
 ```text
 == FlowFirst Greenthread Demo (local stages) ==
-client     : node1
+client     : mgmtnode1
 eventlet   : 0.40.4, monkey-patched: yes
 
 [1] Cooperative scheduling: greenthreads switch only where they yield
@@ -9402,14 +9402,14 @@ eventlet   : 0.40.4, monkey-patched: yes
 
 `--tasks` accepts 1–900 (the `gt` pool holds `GT_POOL_SIZE`=1000 greenthreads by default; the heartbeat needs a slot too).
 
-### B. Run the cluster stages (on **node1**; they connect to all three nodes)
+### B. Run the cluster stages (on **mgmtnode1**; they connect to all three nodes)
 
 ```bash
-# On node1
+# On mgmtnode1
 python3 scripts/greenthread_demo.py probe
 python3 scripts/greenthread_demo.py consume --count 60
 python3 scripts/greenthread_demo.py                       # everything: local + cluster
-python3 scripts/greenthread_demo.py run --nodes node1,node2 --queue-type quorum
+python3 scripts/greenthread_demo.py run --nodes mgmtnode1,mgmtnode2 --queue-type quorum
 ```
 
 Expected output shape for the cluster stages (illustrative: the layout is real, the numbers will differ; this sample was composed from the code, not captured from a cluster):
@@ -9418,39 +9418,39 @@ Expected output shape for the cluster stages (illustrative: the layout is real, 
 [4] Across the nodes: probe RabbitMQ, ZooKeeper and MariaDB on every node at once
     node   service    endpoint           status     connect (ms)  result
     -----  ---------  -----------------  ---------  ------------  ------------------------------------------------------
-    node1  rabbitmq   10.10.1.128:5672   reachable  2             PASS
-    node1  zookeeper  10.10.1.128:2181   reachable  1             PASS
-    node1  mariadb    10.10.1.128:3306   reachable  1             PASS
+    mgmtnode1  rabbitmq   10.10.1.128:5672   reachable  2             PASS
+    mgmtnode1  zookeeper  10.10.1.128:2181   reachable  1             PASS
+    mgmtnode1  mariadb    10.10.1.128:3306   reachable  1             PASS
     ...
     TOTAL  all        9 probes           9 reachable  -             PASS: 9 greenthreads took 0.01 s; one by one 0.02 s
 
 [5] Across the nodes: a consumer and a publisher greenthread per RabbitMQ node
     node   published  consumed  share  result
     -----  ---------  --------  -----  -------------------------------------------------------------------
-    node1  20         21        35%    PASS: consuming
-    node2  20         19        32%    PASS: consuming
-    node3  20         20        33%    PASS: consuming
+    mgmtnode1  20         21        35%    PASS: consuming
+    mgmtnode2  20         19        32%    PASS: consuming
+    mgmtnode3  20         20        33%    PASS: consuming
     TOTAL  60         60/60     -      PASS: each message handled exactly once in 1.1 s (one consumer would need about 3.00 s)
 ```
 
 How to read it:
 
-- **`probe`:** on a healthy LAN both timings are tiny because a connect takes about a millisecond, so the gap is small. The point is the *shape*: the probe time of the greenthread version is about that of the **slowest** probe, the one-by-one version is the **sum**. Make it visible by stopping a service (e.g. `sudo systemctl stop mariadb` on node3): the three-greenthread run waits for one 2 s timeout, the sequential run for the same one on top of the others, and `node3 mariadb` shows `unreachable (...)` / `down`. The stage passes while a majority (2 of 3) of every service is reachable.
+- **`probe`:** on a healthy LAN both timings are tiny because a connect takes about a millisecond, so the gap is small. The point is the *shape*: the probe time of the greenthread version is about that of the **slowest** probe, the one-by-one version is the **sum**. Make it visible by stopping a service (e.g. `sudo systemctl stop mariadb` on mgmtnode3): the three-greenthread run waits for one 2 s timeout, the sequential run for the same one on top of the others, and `mgmtnode3 mariadb` shows `unreachable (...)` / `down`. The stage passes while a majority (2 of 3) of every service is reachable.
 - **`consume`:** the *published* column shows which node each message entered through (each publisher greenthread sends every third message); the *consumed* column shows which node's consumer handled it. The share depends on speed, not strict round-robin (`prefetch_count=1`), and a consumer with 0 messages is not an error as long as the TOTAL line passes. The simulated work is `gt.sleep(0.05)` per message, so three consumers handle 60 messages in about a third of the time one would need, all inside a single process.
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error (e.g. `--tasks 0`).
 
-### C. Prove it with a node down (two terminals: **node3** and **node1**)
+### C. Prove it with a node down (two terminals: **mgmtnode3** and **mgmtnode1**)
 
 ```bash
-# On node3 (Scenario 13)
+# On mgmtnode3 (Scenario 13)
 sudo systemctl stop rabbitmq-server
 
-# On node1
-python3 scripts/greenthread_demo.py probe                              # node3 rabbitmq: down; stage still PASSES (2 of 3 up)
-python3 scripts/greenthread_demo.py consume --nodes node1,node2        # runs against the remaining brokers
+# On mgmtnode1
+python3 scripts/greenthread_demo.py probe                              # mgmtnode3 rabbitmq: down; stage still PASSES (2 of 3 up)
+python3 scripts/greenthread_demo.py consume --nodes mgmtnode1,mgmtnode2        # runs against the remaining brokers
 
-# On node3
+# On mgmtnode3
 sudo systemctl start rabbitmq-server
 ```
 
@@ -9511,11 +9511,11 @@ Rules that apply in this project (see `AGENTS.md`): `gt.monkey_patch()` first; o
 
 ## Scenario 73: Swift Object Storage Demo Across Nodes
 
-> **Goal:** show, with a small piece of code you can read, how to use OpenStack Swift object storage from several cluster nodes. The script is `scripts/swift_object_demo.py`. It opens one `python-swiftclient` connection **per Swift proxy** (node1, node2, node3; no REST API, no pipeline process), so you see exactly which node handles each write, read, listing and delete. It also calls the FlowFirst helpers in `src/swift/swift_storage.py` through the load-balanced VIP, exactly as DB Updater (Process 4) does. For the pipeline path see Scenarios 2, 44 and 50; for the cluster itself see Scenarios 52 to 58.
+> **Goal:** show, with a small piece of code you can read, how to use OpenStack Swift object storage from several cluster nodes. The script is `scripts/swift_object_demo.py`. It opens one `python-swiftclient` connection **per Swift proxy** (mgmtnode1, mgmtnode2, mgmtnode3; no REST API, no pipeline process), so you see exactly which node handles each write, read, listing and delete. It also calls the FlowFirst helpers in `src/swift/swift_storage.py` through the load-balanced VIP, exactly as DB Updater (Process 4) does. For the pipeline path see Scenarios 2, 44 and 50; for the cluster itself see Scenarios 52 to 58.
 >
-> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/swift_object_demo.py ...` command there.** The only step that runs elsewhere is the stop/start of the Swift proxy on **node3** in D.
+> **Short answer: log in to mgmtnode1 as `flowadmin` and run every `python3 scripts/swift_object_demo.py ...` command there.** The only step that runs elsewhere is the stop/start of the Swift proxy on **mgmtnode3** in D.
 >
-> **Runs on:** node1, node2, node3 (as `flowadmin` with the `.venv` active), or node4 / a workstation as a client (needs TCP 8888 to `NODE1_IP`..`NODE3_IP` for the proxies, TCP 8090 to the VIP for the `helpers` stage, and the same `.env`).
+> **Runs on:** mgmtnode1, mgmtnode2, mgmtnode3 (as `flowadmin` with the `.venv` active), or remotenode1 / a workstation as a client (needs TCP 8888 to `NODE1_IP`..`NODE3_IP` for the proxies, TCP 8090 to the VIP for the `helpers` stage, and the same `.env`).
 
 ### What it does
 
@@ -9524,7 +9524,7 @@ Rules that apply in this project (see `AGENTS.md`): `gt.monkey_patch()` first; o
 | 1 `status` | Connectivity & auth | Logs in (tempauth) to each proxy on its own and prints the container, object and byte totals of the account that proxy reports. | `stage_status()` |
 | 2 `write` | **Write anywhere, read everywhere** | One object is written **through each node** (the returned ETag is compared with the MD5 of the content), then every object is read back **through every node** (3 x 3 = 9 reads). Content and ETag must match. | `stage_write_read()`, `read_check()` |
 | 3 `list` | **Container listing** | An object is written through each node; the listing of the container (`prefix=list/`) obtained from **every** node must contain all three. | `stage_listing()` |
-| 4 `lifecycle` | **Object lifecycle** | `PUT` via node1, `POST` metadata (`x-object-meta-stage`) via node2, `HEAD` via node3 shows it, `DELETE` via node1, then `GET` via node2 and node3 answers `404`. | `stage_lifecycle()` |
+| 4 `lifecycle` | **Object lifecycle** | `PUT` via mgmtnode1, `POST` metadata (`x-object-meta-stage`) via mgmtnode2, `HEAD` via mgmtnode3 shows it, `DELETE` via mgmtnode1, then `GET` via mgmtnode2 and mgmtnode3 answers `404`. | `stage_lifecycle()` |
 | 5 `helpers` | **The FlowFirst helpers** | `put_message_object()`, `get_message_object()`, `list_message_objects()` and `get_swift_status()` against the VIP (`SWIFT_AUTH_URL`), with the same JSON layout and `x-object-meta-*` headers the pipeline writes. Skipped when `SWIFT_ENABLED=false`. | `stage_helpers()` |
 
 Why every read is polled (`wait_for()`): Swift is **eventually consistent**. With three replicas a write succeeds once 2 of 3 are stored, and a listing is updated by the container server a moment later, so a read through another node may be a few milliseconds behind. The demo retries until `--timeout` (default 10 s) and prints how long it took. A failure therefore means "still wrong after 10 s", not "wrong once".
@@ -9534,7 +9534,7 @@ Safety properties of the demo:
 - **Own container.** Everything goes into `flowfirst_demo_<run id>`. The pipeline container (`SWIFT_CONTAINER`, default `flowfirst_messages`) is never read, written or listed, and the stage code never uses its name.
 - **Self-cleaning.** Every object and then the container are deleted at the end of a run (`--keep` retains them). Unlike RabbitMQ queues, a Swift container has **no expiry**, so a run killed halfway leaves a small container behind; remove it with `cleanup --run-id <id>` (the id is printed at the start of every run).
 - **TLS and secrets.** `TLS_SWIFT_ENABLED=true` is honoured through `src.tls.tls.swift_kwargs()` and fails closed. `SWIFT_KEY` is never printed. Errors print only the exception type or the HTTP status (`HTTP 503`), never the URL, the host or the library's message.
-- **Connection per node.** tempauth builds the storage URL from the address the login arrived on, so a connection that logged in at `http://<node>:8888/auth/v1.0` keeps talking to that node's proxy. That is what makes "written via node1, read via node3" meaningful. The VIP address (`--nodes vip`) is load-balanced and therefore cannot show it.
+- **Connection per node.** tempauth builds the storage URL from the address the login arrived on, so a connection that logged in at `http://<node>:8888/auth/v1.0` keeps talking to that node's proxy. That is what makes "written via mgmtnode1, read via mgmtnode3" meaningful. The VIP address (`--nodes vip`) is load-balanced and therefore cannot show it.
 
 ### Prerequisites
 
@@ -9542,10 +9542,10 @@ Safety properties of the demo:
 - `.env` has `NODE1_IP`..`NODE3_IP`, `SWIFT_USER`, `SWIFT_KEY` and `SWIFT_AUTH_URL` (and optionally `TLS_SWIFT_ENABLED`, `SWIFT_PROXY_PORT` if you changed it from 8888).
 - The tempauth user from `.env` is the account admin (`.admin`), which is what allows creating containers.
 
-### A. Run the full demo (on **node1**)
+### A. Run the full demo (on **mgmtnode1**)
 
 ```bash
-# On node1
+# On mgmtnode1
 cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/swift_object_demo.py
 ```
@@ -9555,43 +9555,43 @@ Expected output shape (illustrative: the layout is real, the numbers will differ
 ```text
 == FlowFirst Swift Object Storage Demo ==
 run id     : 3f9c1a7e
-proxies    : node1 (10.10.1.128:8888), node2 (10.10.1.129:8888), node3 (10.10.1.130:8888)
-client     : node1
+proxies    : mgmtnode1 (10.10.1.128:8888), mgmtnode2 (10.10.1.129:8888), mgmtnode3 (10.10.1.130:8888)
+client     : mgmtnode1
 container  : flowfirst_demo_3f9c1a7e  (the pipeline container flowfirst_messages is not touched)
 tls mode   : OFF (plain HTTP)
 
 [1] Proxy nodes reachable one by one (tempauth login)
     node   endpoint           status     login (ms)  containers  objects  bytes
     -----  -----------------  ---------  ----------  ----------  -------  -------
-    node1  10.10.1.128:8888   reachable  14          1           1204     5321877
-    node2  10.10.1.129:8888   reachable  11          1           1204     5321877
-    node3  10.10.1.130:8888   reachable  12          1           1204     5321877
+    mgmtnode1  10.10.1.128:8888   reachable  14          1           1204     5321877
+    mgmtnode2  10.10.1.129:8888   reachable  11          1           1204     5321877
+    mgmtnode3  10.10.1.130:8888   reachable  12          1           1204     5321877
 
 [2] Write through every node, read back through every node
     written via  read via  read (ms)  result
     -----------  --------  ---------  -------------------------
-    node1        node1     9          PASS: same bytes and ETag
-    node1        node2     8          PASS: same bytes and ETag
-    node1        node3     8          PASS: same bytes and ETag
-    node2        node1     7          PASS: same bytes and ETag
+    mgmtnode1        mgmtnode1     9          PASS: same bytes and ETag
+    mgmtnode1        mgmtnode2     8          PASS: same bytes and ETag
+    mgmtnode1        mgmtnode3     8          PASS: same bytes and ETag
+    mgmtnode2        mgmtnode1     7          PASS: same bytes and ETag
     ...
 
 [3] Container listing as seen by every node
     listed via  objects  list (ms)  result
     ----------  -------  ---------  ------------------------
-    node1       3/3      12         PASS: all objects listed
-    node2       3/3      11         PASS: all objects listed
-    node3       3/3      11         PASS: all objects listed
+    mgmtnode1       3/3      12         PASS: all objects listed
+    mgmtnode2       3/3      11         PASS: all objects listed
+    mgmtnode3       3/3      11         PASS: all objects listed
 
 [4] Object lifecycle, each step through a different node
     step                 node   result
     -------------------  -----  ----------------------------------
-    1. PUT object        node1  PASS: stored
-    2. POST metadata     node2  PASS: metadata set
-    3. HEAD metadata     node3  PASS: x-object-meta-stage=reviewed
-    4. DELETE object     node1  PASS: deleted
-    5. GET after delete  node2  PASS: 404 Not Found
-    6. GET after delete  node3  PASS: 404 Not Found
+    1. PUT object        mgmtnode1  PASS: stored
+    2. POST metadata     mgmtnode2  PASS: metadata set
+    3. HEAD metadata     mgmtnode3  PASS: x-object-meta-stage=reviewed
+    4. DELETE object     mgmtnode1  PASS: deleted
+    5. GET after delete  mgmtnode2  PASS: 404 Not Found
+    6. GET after delete  mgmtnode3  PASS: 404 Not Found
 
 [5] FlowFirst helpers (swift_storage.py) through the VIP
     step  call                    result
@@ -9609,31 +9609,31 @@ tls mode   : OFF (plain HTTP)
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error (bad `--nodes`, missing `SWIFT_USER`/`SWIFT_KEY`). The account totals in stage 1 are the same on every node because the account database is replicated; small differences right after a write are normal until the replicators and updaters catch up.
 
-### B. Run one stage (on **node1**)
+### B. Run one stage (on **mgmtnode1**)
 
 ```bash
-# On node1
+# On mgmtnode1
 python3 scripts/swift_object_demo.py status
 python3 scripts/swift_object_demo.py write
 python3 scripts/swift_object_demo.py list
 python3 scripts/swift_object_demo.py lifecycle
 python3 scripts/swift_object_demo.py helpers
-python3 scripts/swift_object_demo.py status --nodes node1,node2,vip   # include the load-balanced address
+python3 scripts/swift_object_demo.py status --nodes mgmtnode1,mgmtnode2,vip   # include the load-balanced address
 ```
 
-`--nodes` accepts `node1`, `node2`, `node3`, `vip` (the address in `SWIFT_AUTH_URL`), `host[:port]`, or a full auth URL. The scheme (`http` or `https`) follows `TLS_SWIFT_ENABLED`.
+`--nodes` accepts `mgmtnode1`, `mgmtnode2`, `mgmtnode3`, `vip` (the address in `SWIFT_AUTH_URL`), `host[:port]`, or a full auth URL. The scheme (`http` or `https`) follows `TLS_SWIFT_ENABLED`.
 
-### C. Look at the objects while it runs (on **node1**; `swift-get-nodes` works on node1–node3)
+### C. Look at the objects while it runs (on **mgmtnode1**; `swift-get-nodes` works on mgmtnode1–mgmtnode3)
 
 ```bash
-# On node1
+# On mgmtnode1
 python3 scripts/swift_object_demo.py write --keep          # prints the run id
 set -a && source /opt/flowfirst/.env && set +a
-# Log in at node1 and list the demo container with plain curl (what python-swiftclient does underneath):
+# Log in at mgmtnode1 and list the demo container with plain curl (what python-swiftclient does underneath):
 TOKEN_HDRS=$(curl -s -D - -o /dev/null -H "X-Auth-User: ${SWIFT_USER}" -H "X-Auth-Key: ${SWIFT_KEY}" "http://${NODE1_IP}:8888/auth/v1.0")
-echo "${TOKEN_HDRS}" | grep -i '^x-storage-url'            # the storage URL points at node1
-# Where do the replicas of one object live? (run on any of node1-node3, Scenario 52)
-sudo swift-get-nodes /etc/swift/object.ring.gz AUTH_<account> flowfirst_demo_<run id> write/written-by-node1.json
+echo "${TOKEN_HDRS}" | grep -i '^x-storage-url'            # the storage URL points at mgmtnode1
+# Where do the replicas of one object live? (run on any of mgmtnode1-mgmtnode3, Scenario 52)
+sudo swift-get-nodes /etc/swift/object.ring.gz AUTH_<account> flowfirst_demo_<run id> write/written-by-mgmtnode1.json
 python3 scripts/swift_object_demo.py cleanup --run-id <run id>
 ```
 
@@ -9641,23 +9641,23 @@ python3 scripts/swift_object_demo.py cleanup --run-id <run id>
 
 ### D. Prove it works with a node down
 
-Swift needs 2 of 3 replicas to accept a write, so the demo keeps working against the two remaining proxies (Scenario 53 explains the catch-up in detail). Stop the Swift proxy on node3 and run the demo against the other two nodes:
+Swift needs 2 of 3 replicas to accept a write, so the demo keeps working against the two remaining proxies (Scenario 53 explains the catch-up in detail). Stop the Swift proxy on mgmtnode3 and run the demo against the other two nodes:
 
-This needs two terminals: **node3** (the node you stop) and **node1** (where the demo runs).
+This needs two terminals: **mgmtnode3** (the node you stop) and **mgmtnode1** (where the demo runs).
 
 ```bash
-# On node3
+# On mgmtnode3
 sudo systemctl stop openstack-swift-proxy
 
-# On node1
-python3 scripts/swift_object_demo.py run --nodes node1,node2   # PASS: writes still succeed on 2 of 3 replicas
-python3 scripts/swift_object_demo.py status                    # node3 shows "unreachable (...)", exit code 0 (2 of 3 up)
+# On mgmtnode1
+python3 scripts/swift_object_demo.py run --nodes mgmtnode1,mgmtnode2   # PASS: writes still succeed on 2 of 3 replicas
+python3 scripts/swift_object_demo.py status                    # mgmtnode3 shows "unreachable (...)", exit code 0 (2 of 3 up)
 
-# On node3
+# On mgmtnode3
 sudo systemctl start openstack-swift-proxy
 ```
 
-`status` reports success while a majority of the listed proxies answer, so one node down is still exit code 0 and all three down is exit code 1. Stopping only the *proxy* leaves the account, container and object servers on node3 running, so node3 still holds replicas; to stop replica storage as well, stop all four `openstack-swift-*` units (Scenario 53). If a `write` read-back fails for a few seconds right after a node returns, that is the replicator catching up; the demo waits for it up to `--timeout`.
+`status` reports success while a majority of the listed proxies answer, so one node down is still exit code 0 and all three down is exit code 1. Stopping only the *proxy* leaves the account, container and object servers on mgmtnode3 running, so mgmtnode3 still holds replicas; to stop replica storage as well, stop all four `openstack-swift-*` units (Scenario 53). If a `write` read-back fails for a few seconds right after a node returns, that is the replicator catching up; the demo waits for it up to `--timeout`.
 
 ### How to use these patterns in your own code
 
@@ -9701,9 +9701,9 @@ Rules that apply in this project (see `AGENTS.md`): build the connection only th
 
 > **Goal:** show, with a small piece of code you can read, that HAProxy is in front of the cluster and what it does there. The script is `scripts/haproxy_lb_demo.py`. It talks to the Virtual IP (VIP) like a real client, talks to every node directly, and reads HAProxy's own counters from the stats page, then compares the three: which node answered, how the requests were shared, which servers HAProxy thinks are up, and what changes when a node is taken out. It covers all four load-balanced services (REST API, MariaDB, RabbitMQ, Swift). It is a demonstration, not a load test (Scenario 61 is). For the HAProxy installation see Phase 3; for the stats page see Scenario 9; for the VIP moving between nodes see Scenarios 8 and 15; for the log lines see Scenario 48.
 >
-> **Short answer: log in to node1 as `flowadmin` and run every `python3 scripts/haproxy_lb_demo.py ...` command there.** The demo only talks to the VIP and to the nodes over the network, so it does not matter which node the VIP is currently on. In D, terminal 1 and terminal 2 are both on node1 (terminal 2 can also be node2 or node3, because `pcs` acts cluster-wide).
+> **Short answer: log in to mgmtnode1 as `flowadmin` and run every `python3 scripts/haproxy_lb_demo.py ...` command there.** The demo only talks to the VIP and to the nodes over the network, so it does not matter which node the VIP is currently on. In D, terminal 1 and terminal 2 are both on mgmtnode1 (terminal 2 can also be mgmtnode2 or mgmtnode3, because `pcs` acts cluster-wide).
 >
-> **Runs on:** node1, node2, node3, node4 or a workstation that can reach the VIP (REST `8080`, stats `9000`, MariaDB `3307`, RabbitMQ `5673`, Swift `8090`). The per-node checks in `status` and `api` also need the node addresses (API Gateway `8082`, MariaDB `3306`, RabbitMQ `5672`, Swift `8888`), and `.env` is the same as on the cluster nodes.
+> **Runs on:** mgmtnode1, mgmtnode2, mgmtnode3, remotenode1 or a workstation that can reach the VIP (REST `8080`, stats `9000`, MariaDB `3307`, RabbitMQ `5673`, Swift `8090`). The per-node checks in `status` and `api` also need the node addresses (API Gateway `8082`, MariaDB `3306`, RabbitMQ `5672`, Swift `8888`), and `.env` is the same as on the cluster nodes.
 
 ### What HAProxy does here (so the output makes sense)
 
@@ -9742,13 +9742,13 @@ Safety properties of the demo:
 
 - HAProxy running on the VIP holder under Pacemaker (Phase 5; `sudo pcs status | grep -A5 vip-haproxy-group`). Never start `haproxy.service` by hand.
 - `.env` has `FLOWFIRST_VIP`, `NODE1_IP`..`NODE3_IP`, `MARIADB_USER`/`MARIADB_PASSWORD`, `RABBITMQ_USER`/`RABBITMQ_PASSWORD`, and for the counters `HAPROXY_STATS_USER`/`HAPROXY_STATS_PASS`.
-- The server names in HAProxy are `NODE1_NAME`..`NODE3_NAME` (default `node1`..`node3`). The demo matches HAProxy's server lines to nodes by those names, and they must equal `NODE_NAME` on each node, which is what API Gateway (Process 1) reports as `"node"`.
+- The server names in HAProxy are `NODE1_NAME`..`NODE3_NAME` (default `mgmtnode1`..`mgmtnode3`). The demo matches HAProxy's server lines to nodes by those names, and they must equal `NODE_NAME` on each node, which is what API Gateway (Process 1) reports as `"node"`.
 - Python 3 with the `.venv` active (`cd /opt/flowfirst && source .venv/bin/activate`).
 
-### A. Run the full demo (on **node1**)
+### A. Run the full demo (on **mgmtnode1**)
 
 ```bash
-# On node1
+# On mgmtnode1
 cd /opt/flowfirst && source .venv/bin/activate
 python3 scripts/haproxy_lb_demo.py
 python3 scripts/haproxy_lb_demo.py run --requests 30     # a longer run gives a clearer distribution
@@ -9759,14 +9759,14 @@ Expected output shape (illustrative: the layout is real, the numbers will differ
 ```text
 == FlowFirst HAProxy Load-Balancing Demo ==
 VIP        : 10.10.1.200   (REST 8080, MariaDB 3307, RabbitMQ 5673, Swift 8090, stats 9000)
-nodes      : node1 (10.10.1.128), node2 (10.10.1.129), node3 (10.10.1.130)
-client     : node1
+nodes      : mgmtnode1 (10.10.1.128), mgmtnode2 (10.10.1.129), mgmtnode3 (10.10.1.130)
+client     : mgmtnode1
 requests   : 12 per stage
 tls mode   : API off, MariaDB off, RabbitMQ off, Swift off
 stats page : credentials set
 
 [1] VIP ports and node ports reachable
-    service        VIP endpoint      via VIP      direct node1  direct node2  direct node3  result
+    service        VIP endpoint      via VIP      direct mgmtnode1  direct mgmtnode2  direct mgmtnode3  result
     -------------  ----------------  -----------  ------------  ------------  ------------  ---------------------
     REST API       10.10.1.200:8080  open (2 ms)  open :8082    open :8082    open :8082    PASS: HAProxy listens
     MariaDB        10.10.1.200:3307  open (1 ms)  open :3306    open :3306    open :3306    PASS: HAProxy listens
@@ -9777,26 +9777,26 @@ stats page : credentials set
 [2] HAProxy's own view of every backend server
     backend              server  status  last check  total sessions  state for (s)  result
     -------------------  ------  ------  ----------  --------------  -------------  -----------------
-    flowfirst_api_back   node1   UP      L7OK        1480            86400          PASS: in rotation
-    flowfirst_api_back   node2   UP      L7OK        1479            86400          PASS: in rotation
-    flowfirst_api_back   node3   UP      L7OK        1481            86400          PASS: in rotation
-    mariadb_galera_back  node1   UP      L4OK        212             86400          PASS: in rotation
+    flowfirst_api_back   mgmtnode1   UP      L7OK        1480            86400          PASS: in rotation
+    flowfirst_api_back   mgmtnode2   UP      L7OK        1479            86400          PASS: in rotation
+    flowfirst_api_back   mgmtnode3   UP      L7OK        1481            86400          PASS: in rotation
+    mariadb_galera_back  mgmtnode1   UP      L4OK        212             86400          PASS: in rotation
     ...
 
 [3] REST API: round-robin over the nodes
     node   direct /health  answered via VIP  share  HAProxy new sessions  result
     -----  --------------  ----------------  -----  --------------------  -----------------------------------------
-    node1  200 (3 ms)      4                 33%    4                     PASS: served 4 request(s)
-    node2  200 (3 ms)      4                 33%    4                     PASS: served 4 request(s)
-    node3  200 (4 ms)      4                 33%    4                     PASS: served 4 request(s)
+    mgmtnode1  200 (3 ms)      4                 33%    4                     PASS: served 4 request(s)
+    mgmtnode2  200 (3 ms)      4                 33%    4                     PASS: served 4 request(s)
+    mgmtnode3  200 (4 ms)      4                 33%    4                     PASS: served 4 request(s)
     TOTAL  -               12/12             -      -                     PASS: round-robin, every request answered
 
 [4] MariaDB: connections shared over the Galera nodes
     server  HAProxy status  new sessions     answered (SQL)  result
     ------  --------------  ---------------  --------------  -----------------------------------------
-    node1   UP              4                4               PASS: received 4 session(s)
-    node2   UP              4                4               PASS: received 4 session(s)
-    node3   UP              4                4               PASS: received 4 session(s)
+    mgmtnode1   UP              4                4               PASS: received 4 session(s)
+    mgmtnode2   UP              4                4               PASS: received 4 session(s)
+    mgmtnode3   UP              4                4               PASS: received 4 session(s)
     TOTAL   -               12 (we made 12)  -               PASS: every connection was counted by HAProxy
 
 [5] RabbitMQ: connections shared over the brokers
@@ -9810,28 +9810,28 @@ stats page : credentials set
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error. If the stats password is not set, stage 2 prints `SKIP` and stages 4 to 6 report only that the connections were made (`no HAProxy counters`), because without the counters there is no evidence of the distribution.
 
-### B. Run one stage (on **node1**)
+### B. Run one stage (on **mgmtnode1**)
 
 ```bash
-# On node1
+# On mgmtnode1
 python3 scripts/haproxy_lb_demo.py status
 python3 scripts/haproxy_lb_demo.py backends
 python3 scripts/haproxy_lb_demo.py api --requests 30
 python3 scripts/haproxy_lb_demo.py mariadb --requests 9
 python3 scripts/haproxy_lb_demo.py rabbitmq
 python3 scripts/haproxy_lb_demo.py swift
-python3 scripts/haproxy_lb_demo.py api --nodes node1,node2                 # judge only these nodes (node3 is being repaired)
+python3 scripts/haproxy_lb_demo.py api --nodes mgmtnode1,mgmtnode2                 # judge only these nodes (mgmtnode3 is being repaired)
 python3 scripts/haproxy_lb_demo.py api --vip 10.10.1.129 --api-port 8082    # aim at ONE node instead of HAProxy
 ```
 
 The last line is a useful contrast: with no HAProxy in the path every request lands on one node and the stage fails the balance check, which is the problem the load balancer removes. Every port can be overridden (`--api-port`, `--stats-port`, `--mariadb-port`, `--rabbitmq-port`, `--swift-port`); the defaults come from `.env`.
 
-### C. The same facts by hand (on **node1**; the last command, `socat` on the runtime socket, must run on the VIP holder)
+### C. The same facts by hand (on **mgmtnode1**; the last command, `socat` on the runtime socket, must run on the VIP holder)
 
 ```bash
-# On node1
+# On mgmtnode1
 set -a && source /opt/flowfirst/.env && set +a
-# Which node answers? Six requests through the VIP; "node" names the answering node (expect node1,node2,node3,node1,node2,node3)
+# Which node answers? Six requests through the VIP; "node" names the answering node (expect mgmtnode1,mgmtnode2,mgmtnode3,mgmtnode1,mgmtnode2,mgmtnode3)
 for i in 1 2 3 4 5 6; do curl -s http://${FLOWFIRST_VIP}:8080/health | jq -r .node; done
 # HAProxy's own table: backend, server, status, total sessions (the stats URI is "/", so the CSV is /;csv)
 curl -s -u "${HAPROXY_STATS_USER}:${HAPROXY_STATS_PASS}" "http://${FLOWFIRST_VIP}:9000/;csv" \
@@ -9847,22 +9847,22 @@ echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | cut -d, -f1,2,8,18 
 Use two terminals. Terminal 1 watches the API through the VIP:
 
 ```bash
-# Terminal 1, on node1
+# Terminal 1, on mgmtnode1
 python3 scripts/haproxy_lb_demo.py watch --seconds 90
 ```
 
-Terminal 2 stops API Gateway (Process 1) on node3, as in Scenario 11. `pcs resource ban/clear` acts cluster-wide, so run it on node1 (or node2); you do not log in to node3:
+Terminal 2 stops API Gateway (Process 1) on mgmtnode3, as in Scenario 11. `pcs resource ban/clear` acts cluster-wide, so run it on mgmtnode1 (or mgmtnode2); you do not log in to mgmtnode3:
 
 ```bash
-# Terminal 2, on node1 (or node2)
-sudo pcs resource ban flowfirst-p1-res-clone node3
+# Terminal 2, on mgmtnode1 (or mgmtnode2)
+sudo pcs resource ban flowfirst-p1-res-clone mgmtnode3
 # ...wait about 10 s and watch terminal 1...
 sudo pcs resource clear flowfirst-p1-res-clone
 ```
 
-What you should see in terminal 1: the node column cycles node1, node2, node3. After the ban, requests that HAProxy has not yet written off may get a `502`/`503` or a longer latency for up to about 6 s (2 failed checks of 3 s) before the line `node3=DOWN   <-- HAProxy changed a server state` appears. From then on only node1 and node2 answer. After `clear`, `node3=UP` appears about 6 s after Process 1 listens again (`rise 2`) and node3 returns to the rotation. `option redispatch` and `retries 3` hide most single failures from the client, so a window with no errors at all is also normal. While node3 is out, run `python3 scripts/haproxy_lb_demo.py api`: node3 must show `PASS: out of rotation, got nothing` and node1/node2 about 50% each.
+What you should see in terminal 1: the node column cycles mgmtnode1, mgmtnode2, mgmtnode3. After the ban, requests that HAProxy has not yet written off may get a `502`/`503` or a longer latency for up to about 6 s (2 failed checks of 3 s) before the line `mgmtnode3=DOWN   <-- HAProxy changed a server state` appears. From then on only mgmtnode1 and mgmtnode2 answer. After `clear`, `mgmtnode3=UP` appears about 6 s after Process 1 listens again (`rise 2`) and mgmtnode3 returns to the rotation. `option redispatch` and `retries 3` hide most single failures from the client, so a window with no errors at all is also normal. While mgmtnode3 is out, run `python3 scripts/haproxy_lb_demo.py api`: mgmtnode3 must show `PASS: out of rotation, got nothing` and mgmtnode1/mgmtnode2 about 50% each.
 
-To watch the **VIP** itself move, run `watch` and put the VIP holder into standby (Scenario 8: `sudo pcs node standby node1`, later `unstandby`). Requests fail while the VIP and HAProxy start on another node (seconds), so `watch` exits with code 1 for that run; that is the honest picture of a VIP failover, not a defect. Do not run both tests at once.
+To watch the **VIP** itself move, run `watch` and put the VIP holder into standby (Scenario 8: `sudo pcs node standby mgmtnode1`, later `unstandby`). Requests fail while the VIP and HAProxy start on another node (seconds), so `watch` exits with code 1 for that run; that is the honest picture of a VIP failover, not a defect. Do not run both tests at once.
 
 If `backends` or `api` shows a node `DOWN` that you did not take out, the cause is on that node: `curl -s http://<node-ip>:8082/health` (with TLS, use the client certificate), `journalctl -u flowfirst-process1`, and the `last check` column (`L4CON` = port closed, `L7STS` = non-200 status, `L7TOUT` = no answer within `timeout check`).
 
@@ -9896,11 +9896,11 @@ Rules that apply in this project (see `AGENTS.md`): API Gateway (Process 1) list
 
 ## Scenario 75: Pacemaker Cluster Demo Across Nodes
 
-> **Goal:** show, with a small piece of code you can read, what Pacemaker does for FlowFirst and that it does it on every node. The script is `scripts/pacemaker_cluster_demo.py`. It asks Pacemaker what it believes (`crm_mon`), asks each of node1–node3 what is really true (`systemctl`, `ip addr` over `ssh`), and compares the two: which node is the Designated Controller, whether there is quorum, where the VIP, HAProxy and the four pipeline clones run, and whether the services on each node match. Two optional stages then **cause a real failure on purpose** (standby of the VIP holder, ban of one pipeline instance), time Pacemaker's reaction and put everything back. It is a demonstration, not a fencing or quorum test (Scenarios 16–26 are). For the cluster set-up see Phase 5; for the manual commands see Scenarios 8, 10, 11 and 15; for the log lines see Scenario 49.
+> **Goal:** show, with a small piece of code you can read, what Pacemaker does for FlowFirst and that it does it on every node. The script is `scripts/pacemaker_cluster_demo.py`. It asks Pacemaker what it believes (`crm_mon`), asks each of mgmtnode1–mgmtnode3 what is really true (`systemctl`, `ip addr` over `ssh`), and compares the two: which node is the Designated Controller, whether there is quorum, where the VIP, HAProxy and the four pipeline clones run, and whether the services on each node match. Two optional stages then **cause a real failure on purpose** (standby of the VIP holder, ban of one pipeline instance), time Pacemaker's reaction and put everything back. It is a demonstration, not a fencing or quorum test (Scenarios 16–26 are). For the cluster set-up see Phase 5; for the manual commands see Scenarios 8, 10, 11 and 15; for the log lines see Scenario 49.
 >
-> **Short answer: log in to node1 and run every command in this scenario there**, with one exception: start `failover` (B) from node2 or node3 when node1 holds the VIP.
+> **Short answer: log in to mgmtnode1 and run every command in this scenario there**, with one exception: start `failover` (B) from mgmtnode2 or mgmtnode3 when mgmtnode1 holds the VIP.
 >
-> **Runs on:** **node1, node2 or node3** (it runs `sudo -n crm_mon` and `sudo -n pcs` on the machine it runs on) with the FlowFirst `.env`, passwordless `sudo` there and passwordless `ssh` to the other two nodes (the Phase 0 set-up; on those nodes it only runs `systemctl is-active` and `ip addr show`, which need no `sudo`). **node4 cannot run it**: it is not a cluster member and has no Pacemaker. A workstation cannot run it either, because it needs the cluster tools.
+> **Runs on:** **mgmtnode1, mgmtnode2 or mgmtnode3** (it runs `sudo -n crm_mon` and `sudo -n pcs` on the machine it runs on) with the FlowFirst `.env`, passwordless `sudo` there and passwordless `ssh` to the other two nodes (the Phase 0 set-up; on those nodes it only runs `systemctl is-active` and `ip addr show`, which need no `sudo`). **remotenode1 cannot run it**: it is not a cluster member and has no Pacemaker. A workstation cannot run it either, because it needs the cluster tools.
 
 ### What Pacemaker does here (so the output makes sense)
 
@@ -9938,13 +9938,13 @@ Safety properties of the demo:
 
 - The cluster of Phase 5 is up and `sudo pcs status` shows 3 nodes online and the resources started. Without it every stage reports a failure rather than a result.
 - On the machine you run it on: `sudo -n crm_mon` and `sudo -n pcs` work without a password (Phase 0 gives `flowadmin` passwordless `sudo`), and `ssh <node-ip>` works without a prompt to the other two nodes (`PKI_SSH_USER` from `.env` is used as the `ssh` user when set; override with `--ssh-user`).
-- `.env` has `FLOWFIRST_VIP`, `NODE1_IP`..`NODE3_IP`, and `NODE1_NAME`..`NODE3_NAME` only if the Pacemaker node names differ from `node1`..`node3` (they must equal the names shown by `sudo pcs status`, and `NODE_NAME` in `.env` on each node must equal that node's Pacemaker name so the demo reads the local node without `ssh`).
+- `.env` has `FLOWFIRST_VIP`, `NODE1_IP`..`NODE3_IP`, and `NODE1_NAME`..`NODE3_NAME` only if the Pacemaker node names differ from `mgmtnode1`..`mgmtnode3` (they must equal the names shown by `sudo pcs status`, and `NODE_NAME` in `.env` on each node must equal that node's Pacemaker name so the demo reads the local node without `ssh`).
 - Python 3 with the `.venv` active (`cd /opt/flowfirst && source .venv/bin/activate`).
 
-### A. Run the read-only demo (run on **node1**; node2 or node3 also work, node4 and workstations do not)
+### A. Run the read-only demo (run on **mgmtnode1**; mgmtnode2 or mgmtnode3 also work, remotenode1 and workstations do not)
 
 ```bash
-# On node1
+# On mgmtnode1
 python3 scripts/pacemaker_cluster_demo.py
 ```
 
@@ -9954,37 +9954,37 @@ Expected output shape (illustrative: the layout comes from the code, the values 
 == FlowFirst Pacemaker Cluster Demo ==
 cluster    : flowfirst_cluster
 VIP        : 10.10.1.200   (REST 8080, TLS off)
-nodes      : node1 (10.10.1.128), node2 (10.10.1.129), node3 (10.10.1.130)
-run on     : node1   (ssh as flowadmin)
+nodes      : mgmtnode1 (10.10.1.128), mgmtnode2 (10.10.1.129), mgmtnode3 (10.10.1.130)
+run on     : mgmtnode1   (ssh as flowadmin)
 
 [1] Cluster membership and quorum
     node     state         role                      result
     -------  ------------  ------------------------  -------------------------------------
-    node1    online        DC (makes the decisions)  PASS: eligible to run resources
-    node2    online                                  PASS: eligible to run resources
-    node3    online                                  PASS: eligible to run resources
-    CLUSTER  3/3 active    DC: node1                 PASS: partition with quorum (needs 2)
+    mgmtnode1    online        DC (makes the decisions)  PASS: eligible to run resources
+    mgmtnode2    online                                  PASS: eligible to run resources
+    mgmtnode3    online                                  PASS: eligible to run resources
+    CLUSTER  3/3 active    DC: mgmtnode1                 PASS: partition with quorum (needs 2)
 
 [2] Resource placement: Pacemaker's view
     resource                                    placement rule     running on         expected           result
     ------------------------------------------  -----------------  -----------------  -----------------  ------
-    vip-haproxy-group / flowfirst-vip           one node (group)   node1              node1              PASS
-    vip-haproxy-group / haproxy-res             same node as VIP   node1              node1              PASS
-    flowfirst-p1-res-clone (API Gateway (P 1))  every active node  node1 node2 node3  node1 node2 node3  PASS
+    vip-haproxy-group / flowfirst-vip           one node (group)   mgmtnode1              mgmtnode1              PASS
+    vip-haproxy-group / haproxy-res             same node as VIP   mgmtnode1              mgmtnode1              PASS
+    flowfirst-p1-res-clone (API Gateway (P 1))  every active node  mgmtnode1 mgmtnode2 mgmtnode3  mgmtnode1 mgmtnode2 mgmtnode3  PASS
     ...
 
 [3] Virtual IP: Pacemaker's view against the real interfaces
     node          Pacemaker says  interface (ip addr)  result
     ------------  --------------  -------------------  ------------------------------------------
-    node1         holds the VIP   has the address      PASS: Pacemaker and the interface agree
-    node2         -               -                    PASS: Pacemaker and the interface agree
-    node3         -               -                    PASS: Pacemaker and the interface agree
-    VIP 10.10.1.200  holder: node1  1 node(s) have it   PASS: GET /health through the VIP answered by node2
+    mgmtnode1         holds the VIP   has the address      PASS: Pacemaker and the interface agree
+    mgmtnode2         -               -                    PASS: Pacemaker and the interface agree
+    mgmtnode3         -               -                    PASS: Pacemaker and the interface agree
+    VIP 10.10.1.200  holder: mgmtnode1  1 node(s) have it   PASS: GET /health through the VIP answered by mgmtnode2
 
 [4] Services on every node: systemd against Pacemaker
     node   cluster daemons                                    pipeline units                                  result
     -----  -------------------------------------------------  ----------------------------------------------  ---------------------------------
-    node1  corosync=active pacemaker=active pcsd=active       p1=active p2=active p3=active p4=active         PASS: systemd matches Pacemaker
+    mgmtnode1  corosync=active pacemaker=active pcsd=active       p1=active p2=active p3=active p4=active         PASS: systemd matches Pacemaker
     ...
 
 [5] Summary & Result
@@ -9993,64 +9993,64 @@ run on     : node1   (ssh as flowadmin)
 
 The exit code is 0 on success, 1 if a stage failed, 2 for a usage error. A node left in `standby` (Scenario 8) makes stage 1 print `NOTE: online but runs nothing` and the run exit 1; that is intended, because the cluster is not fully active. Single stages: `python3 scripts/pacemaker_cluster_demo.py cluster|resources|vip|services`.
 
-### B. Failover: the VIP and HAProxy move to another node (run on **node2 or node3**, not on the VIP holder)
+### B. Failover: the VIP and HAProxy move to another node (run on **mgmtnode2 or mgmtnode3**, not on the VIP holder)
 
-The demo puts the **VIP holder** (normally node1) into standby. Run it from a node that is **not** the holder, so the node you are logged in to stays active for the whole test. Find the holder first with `sudo crm_resource --resource flowfirst-vip --locate`, then log in to one of the other two nodes.
+The demo puts the **VIP holder** (normally mgmtnode1) into standby. Run it from a node that is **not** the holder, so the node you are logged in to stays active for the whole test. Find the holder first with `sudo crm_resource --resource flowfirst-vip --locate`, then log in to one of the other two nodes.
 
 ```bash
-# On node2 (or node3), while node1 holds the VIP
+# On mgmtnode2 (or mgmtnode3), while mgmtnode1 holds the VIP
 python3 scripts/pacemaker_cluster_demo.py failover --yes
 ```
 
 ```text
 == Pacemaker: Failover: standby the VIP holder, then restore ==
-    10:21:03  VIP and HAProxy run on node1; putting it into standby
-    10:21:06  Pacemaker started the VIP and HAProxy on node2 after 3 s
-    10:21:07  GET /health through the VIP answered by node3 after 4 s
-    10:21:07  restoring: pcs node unstandby node1
+    10:21:03  VIP and HAProxy run on mgmtnode1; putting it into standby
+    10:21:06  Pacemaker started the VIP and HAProxy on mgmtnode2 after 3 s
+    10:21:07  GET /health through the VIP answered by mgmtnode3 after 4 s
+    10:21:07  restoring: pcs node unstandby mgmtnode1
     step                                   result
     -------------------------------------  ---------------------------------------------------------------
-    pcs node standby node1                 PASS: accepted
-    VIP and HAProxy move to another node   PASS: node1 -> node2 in 3 s
+    pcs node standby mgmtnode1                 PASS: accepted
+    VIP and HAProxy move to another node   PASS: mgmtnode1 -> mgmtnode2 in 3 s
     VIP answers again                      PASS: after 4 s (2 request(s) failed on the way: expected, the old HAProxy was gone)
-    pcs node unstandby node1               PASS: node1 runs its clones again after 6 s
+    pcs node unstandby mgmtnode1               PASS: mgmtnode1 runs its clones again after 6 s
 ```
 
-(Illustrative; the timings in this sample are invented. Measure yours.) A few failed requests while the VIP moves are normal: the old HAProxy is gone and the new one is not listening yet. The pipeline itself keeps working because the clones on node2 and node3 are untouched; the clones on node1 stop while it is in standby and restart on `unstandby`. With `--wait` you set how long the demo waits for Pacemaker (default 90 s).
+(Illustrative; the timings in this sample are invented. Measure yours.) A few failed requests while the VIP moves are normal: the old HAProxy is gone and the new one is not listening yet. The pipeline itself keeps working because the clones on mgmtnode2 and mgmtnode3 are untouched; the clones on mgmtnode1 stop while it is in standby and restart on `unstandby`. With `--wait` you set how long the demo waits for Pacemaker (default 90 s).
 
-### C. Ban one pipeline instance from one node (run on **node1**; the ban targets node3 but the command does not run there)
+### C. Ban one pipeline instance from one node (run on **mgmtnode1**; the ban targets mgmtnode3 but the command does not run there)
 
 ```bash
-# On node1 (--node only names the node whose instance is banned; you do not need to log in to node3)
-python3 scripts/pacemaker_cluster_demo.py ban --yes --process 2 --node node3
+# On mgmtnode1 (--node only names the node whose instance is banned; you do not need to log in to mgmtnode3)
+python3 scripts/pacemaker_cluster_demo.py ban --yes --process 2 --node mgmtnode3
 ```
 
 ```text
 == Pacemaker: Ban one pipeline instance from one node, then restore ==
     step                                           result
     ---------------------------------------------  ----------------------------------------------------
-    pcs resource ban flowfirst-p2-res-clone node3  PASS: accepted
-    Transformer (Process 2) stops on node3 only    PASS: now running on node1 node2 (after 2 s)
-    systemd on node3: flowfirst-process2           PASS: inactive, Pacemaker stopped it
+    pcs resource ban flowfirst-p2-res-clone mgmtnode3  PASS: accepted
+    Transformer (Process 2) stops on mgmtnode3 only    PASS: now running on mgmtnode1 mgmtnode2 (after 2 s)
+    systemd on mgmtnode3: flowfirst-process2           PASS: inactive, Pacemaker stopped it
     request through the VIP                        PASS: still answered
     pcs resource clear flowfirst-p2-res-clone      PASS: running on every node again after 3 s
 ```
 
 This is the same operation as Scenario 11, with the checks written in code: only the targeted instance stops, the other two nodes keep processing, and the VIP is unaffected. `--process 1` is the API Gateway, `4` the DB Updater; leader election (Scenario 70) hands the work to a surviving instance if the banned one was the leader.
 
-### D. Watch Pacemaker react live (two terminals, **both on node1**, or terminal 2 on node2/node3)
+### D. Watch Pacemaker react live (two terminals, **both on mgmtnode1**, or terminal 2 on mgmtnode2/mgmtnode3)
 
 ```bash
-# Terminal 1 (on node1): the demo, watching
+# Terminal 1 (on mgmtnode1): the demo, watching
 python3 scripts/pacemaker_cluster_demo.py watch --seconds 120
-# Terminal 2 (on node1, node2 or node3; pcs acts cluster-wide): cause the event yourself, then undo it
-sudo pcs node standby node1
-sudo pcs node unstandby node1
+# Terminal 2 (on mgmtnode1, mgmtnode2 or mgmtnode3; pcs acts cluster-wide): cause the event yourself, then undo it
+sudo pcs node standby mgmtnode1
+sudo pcs node unstandby mgmtnode1
 ```
 
 Each line shows the VIP holder, the DC, active nodes (`3/3`), whether a request through the VIP worked, and the instance count of each clone (`3 3 3 3` normally). The line where Pacemaker changes anything ends with `<-- Pacemaker changed a placement`. `watch` exits 1 if any request failed, which is expected during a failover. Do not run `watch` while the `failover` or `ban` stage is also changing the cluster.
 
-### E. The same facts by hand (run on **node1, node2 or node3**)
+### E. The same facts by hand (run on **mgmtnode1, mgmtnode2 or mgmtnode3**)
 
 ```bash
 sudo crm_mon -1Ar                                          # the view the demo parses (add --output-as=xml for the raw form)
@@ -10084,7 +10084,7 @@ Project rules (see `AGENTS.md`): never start `haproxy.service` or `flowfirst-pro
 
 ### What this is, and what it is not
 
-This scenario adds a **fourth full core node** next to `node1`, `node2` and `node3`. The new node runs everything a core node runs:
+This scenario adds a **fourth full core node** next to `mgmtnode1`, `mgmtnode2` and `mgmtnode3`. The new node runs everything a core node runs:
 
 | Component | On the extra node | Notes |
 |---|---|---|
@@ -10095,14 +10095,14 @@ This scenario adds a **fourth full core node** next to `node1`, `node2` and `nod
 | HAProxy + VIP | yes | Pacemaker may place the VIP on it |
 | Pacemaker / Corosync | yes | full member |
 | Processes 1–4 | yes | clones, `clone-max` becomes 4 |
-| Process 5 | **no** | stays on the remote worker `node4` |
+| Process 5 | **no** | stays on the remote worker `remotenode1` |
 
-`node4` is **not** touched and is **not** an extra node: it remains the remote worker (Process 5 only). Names follow a fixed pattern so more nodes can be added later: the next ones are `extramgmtnode2`, `extramgmtnode3`, … (IDs never repeat: ZooKeeper `myid` 5, 6, …; Swift zones 5, 6, …). Repeat this scenario once per node.
+`remotenode1` is **not** touched and is **not** an extra node: it remains the remote worker (Process 5 only). Names follow a fixed pattern so more nodes can be added later: the next ones are `extramgmtnode2`, `extramgmtnode3`, … (IDs never repeat: ZooKeeper `myid` 5, 6, …; Swift zones 5, 6, …). Repeat this scenario once per node.
 
 **One setting drives everything** (blank by default, so nothing changes until you set it):
 
 ```ini
-# .env — identical on EVERY node, including node4 (literal value, no ${VAR})
+# .env — identical on EVERY node, including remotenode1 (literal value, no ${VAR})
 EXTRA_NODES=extramgmtnode1:10.10.1.132
 # later:  EXTRA_NODES=extramgmtnode1:10.10.1.132,extramgmtnode2:10.10.1.133
 ```
@@ -10117,21 +10117,21 @@ With four core nodes, **ZooKeeper has 4 voters and needs 3 for quorum**, and Pac
 
 | # | Check | How |
 |---|---|---|
-| 1 | A RHEL 9.6 host with a **static IP** on the cluster network, same subnet as node1–3 | `ip -4 addr` |
+| 1 | A RHEL 9.6 host with a **static IP** on the cluster network, same subnet as mgmtnode1–3 | `ip -4 addr` |
 | 2 | **Host name equals the node name**: RabbitMQ is named `rabbit@<short hostname>` | `sudo hostnamectl set-hostname extramgmtnode1` |
-| 3 | The user `flowadmin` with SSH key login **and passwordless sudo**, same as on node1–3 (Phase 0) | `ssh flowadmin@<ip> sudo true` from node1 |
+| 3 | The user `flowadmin` with SSH key login **and passwordless sudo**, same as on mgmtnode1–3 (Phase 0) | `ssh flowadmin@<ip> sudo true` from mgmtnode1 |
 | 4 | Clock in sync (RabbitMQ and Galera refuse or misbehave otherwise) | `sudo dnf install -y chrony && sudo systemctl enable --now chronyd && chronyc tracking` |
 | 5 | Same OS packages as the others: `git python3 python3-pip` | Phase 0b |
 | 6 | **Healthy existing cluster**: Galera `wsrep_cluster_size=3` Synced, ZooKeeper has a leader, RabbitMQ shows 3 running nodes, `pcs status` all Online | the verification commands of Phases 1, 1b, 2, 5 |
 | 7 | A recent backup (`scripts/backup_flowfirst.sh`) | [Backup](#production-rollout-run-book) |
 | 8 | A maintenance window. Existing nodes are changed **one at a time** (ZooKeeper restart, HAProxy reload) but the API stays up | — |
-| 9 | Firewall allows the new IP to reach node1–3 on the ports in Phases 1–5, and vice versa | `firewalld` is opened by the scripts on each host |
+| 9 | Firewall allows the new IP to reach mgmtnode1–3 on the ports in Phases 1–5, and vice versa | `firewalld` is opened by the scripts on each host |
 
 The variable names below use the example IP `10.10.1.132`; replace it with yours. Do **not** reuse the IP of a decommissioned host for a different name.
 
 ### Fast path: one command
 
-Everything below can be driven from node1 by one orchestrator. Do steps A–D by hand first, then:
+Everything below can be driven from mgmtnode1 by one orchestrator. Do steps A–D by hand first, then:
 
 ```bash
 cd /opt/flowfirst
@@ -10144,9 +10144,9 @@ cd /opt/flowfirst
 
 It stops at the first failing step and tells you the command to resume. The manual steps A–J below are exactly what it does; read them once so you know what is happening to the cluster.
 
-### Step A — Name the node (node1)
+### Step A — Name the node (mgmtnode1)
 
-Edit `/opt/flowfirst/.env` **on node1 only** and set `EXTRA_NODES` (other nodes get it in step C):
+Edit `/opt/flowfirst/.env` **on mgmtnode1 only** and set `EXTRA_NODES` (other nodes get it in step C):
 
 ```bash
 cd /opt/flowfirst
@@ -10158,7 +10158,7 @@ Also append `extramgmtnode1-pipeline` to `ADMIN_TRUSTED_PROXY_CNS` (needed once 
 
 ```bash
 grep '^ADMIN_TRUSTED_PROXY_CNS=' .env
-# e.g.  ADMIN_TRUSTED_PROXY_CNS=node1-pipeline,node2-pipeline,node3-pipeline,extramgmtnode1-pipeline
+# e.g.  ADMIN_TRUSTED_PROXY_CNS=mgmtnode1-pipeline,mgmtnode2-pipeline,mgmtnode3-pipeline,extramgmtnode1-pipeline
 ```
 
 Check the value is accepted: `./scripts/add_extra_node.sh extramgmtnode1 --plan` (an invalid entry prints `ERROR: EXTRA_NODES entry #1 is invalid`, never the bad text).
@@ -10183,11 +10183,11 @@ The repository must be at the **same commit** as on the other nodes (`git -C /op
 Only `NODE_NAME` and `CURRENT_NODE_IP` differ per node; everything else, secrets included, is identical.
 
 ```bash
-# On node1: push EXTRA_NODES + ADMIN_TRUSTED_PROXY_CNS to node2, node3, node4, and the whole .env to the new node
+# On mgmtnode1: push EXTRA_NODES + ADMIN_TRUSTED_PROXY_CNS to mgmtnode2, mgmtnode3, remotenode1, and the whole .env to the new node
 ./scripts/add_extra_node.sh extramgmtnode1 --only 2
 ```
 
-By hand instead: copy `.env` from node1 to the new host (`scp`), then on the new host
+By hand instead: copy `.env` from mgmtnode1 to the new host (`scp`), then on the new host
 
 ```bash
 sed -i 's|^NODE_NAME=.*|NODE_NAME=extramgmtnode1|; s|^CURRENT_NODE_IP=.*|CURRENT_NODE_IP=10.10.1.132|' /opt/flowfirst/.env
@@ -10250,10 +10250,10 @@ The install script only installs; it does not cluster. So there are two commands
 cd /opt/flowfirst
 sudo ./scripts/install_rabbitmq_rhel9.sh              # installs, enables management, creates the pipeline user (skipped if it exists)
 sudo ./scripts/join_rabbitmq_cluster.sh --dry-run     # shows each action
-sudo ./scripts/join_rabbitmq_cluster.sh               # joins rabbit@node1
+sudo ./scripts/join_rabbitmq_cluster.sh               # joins rabbit@mgmtnode1
 ```
 
-`join_rabbitmq_cluster.sh` checks that the short hostname equals `NODE_NAME`, makes all nodes resolvable in `/etc/hosts`, opens 5672/5671/25672/4369, **copies the Erlang cookie from node1 over SSH without printing it**, then runs `stop_app → reset → join_cluster → start_app`. It is safe to re-run (it exits at once if the node is already a member). `reset` wipes only the new node's own empty state.
+`join_rabbitmq_cluster.sh` checks that the short hostname equals `NODE_NAME`, makes all nodes resolvable in `/etc/hosts`, opens 5672/5671/25672/4369, **copies the Erlang cookie from mgmtnode1 over SSH without printing it**, then runs `stop_app → reset → join_cluster → start_app`. It is safe to re-run (it exits at once if the node is already a member). `reset` wipes only the new node's own empty state.
 
 With `RABBITMQ_QUEUE_TYPE=quorum` it also runs `rabbitmq-queues grow rabbit@extramgmtnode1 all --queue-pattern '^flow[123]_'`. Classic queues are not replicated; nothing to do.
 
@@ -10270,15 +10270,15 @@ Do **not** change the partition handling: `pause_minority` is already set by the
 Swift keeps its rings: `setup_swift.sh` deliberately never rebuilds an existing ring, so the new node must be **added to the rings on one node and the rings copied everywhere**. The script refuses to run on the new node before it has the rings.
 
 ```bash
-# On node1
+# On mgmtnode1
 cd /opt/flowfirst
 sudo ./swift/add_ring_node.sh --check      # which extra nodes are missing from the rings
-sudo ./swift/add_ring_node.sh --push       # add devices (zone 4), rebalance, copy builders + rings to node2, node3, extra nodes
+sudo ./swift/add_ring_node.sh --push       # add devices (zone 4), rebalance, copy builders + rings to mgmtnode2, mgmtnode3, extra nodes
 
 # On extramgmtnode1 (needs /etc/swift/*.ring.gz from the step above)
 sudo ./swift/setup_swift.sh
 
-# On node1, node2, node3 (memcached server list, rsync allow-list and firewall now include the new IP; rings are kept)
+# On mgmtnode1, mgmtnode2, mgmtnode3 (memcached server list, rsync allow-list and firewall now include the new IP; rings are kept)
 sudo ./swift/setup_swift.sh
 ```
 
@@ -10297,7 +10297,7 @@ HAProxy is owned by Pacemaker. Generate the config on **every** core node so eac
 
 ```bash
 cd /opt/flowfirst
-sudo ./haproxy/setup_haproxy.sh          # on node1, node2, node3 AND extramgmtnode1
+sudo ./haproxy/setup_haproxy.sh          # on mgmtnode1, mgmtnode2, mgmtnode3 AND extramgmtnode1
 sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 ```
 
@@ -10318,9 +10318,9 @@ sudo systemctl disable flowfirst-process1 flowfirst-process2 flowfirst-process3 
 sudo ./pacemaker/setup_multinode_cluster.sh --prepare-node       # pcs, corosync, pcsd:2224, hacluster password, /etc/hosts
 ```
 
-Do **not** use `--remote` (that installs Process 5, which belongs to node4).
+Do **not** use `--remote` (that installs Process 5, which belongs to remotenode1).
 
-On node1:
+On mgmtnode1:
 
 ```bash
 sudo ./pacemaker/add_extra_node.sh extramgmtnode1 --dry-run
@@ -10376,9 +10376,9 @@ Undo in reverse order and only for the part that already ran:
 | Done | Undo |
 |---|---|
 | Pacemaker | `sudo pcs cluster node remove extramgmtnode1`; `sudo pcs resource update flowfirst-p<N>-res-clone clone-max=3` for N = 1–4 |
-| HAProxy | remove `EXTRA_NODES` from `.env` on node1–3, re-run `sudo ./haproxy/setup_haproxy.sh` (the file is regenerated without the extra lines), reload on the VIP holder |
+| HAProxy | remove `EXTRA_NODES` from `.env` on mgmtnode1–3, re-run `sudo ./haproxy/setup_haproxy.sh` (the file is regenerated without the extra lines), reload on the VIP holder |
 | Swift | `sudo swift-ring-builder /etc/swift/<ring>.builder remove --ip 10.10.1.132 …`, rebalance, copy the rings; wait until `swift-recon --replication` shows the data moved **before** stopping the node |
-| RabbitMQ | on the new node `sudo rabbitmqctl stop_app && sudo rabbitmqctl reset`; or from node1 `sudo rabbitmqctl forget_cluster_node rabbit@extramgmtnode1` (node stopped) |
+| RabbitMQ | on the new node `sudo rabbitmqctl stop_app && sudo rabbitmqctl reset`; or from mgmtnode1 `sudo rabbitmqctl forget_cluster_node rabbit@extramgmtnode1` (node stopped) |
 | Galera | `sudo systemctl stop mariadb` on the new node; the cluster continues with 3 |
 | ZooKeeper | remove the `server.4` line on every member and restart them one at a time (followers first, leader last) |
 | `.env` | remove `EXTRA_NODES` and the extra CN from `ADMIN_TRUSTED_PROXY_CNS` on every node, restart the processes |
@@ -10394,7 +10394,7 @@ A removed node's ZooKeeper id and Swift zone must **not** be reused for a differ
 | ZooKeeper new node never reaches `imok` with leader | the old leader has not been restarted yet (step E.3) |
 | `join_rabbitmq_cluster.sh`: short hostname is … but NODE_NAME is … | `sudo hostnamectl set-hostname extramgmtnode1`, restart `rabbitmq-server`, re-run |
 | `join_cluster` → `incompatible_feature_flags` / `cookie` error | different RabbitMQ versions or a wrong cookie; install the same version, re-run (the script re-copies the cookie) |
-| `setup_swift.sh`: *must receive the existing rings BEFORE Swift is set up here* | run `swift/add_ring_node.sh --push` on node1 first (step H) |
+| `setup_swift.sh`: *must receive the existing rings BEFORE Swift is set up here* | run `swift/add_ring_node.sh --push` on mgmtnode1 first (step H) |
 | Swift tokens fail intermittently via the VIP | memcached server list differs between nodes; re-run `setup_swift.sh` on every node |
 | `cannot reach … :2224` in `pacemaker/add_extra_node.sh` | `--prepare-node` was not run on the new node, or firewalld blocks 2224/tcp |
 | New node stays `OFFLINE` in `pcs status` | `/etc/hosts` lacks the other nodes, or Corosync UDP 5404/5405 blocked |
@@ -10403,8 +10403,8 @@ A removed node's ZooKeeper id and Swift zone must **not** be reused for a differ
 ### Notes and limits
 
 - **Not tested on a real cluster:** the ZooKeeper rolling restart order, SST/IST timing, the `rabbitmqctl join_cluster` sequence, `swift-ring-builder` output matching (the script greps its table with a regular expression; if `--check` reports a node as missing although it is in the ring, compare `swift-ring-builder /etc/swift/object.builder` with `in_ring()` in `swift/add_ring_node.sh`), `pcs cluster node add`, and the orchestrator's remote commands. The tested parts are the parser, the config lists, the HAProxy rendering, the TLS options of the extra backends and the orchestrator's plan and failure handling.
-- `scripts/db_replication_demo.py`, `zk_coordination_demo.py`, `rabbitmq_queue_demo.py` and the other demo scripts (Scenarios 69–75) still default to `node1,node2,node3`; pass the new node with their node-list option or leave it out.
-- `monitoring/prometheus.yml` lists metric endpoints of node1–3; add `extramgmtnode1:9101` … `:9104` (`METRICS_PORT_BASE` + process number) when `METRICS_ENABLED=true`.
+- `scripts/db_replication_demo.py`, `zk_coordination_demo.py`, `rabbitmq_queue_demo.py` and the other demo scripts (Scenarios 69–75) still default to `mgmtnode1,mgmtnode2,mgmtnode3`; pass the new node with their node-list option or leave it out.
+- `monitoring/prometheus.yml` lists metric endpoints of mgmtnode1–3; add `extramgmtnode1:9101` … `:9104` (`METRICS_PORT_BASE` + process number) when `METRICS_ENABLED=true`.
 - The backup scripts cover state, not nodes; nothing needs changing, but take a fresh backup after the node is in.
 - Node removal is manual (the rollback table above); there is no script, on purpose.
 
@@ -10934,7 +10934,7 @@ API Gateway (Process 1) has three questions it can answer, and they use differen
 
 > **Status:** the `/metrics` listener was tested on one workstation: unit tests, a child process serving it over plain HTTP and over mutual TLS, and a real Prometheus (container) scraping it with a client certificate (target `up`) and without one (target `down`). The alert rules pass `promtool check rules` and 7 `promtool test rules` scenarios on synthetic series. The RabbitMQ metric names were checked against a real RabbitMQ 3 container. `monitoring/alertmanager.yml` passes `amtool check-config`. **Not tested:** a scrape of a running 4-node cluster, the Galera/MariaDB exporter names (written from the exporter's documentation, syntax-checked only), `node_exporter` names, live Alertmanager routing delivering a notification, and no dashboard is shipped.
 
-**What you get.** With `METRICS_ENABLED=true` each process serves `GET /metrics` in Prometheus text format on `METRICS_PORT_BASE` + its number: API Gateway (Process 1) on 9101, Transformer (Process 2) on 9102, … Remote Worker (Process 5) on 9105. It is a separate listener, not part of the REST API and **not behind HAProxy**, so Prometheus scrapes every node directly, including Node 4. The processes already counted what they handled; the listener only exposes it. It is off by default and a listener that cannot start (port in use, bad certificate) is logged and skipped: the pipeline keeps running, and it never falls back to plaintext when TLS is on.
+**What you get.** With `METRICS_ENABLED=true` each process serves `GET /metrics` in Prometheus text format on `METRICS_PORT_BASE` + its number: API Gateway (Process 1) on 9101, Transformer (Process 2) on 9102, … Remote Worker (Process 5) on 9105. It is a separate listener, not part of the REST API and **not behind HAProxy**, so Prometheus scrapes every node directly, including Remote Node 1. The processes already counted what they handled; the listener only exposes it. It is off by default and a listener that cannot start (port in use, bad certificate) is logged and skipped: the pipeline keeps running, and it never falls back to plaintext when TLS is on.
 
 | Series | Meaning |
 |---|---|
@@ -11051,7 +11051,7 @@ Every envelope is a compact JSON object published to the exchange with `content_
   "entity_id":       "a8b2c3d4-...",
   "entity_type":     "device",
   "occurred_at":     "2025-07-14 11:30:00",
-  "node":            "node1",
+  "node":            "mgmtnode1",
   "message_id":      "c1d2e3f4-...",
   "payload": {
     "device_name": "sensor-42",
@@ -11182,13 +11182,13 @@ cd /opt/flowfirst && git pull
 source .venv/bin/activate
 pip install --require-hashes -r requirements.txt      # the locked versions; nothing newer is picked up
 ./scripts/ci_check.sh --quick                         # optional, needs requirements-dev.txt
-sudo pcs node standby node1                           # drain node1 (VIP and clones move away)
+sudo pcs node standby mgmtnode1                           # drain mgmtnode1 (VIP and clones move away)
 sudo systemctl restart flowfirst-process1 flowfirst-process2 flowfirst-process3 flowfirst-process4
-sudo pcs node unstandby node1
+sudo pcs node unstandby mgmtnode1
 curl -s http://<VIP>:8080/health | jq .status         # "healthy"
 ```
 
-Then node2, then node3. **Expected failure on an unchanged `.env`:** the processes refuse to start with `Refusing to start with weak secrets` if the old sample passwords are still in `.env`. That is intended; do R2 first, or set `ALLOW_DEFAULT_SECRETS=true` for the length of the rollout only, and remove it afterwards.
+Then mgmtnode2, then mgmtnode3. **Expected failure on an unchanged `.env`:** the processes refuse to start with `Refusing to start with weak secrets` if the old sample passwords are still in `.env`. That is intended; do R2 first, or set `ALLOW_DEFAULT_SECRETS=true` for the length of the rollout only, and remove it afterwards.
 
 ### R2. Replace the sample passwords (existing clusters)
 
@@ -11224,7 +11224,7 @@ The endpoint is refused for everyone until TLS is on and the caller's certificat
 ```bash
 # .env on nodes 1-3 (after R6 has turned TLS_API_ENABLED on)
 ADMIN_ALLOWED_CNS=admin-client
-ADMIN_TRUSTED_PROXY_CNS=node1-pipeline,node2-pipeline,node3-pipeline
+ADMIN_TRUSTED_PROXY_CNS=mgmtnode1-pipeline,mgmtnode2-pipeline,mgmtnode3-pipeline
 ALLOW_UNAUTHENTICATED_ADMIN=false
 ```
 

@@ -24,7 +24,7 @@ set -euo pipefail
 #   - Proxies share tempauth tokens via memcached on all three nodes, so a client
 #     may authenticate on one node and use its token on another via HAProxy.
 #
-# Run this script on ALL THREE nodes (node4 does not run a Swift server).
+# Run this script on ALL THREE nodes (remotenode1 does not run a Swift server).
 # Swift is managed by plain systemd (like MariaDB / RabbitMQ / ZooKeeper), not by
 # Pacemaker.  Clients reach it through HAProxy on the VIP at SWIFT_LB_PORT.
 #
@@ -108,7 +108,7 @@ elif _extra_name="$(extra_name_for_ip "${CURRENT_NODE_IP}")"; then
     MY_ID="$(extra_node_id "${_extra_name}")"
     if [ ! -f /etc/swift/object.ring.gz ]; then
         echo "ERROR: ${_extra_name} must receive the existing rings BEFORE Swift is set up here."
-        echo "  Run swift/add_ring_node.sh on node1, copy /etc/swift/*.builder and *.ring.gz to this node"
+        echo "  Run swift/add_ring_node.sh on mgmtnode1, copy /etc/swift/*.builder and *.ring.gz to this node"
         echo "  (ReadMe Scenario 76), then re-run. Building fresh rings here would split the cluster."
         exit 1
     fi

@@ -10,8 +10,8 @@ Flow 1, 2, and 3 use entirely separate queue names. A message published to a flo
 never be consumed by a flow-2 or flow-3 consumer by design.
 
 ## Flow 3 crosses the cluster boundary through RabbitMQ (not direct TCP)
-P1 on cluster nodes publishes to `flow3_p1_to_p5`; P5 on Node 4 consumes it. P5 connects to
-the same RabbitMQ pool used by the cluster — there is no separate broker on Node 4.
+P1 on cluster nodes publishes to `flow3_p1_to_p5`; P5 on Remote Node 1 consumes it. P5 connects to
+the same RabbitMQ pool used by the cluster — there is no separate broker on Remote Node 1.
 
 ## ZooKeeper dedup barrier is the only double-insert protection
 There is no database-level idempotency guard beyond the `UNIQUE` constraint on `message_id`.

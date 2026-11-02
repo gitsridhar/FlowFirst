@@ -7,7 +7,7 @@
 #
 # Profiles (X.509 extendedKeyUsage):
 #   server  serverAuth             a service that clients connect to (HAProxy, MariaDB, ...)
-#   client  clientAuth             an identity that connects (API user, a pipeline process, node4)
+#   client  clientAuth             an identity that connects (API user, a pipeline process, remotenode1)
 #   peer    serverAuth+clientAuth  both: inter-node traffic (Galera, RabbitMQ clustering, ZooKeeper quorum)
 #
 # Output (pki/issued/NAME/):

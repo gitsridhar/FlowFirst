@@ -55,7 +55,7 @@ def test_notify_builds_correct_envelope(monkeypatch):
             NOTIFICATIONS_EXCHANGE="flowfirst.notifications",
             NOTIFICATIONS_FLOWS="",
             NOTIFICATIONS_MAX_PAYLOAD_BYTES=0,   # always include payload
-            NODE_NAME="node1")
+            NODE_NAME="mgmtnode1")
     ch = _mock_ch()
     data = {
         "message_id": "msg-xyz",
@@ -77,7 +77,7 @@ def test_notify_builds_correct_envelope(monkeypatch):
     assert envelope["entity_id"] == "dev-42"
     assert envelope["entity_type"] == "device"
     assert envelope["message_id"] == "msg-xyz"
-    assert envelope["node"] == "node1"
+    assert envelope["node"] == "mgmtnode1"
     assert "notification_id" in envelope
     assert "occurred_at" in envelope
 

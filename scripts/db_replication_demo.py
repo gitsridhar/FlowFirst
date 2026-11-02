@@ -7,15 +7,15 @@ It uses its own table `replication_demo`, so pipeline data (processed_messages, 
 
     python3 scripts/db_replication_demo.py                      full demo (same as 'run')
     python3 scripts/db_replication_demo.py run --keep           ...and leave the rows in place
-    python3 scripts/db_replication_demo.py write --node node2 --message "hello from node2"
-    python3 scripts/db_replication_demo.py read  --node node3
+    python3 scripts/db_replication_demo.py write --node mgmtnode2 --message "hello from mgmtnode2"
+    python3 scripts/db_replication_demo.py read  --node mgmtnode3
     python3 scripts/db_replication_demo.py read  --node all --run-id <id>
     python3 scripts/db_replication_demo.py cleanup [--drop]
 
-Where to run it: on node1, node2, node3, node4 or any machine that can reach TCP 3306 on the Galera nodes and has
-the same `.env` (MARIADB_* and NODE1_IP..NODE3_IP). Node 4 runs no MariaDB, but can run this script as a client.
+Where to run it: on mgmtnode1, mgmtnode2, mgmtnode3, remotenode1 or any machine that can reach TCP 3306 on the Galera nodes and has
+the same `.env` (MARIADB_* and NODE1_IP..NODE3_IP). Remote Node 1 runs no MariaDB, but can run this script as a client.
 
---node / --nodes accept: node1 | node2 | node3 (taken from NODE1_IP..NODE3_IP), vip (MARIADB_HOST, i.e. the
+--node / --nodes accept: mgmtnode1 | mgmtnode2 | mgmtnode3 (taken from NODE1_IP..NODE3_IP), vip (MARIADB_HOST, i.e. the
 HAProxy load balancer), or a literal host/IP. Writes through `vip` land on whichever node HAProxy picks.
 Connections honour TLS_MARIADB_ENABLED through src.tls.tls (fails closed). The password is never printed.
 """
@@ -44,7 +44,7 @@ from src.config.config import (  # noqa: E402
 from src.tls.tls import mysql_ssl  # noqa: E402
 
 TABLE = "replication_demo"
-DEFAULT_NODES = "node1,node2,node3"
+DEFAULT_NODES = "mgmtnode1,mgmtnode2,mgmtnode3"
 DEFAULT_TIMEOUT_S = 10.0
 POLL_INTERVAL_S = 0.05
 
@@ -67,11 +67,11 @@ DDL = f"""
 
 def named_targets():
     """Label -> host for the Galera members and the load-balanced VIP."""
-    return {"node1": NODE1_IP, "node2": NODE2_IP, "node3": NODE3_IP, "vip": MARIADB_HOST}
+    return {"mgmtnode1": NODE1_IP, "mgmtnode2": NODE2_IP, "mgmtnode3": NODE3_IP, "vip": MARIADB_HOST}
 
 
 def resolve_target(spec, targets=None):
-    """('node2') -> ('node2', '<NODE2_IP>'); a literal host/IP is used as its own label."""
+    """('mgmtnode2') -> ('mgmtnode2', '<NODE2_IP>'); a literal host/IP is used as its own label."""
     spec = (spec or "").strip()
     if not spec:
         raise ValueError("empty node name")
@@ -82,7 +82,7 @@ def resolve_target(spec, targets=None):
 
 
 def resolve_targets(csv, targets=None):
-    """'node1,node2' -> [(label, host), ...] without duplicates (same host listed twice is kept once)."""
+    """'mgmtnode1,mgmtnode2' -> [(label, host), ...] without duplicates (same host listed twice is kept once)."""
     out, seen = [], set()
     for part in (csv or "").split(","):
         if not part.strip():
@@ -290,7 +290,7 @@ def cmd_read(args):
 
 
 def cmd_cleanup(args):
-    _, host = resolve_target(args.node or "node1")
+    _, host = resolve_target(args.node or "mgmtnode1")
     conn = connect(host)
     try:
         with conn.cursor() as cur:
@@ -310,25 +310,25 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd")
 
     r = sub.add_parser("run", help="full demo: write through every node, read from every node (default)")
-    r.add_argument("--nodes", default=DEFAULT_NODES, help="comma list of node1,node2,node3,vip or hosts (default: %(default)s)")
+    r.add_argument("--nodes", default=DEFAULT_NODES, help="comma list of mgmtnode1,mgmtnode2,mgmtnode3,vip or hosts (default: %(default)s)")
     r.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="seconds to wait for a row to appear on a node")
     r.add_argument("--keep", action="store_true", help="leave the demo rows in the table")
     r.set_defaults(func=cmd_run)
 
     w = sub.add_parser("write", help="insert one row through one node")
-    w.add_argument("--node", required=True, help="node1|node2|node3|vip or a host")
+    w.add_argument("--node", required=True, help="mgmtnode1|mgmtnode2|mgmtnode3|vip or a host")
     w.add_argument("--message", default="hello from the FlowFirst demo")
     w.add_argument("--run-id", default=None, help="group the row under an existing run id")
     w.set_defaults(func=cmd_write)
 
     rd = sub.add_parser("read", help="list the newest rows as seen by one node (or all)")
-    rd.add_argument("--node", default="all", help="node1|node2|node3|vip|all or a host (default: all)")
+    rd.add_argument("--node", default="all", help="mgmtnode1|mgmtnode2|mgmtnode3|vip|all or a host (default: all)")
     rd.add_argument("--run-id", default=None)
     rd.add_argument("--limit", type=int, default=20)
     rd.set_defaults(func=cmd_read)
 
     c = sub.add_parser("cleanup", help="delete all demo rows (or drop the table)")
-    c.add_argument("--node", default="node1")
+    c.add_argument("--node", default="mgmtnode1")
     c.add_argument("--drop", action="store_true", help="drop the table instead of emptying it")
     c.set_defaults(func=cmd_cleanup)
     return p

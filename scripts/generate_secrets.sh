@@ -12,7 +12,7 @@ set -euo pipefail
 # Values are 32 hex characters from `openssl rand` (letters and digits only, safe in .env, SQL and haproxy.cfg).
 #
 # SWIFT_HASH_PATH_PREFIX and SWIFT_HASH_PATH_SUFFIX are pre-set in the per-node .env files
-# (src/config/.env.node*) and are SKIPPED by this script when they already hold a non-placeholder
+# (src/config/.env.*node*) and are SKIPPED by this script when they already hold a non-placeholder
 # value.  They must NEVER change after Swift data has been stored: changing them makes every
 # existing object unreachable.  Only overwrite them if the current value still starts with "changeme".
 #
@@ -53,7 +53,7 @@ if [[ ${WRITE} -eq 0 ]]; then
     exit 0
 fi
 
-[[ -f "${ENV_FILE}" ]] || { echo "ERROR: ${ENV_FILE} not found (copy src/config/.env.node1 or .env.example first)." >&2; exit 1; }
+[[ -f "${ENV_FILE}" ]] || { echo "ERROR: ${ENV_FILE} not found (copy src/config/.env.mgmtnode1 or .env.example first)." >&2; exit 1; }
 cp -p "${ENV_FILE}" "${ENV_FILE}.bak"
 chmod 600 "${ENV_FILE}" "${ENV_FILE}.bak"
 
@@ -69,7 +69,7 @@ for i in "${!KEYS[@]}"; do
 done
 
 # SWIFT_HASH_PATH_* — only overwrite if still a placeholder (starts with "changeme").
-# Pre-built .env.node* files already have real values; leave them alone.
+# Pre-built .env.*node* files already have real values; leave them alone.
 for hk in SWIFT_HASH_PATH_PREFIX SWIFT_HASH_PATH_SUFFIX; do
     cur="$(grep "^${hk}=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true)"
     if [[ "${cur}" == changeme* ]]; then

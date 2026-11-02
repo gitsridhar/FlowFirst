@@ -2,10 +2,10 @@
 # ==============================================================================
 # FlowFirst - EXTRA_NODES helper (source this file; do not execute it)
 #
-# EXTRA_NODES in .env lists additional FULL core nodes beyond node1..node3:
+# EXTRA_NODES in .env lists additional FULL core nodes beyond mgmtnode1..mgmtnode3:
 #     EXTRA_NODES=extramgmtnode1:10.0.0.7,extramgmtnode2:10.0.0.8
 # Blank (default) = the classic three-node cluster; nothing below changes anything.
-# node4 is NOT an extra node: it is the remote worker (Process 5 only).
+# remotenode1 is NOT an extra node: it is the remote worker (Process 5 only).
 #
 # After `extra_nodes_load` these are set:
 #   EXTRA_NAMES[]   node names, in the order listed

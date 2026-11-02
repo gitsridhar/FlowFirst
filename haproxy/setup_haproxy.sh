@@ -22,11 +22,11 @@ fi
 source "${ROOT_DIR}/scripts/extra_nodes_lib.sh"
 extra_nodes_load || exit 1
 
-NODE1_NAME="${NODE1_NAME:-node1}"
+NODE1_NAME="${NODE1_NAME:-mgmtnode1}"
 NODE1_IP="${1:-${NODE1_IP:-}}"
-NODE2_NAME="${NODE2_NAME:-node2}"
+NODE2_NAME="${NODE2_NAME:-mgmtnode2}"
 NODE2_IP="${2:-${NODE2_IP:-}}"
-NODE3_NAME="${NODE3_NAME:-node3}"
+NODE3_NAME="${NODE3_NAME:-mgmtnode3}"
 NODE3_IP="${3:-${NODE3_IP:-}}"
 VIP="${4:-${FLOWFIRST_VIP:-}}"
 
@@ -266,9 +266,9 @@ fi
 
 echo "=================================================================="
 echo " Setting up HAProxy Load Balancer for FlowFirst Multi-Node Cluster"
-echo " Node 1:          ${NODE1_NAME} (${NODE1_IP})"
-echo " Node 2:          ${NODE2_NAME} (${NODE2_IP})"
-echo " Node 3:          ${NODE3_NAME} (${NODE3_IP})"
+echo " Mgmt Node 1:          ${NODE1_NAME} (${NODE1_IP})"
+echo " Mgmt Node 2:          ${NODE2_NAME} (${NODE2_IP})"
+echo " Mgmt Node 3:          ${NODE3_NAME} (${NODE3_IP})"
 echo " Virtual IP (VIP):${VIP}"
 echo " VIP NIC:         ${VIP_NIC}"
 echo " API Port (VIP):  ${API_PORT}"

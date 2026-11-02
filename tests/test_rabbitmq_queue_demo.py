@@ -17,14 +17,14 @@ def demo():
 
 
 TARGETS = {
-    "node1": ("10.0.0.1", 5672),
-    "node2": ("10.0.0.2", 5672),
-    "node3": ("10.0.0.3", 5672),
+    "mgmtnode1": ("10.0.0.1", 5672),
+    "mgmtnode2": ("10.0.0.2", 5672),
+    "mgmtnode3": ("10.0.0.3", 5672),
 }
 
 
 def test_resolve_named_and_literal(demo):
-    assert demo.resolve_target("node2", TARGETS) == ("node2", "10.0.0.2", 5672)
+    assert demo.resolve_target("mgmtnode2", TARGETS) == ("mgmtnode2", "10.0.0.2", 5672)
     assert demo.resolve_target("192.168.1.50:5671", TARGETS) == ("192.168.1.50:5671", "192.168.1.50", 5671)
 
 
@@ -41,8 +41,8 @@ def test_resolve_invalid_port(demo):
 
 
 def test_resolve_targets_drops_duplicate_hosts(demo):
-    res = demo.resolve_targets("node1,node2,10.0.0.1:5672", TARGETS)
-    assert res == [("node1", "10.0.0.1", 5672), ("node2", "10.0.0.2", 5672)]
+    res = demo.resolve_targets("mgmtnode1,mgmtnode2,10.0.0.1:5672", TARGETS)
+    assert res == [("mgmtnode1", "10.0.0.1", 5672), ("mgmtnode2", "10.0.0.2", 5672)]
 
 
 def test_demo_objects_never_collide_with_pipeline_queues(demo):
@@ -75,7 +75,7 @@ def test_share_percent_and_missing_entries(demo):
 
 def test_render_table_aligns_and_handles_none(demo):
     out = demo.render_table(
-        [{"a": "node1", "b": None}, {"a": "node2", "b": "5.1"}],
+        [{"a": "mgmtnode1", "b": None}, {"a": "mgmtnode2", "b": "5.1"}],
         [("a", "Node"), ("b", "Connect")],
     )
     lines = out.splitlines()
@@ -94,7 +94,7 @@ def test_cli_parsing(demo):
     p = demo.build_parser()
     assert p.parse_args(["run", "--keep", "--queue-type", "quorum"]).queue_type == "quorum"
     assert p.parse_args(["work", "--count", "9"]).count == 9
-    assert p.parse_args(["status", "--nodes", "node1,node2"]).nodes == "node1,node2"
+    assert p.parse_args(["status", "--nodes", "mgmtnode1,mgmtnode2"]).nodes == "mgmtnode1,mgmtnode2"
     assert p.parse_args(["cleanup", "--run-id", "abc"]).func is demo.cmd_cleanup
     with pytest.raises(SystemExit):
         p.parse_args(["run", "--queue-type", "bogus"])

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# FlowFirst - enable TLS on the Swift proxy (run on each of node1-3, as a user with sudo).
+# FlowFirst - enable TLS on the Swift proxy (run on each of mgmtnode1-3, as a user with sudo).
 #
 #   sudo ./security/enable_swift_tls.sh                     add cert_file/key_file to [DEFAULT] in proxy-server.conf
 #   sudo ./security/enable_swift_tls.sh --no-restart        write the configuration only

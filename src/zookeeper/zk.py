@@ -151,7 +151,7 @@ class LeaderElection:
     Wraps kazoo's Election recipe.
 
     Usage:
-        election = LeaderElection("transformer", node_name="node1")
+        election = LeaderElection("transformer", node_name="mgmtnode1")
         # This blocks until this node wins, then calls on_elected():
         election.run(on_elected_callback)
     """

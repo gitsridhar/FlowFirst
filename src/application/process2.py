@@ -128,8 +128,8 @@ def handle_flow2_message(ch, method, properties, body):
 
 def handle_flow3_message(ch, method, properties, body):
     """
-    Flow 3 handler on Transformer (Process 2) (Cluster Nodes 1-3).
-    Receives modified data back from Remote Node 4 / Remote Worker (Process 5) via RabbitMQ pool,
+    Flow 3 handler on Transformer (Process 2) (Cluster Mgmt Nodes 1-3).
+    Receives modified data back from Remote Node 1 / Remote Worker (Process 5) via RabbitMQ pool,
     evaluates and logs confirmation, and forwards directly to DB Updater (Process 4) on QUEUE_FLOW3_P2_TO_P4.
     """
     try:
@@ -399,7 +399,7 @@ def _gt_consume_flow2():
 
 def _gt_consume_flow3():
     """
-    Greenthread: dedicated consumer for QUEUE_FLOW3_P5_TO_P2 (from Remote Node 4).
+    Greenthread: dedicated consumer for QUEUE_FLOW3_P5_TO_P2 (from Remote Node 1).
     Owns its own RabbitMQ connection.
     """
     conn = gt.get_rmq_connection_with_retry("p2-flow3")

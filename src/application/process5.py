@@ -28,7 +28,7 @@ log = logging.getLogger("flowfirst.remote_worker")
 
 def handle_flow3_message(ch, method, properties, body):
     """
-    Flow 3 handler on Remote Node 4 / Remote Worker (Process 5).
+    Flow 3 handler on Remote Node 1 / Remote Worker (Process 5).
     Consumes from flow3_p1_to_p5, modifies/transforms the data,
     appends execution history, and reflects back to RabbitMQ pool on flow3_p5_to_p2.
     """
@@ -49,7 +49,7 @@ def handle_flow3_message(ch, method, properties, body):
             "stage": "process5_remote_transformed_and_reflected",
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "processed_by": NODE_NAME,
-            "node_type": "remote_node4",
+            "node_type": "remotenode1",
             "modification": f"Applied remote transform (multiplier={remote_step}, computed_value={computed_val})",
         })
 
@@ -74,7 +74,7 @@ def handle_flow3_message(ch, method, properties, body):
 
 
 def handle_flow6_message(ch, method, properties, body):
-    """Flow 6 remote handler on Remote Worker (Process 5) (Remote Node 4). Applies edge-sync step."""
+    """Flow 6 remote handler on Remote Worker (Process 5) (Remote Node 1). Applies edge-sync step."""
     try:
         data = json.loads(body.decode("utf-8"))
         device_id = data.get("device_id", "")
@@ -92,7 +92,7 @@ def handle_flow6_message(ch, method, properties, body):
             "stage": "process5_edge_sync_applied",
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "processed_by": NODE_NAME,
-            "node_type": "remote_node4",
+            "node_type": "remotenode1",
             "modification": f"Edge sync applied (token={edge_sync_token})",
         })
 

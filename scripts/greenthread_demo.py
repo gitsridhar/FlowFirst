@@ -10,7 +10,7 @@ eventlet greenthreads. This script shows the same building blocks in small, read
                  a gt.periodic() heartbeat keeps ticking meanwhile
     restart      gt.spawn(restart_on_error=True) re-spawns a crashed worker; the default does not
 
-  Cluster stages (talk to node1..node3 directly, no HAProxy, no REST API, no pipeline process)
+  Cluster stages (talk to mgmtnode1..mgmtnode3 directly, no HAProxy, no REST API, no pipeline process)
     probe        one greenthread per (node, service) opens a TCP connection to RabbitMQ, ZooKeeper and MariaDB at the same
                  time; the same probes run one after the other for comparison
     consume      one CONSUMER greenthread and one PUBLISHER greenthread per RabbitMQ node, all in this one OS thread, each
@@ -22,10 +22,10 @@ Usage:
     python3 scripts/greenthread_demo.py interleave
     python3 scripts/greenthread_demo.py concurrency --tasks 50 --delay 0.5
     python3 scripts/greenthread_demo.py restart
-    python3 scripts/greenthread_demo.py probe [--nodes node1,node2]
+    python3 scripts/greenthread_demo.py probe [--nodes mgmtnode1,mgmtnode2]
     python3 scripts/greenthread_demo.py consume --count 60 [--queue-type quorum]
 
-Where to run it: the local stages anywhere with the .venv; the cluster stages on node1..node4 or any workstation that can
+Where to run it: the local stages anywhere with the .venv; the cluster stages on mgmtnode1..remotenode1 or any workstation that can
 reach NODE1_IP..NODE3_IP and has the FlowFirst .env. RabbitMQ connections honour TLS_RABBITMQ_ENABLED through src.tls.tls
 (fails closed). The password is never printed.
 
@@ -86,7 +86,7 @@ from src.config.config import (  # noqa: E402
 from src.tls.tls import client_context  # noqa: E402
 
 DEMO_PREFIX = "flowfirst_demo_gt"   # must NOT match the policy pattern ^flow[123]_ (the pipeline queues)
-DEFAULT_NODES = "node1,node2,node3"
+DEFAULT_NODES = "mgmtnode1,mgmtnode2,mgmtnode3"
 DEFAULT_TIMEOUT_S = 10.0
 PROBE_TIMEOUT_S = 2.0
 POLL_INTERVAL_S = 0.05
@@ -114,11 +114,11 @@ def get_zk_port() -> int:
 def named_targets(port: Optional[int] = None) -> Dict[str, Tuple[str, int]]:
     """Label -> (host, port) for the three cluster members (port = the RabbitMQ client port)."""
     p = port if port is not None else get_amqp_port()
-    return {"node1": (NODE1_IP, p), "node2": (NODE2_IP, p), "node3": (NODE3_IP, p)}
+    return {"mgmtnode1": (NODE1_IP, p), "mgmtnode2": (NODE2_IP, p), "mgmtnode3": (NODE3_IP, p)}
 
 
 def resolve_target(spec: str, targets: Optional[Dict[str, Tuple[str, int]]] = None) -> Node:
-    """('node2') -> ('node2', '<NODE2_IP>', 5672); '10.0.0.1:5672' -> ('10.0.0.1:5672', '10.0.0.1', 5672)."""
+    """('mgmtnode2') -> ('mgmtnode2', '<NODE2_IP>', 5672); '10.0.0.1:5672' -> ('10.0.0.1:5672', '10.0.0.1', 5672)."""
     spec = (spec or "").strip()
     if not spec:
         raise ValueError("empty node name")
@@ -136,7 +136,7 @@ def resolve_target(spec: str, targets: Optional[Dict[str, Tuple[str, int]]] = No
 
 
 def resolve_targets(csv: str, targets: Optional[Dict[str, Tuple[str, int]]] = None) -> List[Node]:
-    """'node1,node2' -> [(label, host, port), ...] with duplicate host:port pairs omitted."""
+    """'mgmtnode1,mgmtnode2' -> [(label, host, port), ...] with duplicate host:port pairs omitted."""
     out, seen = [], set()
     for part in (csv or "").split(","):
         part = part.strip()

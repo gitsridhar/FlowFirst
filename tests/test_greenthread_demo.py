@@ -14,9 +14,9 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 TARGETS = {
-    "node1": ("10.0.0.1", 5672),
-    "node2": ("10.0.0.2", 5672),
-    "node3": ("10.0.0.3", 5672),
+    "mgmtnode1": ("10.0.0.1", 5672),
+    "mgmtnode2": ("10.0.0.2", 5672),
+    "mgmtnode3": ("10.0.0.3", 5672),
 }
 
 
@@ -47,7 +47,7 @@ def test_import_does_not_monkey_patch():
 
 
 def test_resolve_named_and_literal(demo):
-    assert demo.resolve_target("node2", TARGETS) == ("node2", "10.0.0.2", 5672)
+    assert demo.resolve_target("mgmtnode2", TARGETS) == ("mgmtnode2", "10.0.0.2", 5672)
     assert demo.resolve_target("192.168.1.50:5671", TARGETS) == ("192.168.1.50:5671", "192.168.1.50", 5671)
 
 
@@ -61,7 +61,7 @@ def test_resolve_errors(demo):
 
 
 def test_resolve_targets_drops_duplicates(demo):
-    assert [t[0] for t in demo.resolve_targets("node1, node2,node1", TARGETS)] == ["node1", "node2"]
+    assert [t[0] for t in demo.resolve_targets("mgmtnode1, mgmtnode2,mgmtnode1", TARGETS)] == ["mgmtnode1", "mgmtnode2"]
 
 
 def test_expected_interleave(demo):
@@ -86,10 +86,10 @@ def test_demo_queue_never_matches_pipeline_queues(demo):
 
 
 def test_probe_plan_covers_every_service_on_every_node(demo):
-    plan = demo.probe_plan([("node1", "10.0.0.1", 5672), ("node2", "10.0.0.2", 5672)])
+    plan = demo.probe_plan([("mgmtnode1", "10.0.0.1", 5672), ("mgmtnode2", "10.0.0.2", 5672)])
     assert len(plan) == 6
     assert {p[1] for p in plan} == {"rabbitmq", "zookeeper", "mariadb"}
-    assert {p[0] for p in plan} == {"node1", "node2"}
+    assert {p[0] for p in plan} == {"mgmtnode1", "mgmtnode2"}
 
 
 def test_render_table(demo):
@@ -110,7 +110,7 @@ def test_parser_defaults_to_run_and_validates(demo):
 
 def test_usage_errors_exit_2(demo, capsys):
     assert demo.main(["concurrency", "--tasks", "0"]) == 2
-    assert demo.main(["consume", "--count", "-1", "--nodes", "node1"]) == 2
+    assert demo.main(["consume", "--count", "-1", "--nodes", "mgmtnode1"]) == 2
     assert "ERROR" in capsys.readouterr().err
 
 
@@ -200,7 +200,7 @@ def test_consume_stage_with_fake_broker(demo, monkeypatch):
 
     monkeypatch.setattr(demo, "connect_node", fake_connect)
     monkeypatch.setattr(demo, "WORK_SECONDS", 0.002)
-    ctx = demo.Context(demo.resolve_targets("node1,node2,node3", TARGETS), timeout_s=5, count=30)
+    ctx = demo.Context(demo.resolve_targets("mgmtnode1,mgmtnode2,mgmtnode3", TARGETS), timeout_s=5, count=30)
     ok, rows = demo.stage_consume(ctx)
 
     assert ok, rows
@@ -216,7 +216,7 @@ def test_consume_stage_reports_unreachable_broker(demo, monkeypatch):
         raise ConnectionRefusedError("secret-host")
 
     monkeypatch.setattr(demo, "connect_node", refuse)
-    ctx = demo.Context(demo.resolve_targets("node1", TARGETS), timeout_s=1, count=3)
+    ctx = demo.Context(demo.resolve_targets("mgmtnode1", TARGETS), timeout_s=1, count=3)
     with pytest.raises(ConnectionRefusedError):
         demo.stage_consume(ctx)
 
@@ -226,7 +226,7 @@ def test_run_stages_hides_exception_text(demo, monkeypatch, capsys):
         raise ConnectionRefusedError("secret-host:5672")
 
     monkeypatch.setattr(demo, "connect_node", refuse)
-    ctx = demo.Context(demo.resolve_targets("node1", TARGETS), timeout_s=1, count=3)
+    ctx = demo.Context(demo.resolve_targets("mgmtnode1", TARGETS), timeout_s=1, count=3)
     assert demo._run_stages(["consume"], ctx, "t") == 1
     out = capsys.readouterr().out
     assert "FAIL: ConnectionRefusedError" in out and "secret-host" not in out

@@ -5,7 +5,7 @@ Demonstrates the four core ZooKeeper primitives used across the FlowFirst pipeli
 (leader election, dynamic config watches, ephemeral service registry, and atomic dedup barriers)
 directly against the ZooKeeper 3-node ensemble, without requiring the REST API or RabbitMQ:
 
-1. Ensemble Status & Quorum Inspection: queries node1, node2, node3 for roles (leader/follower)
+1. Ensemble Status & Quorum Inspection: queries mgmtnode1, mgmtnode2, mgmtnode3 for roles (leader/follower)
    and quorum sync state.
 2. Distributed Leader Election & Failover: demonstrates active-leader election, sequential znode
    ordering, standby contenders on follower nodes, and automatic failover on step-down.
@@ -26,7 +26,7 @@ Usage:
     python3 scripts/zk_coordination_demo.py dedup --message-id msg-101
     python3 scripts/zk_coordination_demo.py cleanup [--all]
 
-Where to run it: on node1, node2, node3, node4 (client-only), or any workstation with network
+Where to run it: on mgmtnode1, mgmtnode2, mgmtnode3, remotenode1 (client-only), or any workstation with network
 access to port 2181/2281 on NODE1_IP..NODE3_IP and the FlowFirst .env file.
 Honours TLS_ZK_ENABLED through src.tls.tls (fails closed).
 """
@@ -65,7 +65,7 @@ from src.config.config import (  # noqa: E402
 from src.tls.tls import zk_kwargs  # noqa: E402
 
 DEMO_ROOT = "/flowfirst/zk_demo"
-DEFAULT_NODES = "node1,node2,node3"
+DEFAULT_NODES = "mgmtnode1,mgmtnode2,mgmtnode3"
 DEFAULT_TIMEOUT_S = 10.0
 POLL_INTERVAL_S = 0.05
 
@@ -81,14 +81,14 @@ def named_targets(port: Optional[int] = None) -> Dict[str, Tuple[str, int]]:
     """Label -> (host, port) for the ZooKeeper ensemble nodes."""
     p = port if port is not None else get_zk_port()
     return {
-        "node1": (NODE1_IP, p),
-        "node2": (NODE2_IP, p),
-        "node3": (NODE3_IP, p),
+        "mgmtnode1": (NODE1_IP, p),
+        "mgmtnode2": (NODE2_IP, p),
+        "mgmtnode3": (NODE3_IP, p),
     }
 
 
 def resolve_target(spec: str, targets: Optional[Dict[str, Tuple[str, int]]] = None) -> Tuple[str, str, int]:
-    """('node2') -> ('node2', '<NODE2_IP>', 2181); '10.0.0.1:2181' -> ('10.0.0.1:2181', '10.0.0.1', 2181)."""
+    """('mgmtnode2') -> ('mgmtnode2', '<NODE2_IP>', 2181); '10.0.0.1:2181' -> ('10.0.0.1:2181', '10.0.0.1', 2181)."""
     spec = (spec or "").strip()
     if not spec:
         raise ValueError("empty node name")
@@ -106,7 +106,7 @@ def resolve_target(spec: str, targets: Optional[Dict[str, Tuple[str, int]]] = No
 
 
 def resolve_targets(csv: str, targets: Optional[Dict[str, Tuple[str, int]]] = None) -> List[Tuple[str, str, int]]:
-    """'node1,node2' -> [(label, host, port), ...] with duplicate host:port pairs omitted."""
+    """'mgmtnode1,mgmtnode2' -> [(label, host, port), ...] with duplicate host:port pairs omitted."""
     out, seen = [], set()
     for part in (csv or "").split(","):
         part = part.strip()
@@ -292,7 +292,7 @@ def stage_leader_election(nodes: List[Tuple[str, str, int]], run_id: str, timeou
             t = threading.Thread(target=make_worker(el, is_leader_evt, stop_evt, cand_id, label), daemon=True)
             threads.append(t)
 
-        # 1. Start candidate 0 (representing node1)
+        # 1. Start candidate 0 (representing mgmtnode1)
         t0 = time.time()
         threads[0].start()
         leader_events[0].wait(timeout=timeout_s)
@@ -306,7 +306,7 @@ def stage_leader_election(nodes: List[Tuple[str, str, int]], run_id: str, timeou
             "status": "PASS: Elected as Leader",
         })
 
-        # 2. Start subsequent candidates (node2, node3) — they must queue in standby
+        # 2. Start subsequent candidates (mgmtnode2, mgmtnode3) — they must queue in standby
         for i in range(1, len(nodes)):
             threads[i].start()
         time.sleep(0.2)  # allow znodes to register in ZK
@@ -322,10 +322,10 @@ def stage_leader_election(nodes: List[Tuple[str, str, int]], run_id: str, timeou
             "status": f"PASS: {len(znodes)} contenders queued in sequence",
         })
 
-        # 3. Simulate Node 1 leader step-down / failover
+        # 3. Simulate Mgmt Node 1 leader step-down / failover
         t_failover_start = time.time()
         stop_events[0].set()  # release node 1
-        # Wait for candidate 1 (node2) to win leadership
+        # Wait for candidate 1 (mgmtnode2) to win leadership
         won = leader_events[1].wait(timeout=timeout_s)
         t_failover_ms = (time.time() - t_failover_start) * 1000
 
@@ -389,7 +389,7 @@ def stage_config_watches(nodes: List[Tuple[str, str, int]], run_id: str, timeout
 
         time.sleep(0.1)
 
-        # Write config value through Node 1
+        # Write config value through Mgmt Node 1
         writer_node = nodes[0][0]
         test_val_1 = "38.5"
         t_write1 = time.time()
@@ -420,7 +420,7 @@ def stage_config_watches(nodes: List[Tuple[str, str, int]], run_id: str, timeout
             "result": "PASS: Broadcast via DataWatch" if all_got_1 else "FAIL: Watch update lost",
         })
 
-        # Write a second update through Node 3 (or last node) to show any node can update config
+        # Write a second update through Mgmt Node 3 (or last node) to show any node can update config
         last_idx = len(nodes) - 1
         writer_node_2 = nodes[last_idx][0]
         test_val_2 = "45.0"
@@ -471,7 +471,7 @@ def stage_service_registry(nodes: List[Tuple[str, str, int]], run_id: str, timeo
             zk.ensure_path(registry_path)
             clients.append(zk)
 
-        # 1. Register ephemeral znodes from node1 and node2
+        # 1. Register ephemeral znodes from mgmtnode1 and mgmtnode2
         p1 = f"{registry_path}/{nodes[0][0]}"
         p2 = f"{registry_path}/{nodes[1][0]}"
         d1 = json.dumps({"node": nodes[0][0], "pid": os.getpid(), "role": "active"}).encode()
@@ -480,7 +480,7 @@ def stage_service_registry(nodes: List[Tuple[str, str, int]], run_id: str, timeo
         clients[0].create(p1, d1, ephemeral=True)
         clients[1].create(p2, d2, ephemeral=True)
 
-        # Node 3 reads registered services
+        # Mgmt Node 3 reads registered services
         reader_zk = clients[-1]
         active_services = reader_zk.get_children(registry_path)
         expected = [nodes[0][0], nodes[1][0]]
@@ -493,11 +493,11 @@ def stage_service_registry(nodes: List[Tuple[str, str, int]], run_id: str, timeo
             "status": "PASS: Discovered across ensemble" if registered_ok else "FAIL: Workers not found",
         })
 
-        # 2. Simulate Node 1 crash/exit: close client session
+        # 2. Simulate Mgmt Node 1 crash/exit: close client session
         clients[0].stop()
         clients[0].close()
 
-        # Node 3 polls for automatic ephemeral deletion
+        # Mgmt Node 3 polls for automatic ephemeral deletion
         start = time.time()
         vanished = False
         remaining = []
@@ -541,7 +541,7 @@ def stage_dedup_barrier(nodes: List[Tuple[str, str, int]], run_id: str, timeout_
         msg_id = f"msg_{uuid.uuid4().hex[:8]}"
         znode = f"{dedup_path}/{msg_id}"
 
-        # 1. Node 1 processes message for the first time
+        # 1. Mgmt Node 1 processes message for the first time
         first_attempt = False
         try:
             clients[0].create(znode, b"1", makepath=True)
@@ -557,7 +557,7 @@ def stage_dedup_barrier(nodes: List[Tuple[str, str, int]], run_id: str, timeout_
             "result": "PASS: First-seen accepted" if first_attempt else "FAIL: First-seen rejected",
         })
 
-        # 2. Node 2 receives duplicate delivery of identical message_id
+        # 2. Mgmt Node 2 receives duplicate delivery of identical message_id
         second_attempt_blocked = False
         try:
             clients[1].create(znode, b"1", makepath=True)
@@ -573,7 +573,7 @@ def stage_dedup_barrier(nodes: List[Tuple[str, str, int]], run_id: str, timeout_
             "result": "PASS: Dedup barrier blocked insert" if second_attempt_blocked else "FAIL: Duplicate slipped through",
         })
 
-        # 3. Node 3 also checks
+        # 3. Mgmt Node 3 also checks
         third_attempt_blocked = False
         if len(nodes) > 2:
             try:
@@ -583,7 +583,7 @@ def stage_dedup_barrier(nodes: List[Tuple[str, str, int]], run_id: str, timeout_
             logs.append({
                 "message_id": msg_id,
                 "delivery_node": nodes[2][0],
-                "action": "Duplicate redelivery (Node 3)",
+                "action": "Duplicate redelivery (Mgmt Node 3)",
                 "decision": "SKIP (Duplicate blocked)" if third_attempt_blocked else "INSERT (Collision!)",
                 "result": "PASS: Dedup barrier verified" if third_attempt_blocked else "FAIL: Duplicate slipped through",
             })
@@ -814,7 +814,7 @@ def cmd_dedup(args) -> int:
 
 
 def cmd_cleanup(args) -> int:
-    _, host, port = resolve_target(args.node or "node1")
+    _, host, port = resolve_target(args.node or "mgmtnode1")
     path = DEMO_ROOT if args.all else f"{DEMO_ROOT}/{args.run_id}" if args.run_id else DEMO_ROOT
     cnt = delete_demo_tree(host, port, path)
     print(f"Cleaned up {cnt} demo znode(s) under '{path}'")
@@ -865,7 +865,7 @@ def build_parser() -> argparse.ArgumentParser:
     dd.set_defaults(func=cmd_dedup)
 
     c = sub.add_parser("cleanup", help="remove demo znodes")
-    c.add_argument("--node", default="node1", help="node to issue cleanup command through")
+    c.add_argument("--node", default="mgmtnode1", help="node to issue cleanup command through")
     c.add_argument("--run-id", default=None, help="clean up specific run ID only")
     c.add_argument("--all", action="store_true", help="remove entire /flowfirst/zk_demo tree")
     c.set_defaults(func=cmd_cleanup)

@@ -129,7 +129,7 @@ def handle_flow2_message(ch, method, properties, body):
 def handle_flow3_message(ch, method, properties, body):
     """
     Flow 3 final handler — runs inside the flow3 consumer greenthread.
-    Persists data completed from P1 -> P5 (Node 4) -> P2 -> P4 into MariaDB & Swift.
+    Persists data completed from P1 -> P5 (Remote Node 1) -> P2 -> P4 into MariaDB & Swift.
     """
     try:
         data   = json.loads(body.decode("utf-8"))
@@ -594,7 +594,7 @@ def _consume():
     # Greenthread 2: Flow 2 consumer (own connection)
     gt.spawn_consumers("p4_flow2_consumer", _gt_consume_flow2, GT_CONSUMERS_PER_QUEUE)
 
-    # Greenthread 3: Flow 3 consumer (from Transformer (Process 2) via Remote Node 4 pipeline)
+    # Greenthread 3: Flow 3 consumer (from Transformer (Process 2) via Remote Node 1 pipeline)
     gt.spawn_consumers("p4_flow3_consumer", _gt_consume_flow3, GT_CONSUMERS_PER_QUEUE)
 
     # Flow 4 consumer (create device)

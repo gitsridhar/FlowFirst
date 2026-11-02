@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """FlowFirst demo: how Pacemaker is used across the cluster nodes.
 
-Pacemaker (with Corosync) decides WHERE things run on node1..node3: the Virtual IP (VIP) plus HAProxy as one group on a
+Pacemaker (with Corosync) decides WHERE things run on mgmtnode1..mgmtnode3: the Virtual IP (VIP) plus HAProxy as one group on a
 single node, and the four pipeline processes (API Gateway, Transformer, Forwarder, DB Updater) as clones on every node.
 This script asks Pacemaker what it believes (crm_mon), then asks every node what is really true (ssh: systemd units,
 interface addresses), and compares the two. Two optional stages then cause a real failure on purpose and show Pacemaker
@@ -25,10 +25,10 @@ Usage:
     python3 scripts/pacemaker_cluster_demo.py cluster | resources | vip | services
     python3 scripts/pacemaker_cluster_demo.py watch --seconds 90
     python3 scripts/pacemaker_cluster_demo.py failover --yes
-    python3 scripts/pacemaker_cluster_demo.py ban --yes --process 2 --node node3
+    python3 scripts/pacemaker_cluster_demo.py ban --yes --process 2 --node mgmtnode3
 
-Where to run it: on node1, node2 or node3 (it calls 'sudo -n crm_mon' and 'sudo -n pcs' on the machine it runs on), with
-the FlowFirst .env, and passwordless ssh + sudo to the other nodes (the same set-up as Phase 0). node4 is not a cluster
+Where to run it: on mgmtnode1, mgmtnode2 or mgmtnode3 (it calls 'sudo -n crm_mon' and 'sudo -n pcs' on the machine it runs on), with
+the FlowFirst .env, and passwordless ssh + sudo to the other nodes (the same set-up as Phase 0). remotenode1 is not a cluster
 member and cannot run it. TLS for the request through the VIP follows TLS_API_ENABLED through src.tls.tls (fails
 closed). Errors print only the exception type or an exit code, never a command's output (it can hold hosts). No secret
 is read or printed. The commands are run as argument lists, never through a shell on this machine.
@@ -246,14 +246,14 @@ def describe_error(e: Exception) -> str:
 # ----------------------------------------------------------------------------- settings and command access
 
 class CNode(NamedTuple):
-    label: str     # node1..node3
+    label: str     # mgmtnode1..mgmtnode3
     host: str      # address for ssh
     name: str      # NODEn_NAME: the node name inside Pacemaker, and what API Gateway (Process 1) reports as "node"
 
 
 def cluster_nodes() -> List[CNode]:
-    ips = {"node1": NODE1_IP, "node2": NODE2_IP, "node3": NODE3_IP}
-    return [CNode(label, ip, os.getenv(f"{label.upper()}_NAME", label).strip() or label) for label, ip in ips.items()]
+    ips = {"mgmtnode1": ("NODE1_NAME", NODE1_IP), "mgmtnode2": ("NODE2_NAME", NODE2_IP), "mgmtnode3": ("NODE3_NAME", NODE3_IP)}
+    return [CNode(label, ip, os.getenv(env, label).strip() or label) for label, (env, ip) in ips.items()]
 
 
 def _safe(value: str, what: str) -> str:

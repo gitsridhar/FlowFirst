@@ -277,6 +277,8 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [72](#scenario-72-greenthread-eventlet-demo-locally-and-across-nodes) | Greenthread (eventlet) Demo Locally and Across Nodes | Greenthreads | `scripts/greenthread_demo.py`: cooperative scheduling, many waits on one OS thread, `restart_on_error`, probing all nodes at once, a consumer + publisher greenthread per RabbitMQ node |
 | [73](#scenario-73-swift-object-storage-demo-across-nodes) | Swift Object Storage Demo Across Nodes | Swift | `scripts/swift_object_demo.py`: write through each proxy node, read from every node, container listing, object lifecycle, the `swift_storage.py` helpers via the VIP |
 | [74](#scenario-74-haproxy-load-balancing-demo-across-nodes) | HAProxy Load-Balancing Demo Across Nodes | HAProxy | `scripts/haproxy_lb_demo.py`: VIP vs node ports, HAProxy's own backend state, round-robin on REST/MariaDB/RabbitMQ/Swift, live `watch` during a node outage |
+| [75](#scenario-75-pacemaker-cluster-demo-across-nodes) | Pacemaker Cluster Demo Across Nodes | Pacemaker | `scripts/pacemaker_cluster_demo.py`: quorum/DC, resource placement vs the real interfaces and systemd on every node, `failover` (VIP holder to standby) and `ban` (one pipeline instance) with automatic restore, live `watch` |
+
 
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
@@ -9808,6 +9810,183 @@ Rules that apply in this project (see `AGENTS.md`): API Gateway (Process 1) list
 - After the VIP moves, the new HAProxy starts with its counters at 0. The before/after subtraction handles that within a stage (a reset is shown as 0, never negative), but the *total sessions* column restarts from 0.
 
 ---
+
+## Scenario 75: Pacemaker Cluster Demo Across Nodes
+
+> **Goal:** show, with a small piece of code you can read, what Pacemaker does for FlowFirst and that it does it on every node. The script is `scripts/pacemaker_cluster_demo.py`. It asks Pacemaker what it believes (`crm_mon`), asks each of node1–node3 what is really true (`systemctl`, `ip addr` over `ssh`), and compares the two: which node is the Designated Controller, whether there is quorum, where the VIP, HAProxy and the four pipeline clones run, and whether the services on each node match. Two optional stages then **cause a real failure on purpose** (standby of the VIP holder, ban of one pipeline instance), time Pacemaker's reaction and put everything back. It is a demonstration, not a fencing or quorum test (Scenarios 16–26 are). For the cluster set-up see Phase 5; for the manual commands see Scenarios 8, 10, 11 and 15; for the log lines see Scenario 49.
+>
+> **Runs on:** **node1, node2 or node3** (it runs `sudo -n crm_mon` and `sudo -n pcs` on the machine it runs on) with the FlowFirst `.env`, passwordless `sudo` there and passwordless `ssh` to the other two nodes (the Phase 0 set-up; on those nodes it only runs `systemctl is-active` and `ip addr show`, which need no `sudo`). **node4 cannot run it**: it is not a cluster member and has no Pacemaker. A workstation cannot run it either, because it needs the cluster tools.
+
+### What Pacemaker does here (so the output makes sense)
+
+The resources are created by `pacemaker/configure_multinode_resources.sh`:
+
+| Resource | Type | Placement | What Pacemaker does |
+|---|---|---|---|
+| `flowfirst-vip` | `ocf:heartbeat:IPaddr2` | **one** node (group `vip-haproxy-group`) | adds/removes the VIP address on the NIC; monitor every 10 s |
+| `haproxy-res` | `systemd:haproxy` | same node as the VIP (same group) | starts HAProxy where the VIP lands; monitor every 15 s |
+| `flowfirst-p1-res-clone` … `p4` | `systemd:flowfirst-process1`…`4` | **every** active node (`clone-max=3`, `clone-node-max=1`) | starts, stops and monitors (every 30 s) each pipeline process |
+
+Ordering constraint: the API Gateway clone starts before `vip-haproxy-group`. Corosync carries membership and quorum (2 of 3 nodes needed); `stonith-enabled=false`, so a lost node is assumed dead and **not fenced** (see the limits). One node is the **DC** (Designated Controller) and makes every scheduling decision. FlowFirst's own leader election (ZooKeeper, Scenario 70) is a separate mechanism: Pacemaker decides where a process *runs*, ZooKeeper decides which running instance *does the work*.
+
+### What it does
+
+| Stage | Changes the cluster? | What happens | Code |
+|---|---|---|---|
+| 1 `cluster` | no | Reads `crm_mon --output-as=xml`: every node `online`/`standby`/`OFFLINE`, which one is the DC, and whether the partition has quorum (needs 2 of 3 active). | `stage_cluster()`, `parse_view()` |
+| 2 `resources` | no | For the VIP, HAProxy and the four clones: where each runs against where it should (VIP + HAProxy on exactly one node, the same node; clones on every active node), plus any failed resource or failed action. | `stage_resources()`, `expected_placement()` |
+| 3 `vip` | no | Pacemaker says node X holds the VIP; the demo then runs `ip -o -4 addr show` on **each** node and checks that exactly that node has the address, and sends `GET /health` through the VIP. | `stage_vip()`, `probe_vip()` |
+| 4 `services` | no | On each node: `corosync`, `pacemaker`, `pcsd` must be active, and each `flowfirst-processN` unit must be active **exactly where Pacemaker says it runs**. | `stage_services()`, `service_mismatches()` |
+| `watch` | no | One line per second for `--seconds`: VIP holder, DC, active nodes, a request through the VIP and the number of instances of each clone. A line is flagged when Pacemaker changes a placement. | `cmd_watch()` |
+| `failover` | **yes, needs `--yes`** | Puts the node that holds the VIP into standby (Scenario 8), measures when Pacemaker has started the VIP + HAProxy on another node and when `GET /health` through the VIP answers again, then `unstandby`s the node and waits until it runs its clones again. | `stage_failover()` |
+| `ban` | **yes, needs `--yes`** | Bans one pipeline clone (`--process 1..4`) from one node (`--node`, default: a node that does not hold the VIP) as in Scenario 11, checks that it runs on the *other* nodes only, that `systemd` on the target really stopped it, and that the VIP still answers; then `clear`s the ban and `crm_resource -C` and waits until all nodes run it again. | `stage_ban()` |
+
+Safety properties of the demo:
+
+- **The default `run` is read-only.** It only runs `crm_mon -1`, `systemctl is-active`, `ip addr show` and one `GET /health`.
+- **The two changing stages refuse to start unless `--yes` is given**, and refuse (exit 1, `REFUSED: …`, nothing changed) unless the cluster is healthy first: quorum, all 3 nodes online and not in standby/maintenance, VIP and HAProxy on one node together, every clone on every node, no failed actions. A demo must not be started on a cluster that is already degraded.
+- **Everything it changes is restored in a `finally` block**, also on `Ctrl-C` or an error. If the restore itself fails, the result line says `Run by hand NOW: sudo pcs node unstandby <node>` (or `pcs resource clear <clone>`). Check `sudo pcs status` afterwards.
+- **Commands are argument lists, never a shell string on the local machine.** Node names, the `ssh` user and `pcs` arguments are checked against a strict pattern (no leading `-`, no spaces or shell characters) before use. `ssh` runs with `BatchMode=yes` and one fixed read-only command per node.
+- **Secrets and error text.** It reads no password. Errors print only an exception type or an exit code (`a cluster command failed (exit 1)`), never a command's output (which can hold hosts and addresses). TLS for the VIP request follows `TLS_API_ENABLED` through `src.tls.tls` (client certificate presented, server verified; there is no insecure mode).
+
+### Prerequisites
+
+- The cluster of Phase 5 is up and `sudo pcs status` shows 3 nodes online and the resources started. Without it every stage reports a failure rather than a result.
+- On the machine you run it on: `sudo -n crm_mon` and `sudo -n pcs` work without a password (Phase 0 gives `flowadmin` passwordless `sudo`), and `ssh <node-ip>` works without a prompt to the other two nodes (`PKI_SSH_USER` from `.env` is used as the `ssh` user when set; override with `--ssh-user`).
+- `.env` has `FLOWFIRST_VIP`, `NODE1_IP`..`NODE3_IP`, and `NODE1_NAME`..`NODE3_NAME` only if the Pacemaker node names differ from `node1`..`node3` (they must equal the names shown by `sudo pcs status`, and `NODE_NAME` in `.env` on each node must equal that node's Pacemaker name so the demo reads the local node without `ssh`).
+- Python 3 with the `.venv` active (`cd /opt/flowfirst && source .venv/bin/activate`).
+
+### A. Run the read-only demo
+
+```bash
+python3 scripts/pacemaker_cluster_demo.py
+```
+
+Expected output shape (illustrative: the layout comes from the code, the values will differ; this sample was composed from the code and has not been produced by a real cluster):
+
+```text
+== FlowFirst Pacemaker Cluster Demo ==
+cluster    : flowfirst_cluster
+VIP        : 10.10.1.200   (REST 8080, TLS off)
+nodes      : node1 (10.10.1.128), node2 (10.10.1.129), node3 (10.10.1.130)
+run on     : node1   (ssh as flowadmin)
+
+[1] Cluster membership and quorum
+    node     state         role                      result
+    -------  ------------  ------------------------  -------------------------------------
+    node1    online        DC (makes the decisions)  PASS: eligible to run resources
+    node2    online                                  PASS: eligible to run resources
+    node3    online                                  PASS: eligible to run resources
+    CLUSTER  3/3 active    DC: node1                 PASS: partition with quorum (needs 2)
+
+[2] Resource placement: Pacemaker's view
+    resource                                    placement rule     running on         expected           result
+    ------------------------------------------  -----------------  -----------------  -----------------  ------
+    vip-haproxy-group / flowfirst-vip           one node (group)   node1              node1              PASS
+    vip-haproxy-group / haproxy-res             same node as VIP   node1              node1              PASS
+    flowfirst-p1-res-clone (API Gateway (P 1))  every active node  node1 node2 node3  node1 node2 node3  PASS
+    ...
+
+[3] Virtual IP: Pacemaker's view against the real interfaces
+    node          Pacemaker says  interface (ip addr)  result
+    ------------  --------------  -------------------  ------------------------------------------
+    node1         holds the VIP   has the address      PASS: Pacemaker and the interface agree
+    node2         -               -                    PASS: Pacemaker and the interface agree
+    node3         -               -                    PASS: Pacemaker and the interface agree
+    VIP 10.10.1.200  holder: node1  1 node(s) have it   PASS: GET /health through the VIP answered by node2
+
+[4] Services on every node: systemd against Pacemaker
+    node   cluster daemons                                    pipeline units                                  result
+    -----  -------------------------------------------------  ----------------------------------------------  ---------------------------------
+    node1  corosync=active pacemaker=active pcsd=active       p1=active p2=active p3=active p4=active         PASS: systemd matches Pacemaker
+    ...
+
+[5] Summary & Result
+    PASS: Pacemaker's placement matches the real state of every node.
+```
+
+The exit code is 0 on success, 1 if a stage failed, 2 for a usage error. A node left in `standby` (Scenario 8) makes stage 1 print `NOTE: online but runs nothing` and the run exit 1; that is intended, because the cluster is not fully active. Single stages: `python3 scripts/pacemaker_cluster_demo.py cluster|resources|vip|services`.
+
+### B. Failover: the VIP and HAProxy move to another node
+
+```bash
+python3 scripts/pacemaker_cluster_demo.py failover --yes
+```
+
+```text
+== Pacemaker: Failover: standby the VIP holder, then restore ==
+    10:21:03  VIP and HAProxy run on node1; putting it into standby
+    10:21:06  Pacemaker started the VIP and HAProxy on node2 after 3 s
+    10:21:07  GET /health through the VIP answered by node3 after 4 s
+    10:21:07  restoring: pcs node unstandby node1
+    step                                   result
+    -------------------------------------  ---------------------------------------------------------------
+    pcs node standby node1                 PASS: accepted
+    VIP and HAProxy move to another node   PASS: node1 -> node2 in 3 s
+    VIP answers again                      PASS: after 4 s (2 request(s) failed on the way: expected, the old HAProxy was gone)
+    pcs node unstandby node1               PASS: node1 runs its clones again after 6 s
+```
+
+(Illustrative; the timings in this sample are invented. Measure yours.) A few failed requests while the VIP moves are normal: the old HAProxy is gone and the new one is not listening yet. The pipeline itself keeps working because the clones on node2 and node3 are untouched; the clones on node1 stop while it is in standby and restart on `unstandby`. With `--wait` you set how long the demo waits for Pacemaker (default 90 s).
+
+### C. Ban one pipeline instance from one node
+
+```bash
+python3 scripts/pacemaker_cluster_demo.py ban --yes --process 2 --node node3
+```
+
+```text
+== Pacemaker: Ban one pipeline instance from one node, then restore ==
+    step                                           result
+    ---------------------------------------------  ----------------------------------------------------
+    pcs resource ban flowfirst-p2-res-clone node3  PASS: accepted
+    Transformer (Process 2) stops on node3 only    PASS: now running on node1 node2 (after 2 s)
+    systemd on node3: flowfirst-process2           PASS: inactive, Pacemaker stopped it
+    request through the VIP                        PASS: still answered
+    pcs resource clear flowfirst-p2-res-clone      PASS: running on every node again after 3 s
+```
+
+This is the same operation as Scenario 11, with the checks written in code: only the targeted instance stops, the other two nodes keep processing, and the VIP is unaffected. `--process 1` is the API Gateway, `4` the DB Updater; leader election (Scenario 70) hands the work to a surviving instance if the banned one was the leader.
+
+### D. Watch Pacemaker react live
+
+```bash
+# Terminal 1
+python3 scripts/pacemaker_cluster_demo.py watch --seconds 120
+# Terminal 2: cause the event yourself, then undo it
+sudo pcs node standby node1
+sudo pcs node unstandby node1
+```
+
+Each line shows the VIP holder, the DC, active nodes (`3/3`), whether a request through the VIP worked, and the instance count of each clone (`3 3 3 3` normally). The line where Pacemaker changes anything ends with `<-- Pacemaker changed a placement`. `watch` exits 1 if any request failed, which is expected during a failover. Do not run `watch` while the `failover` or `ban` stage is also changing the cluster.
+
+### E. The same facts by hand
+
+```bash
+sudo crm_mon -1Ar                                          # the view the demo parses (add --output-as=xml for the raw form)
+sudo crm_resource --resource flowfirst-vip --locate        # where the VIP is
+for n in ${NODE1_IP} ${NODE2_IP} ${NODE3_IP}; do           # does the interface agree?
+  echo "== $n"; ssh -o BatchMode=yes "$n" "ip -o -4 addr show | grep ${FLOWFIRST_VIP}; systemctl is-active corosync pacemaker pcsd flowfirst-process{1,2,3,4}"
+done
+sudo pcs constraint                                        # ordering, plus any ban left behind (cli-ban-* entries)
+sudo pcs status --full | grep -iE "standby|failed|offline"
+```
+
+### How to use Pacemaker from your own scripts
+
+Project rules (see `AGENTS.md`): never start `haproxy.service` or `flowfirst-processN` directly on a clustered node; use `pcs resource ban/clear`, `pcs node standby/unstandby` or `crm_resource --move`, otherwise Pacemaker and systemd fight over the same unit. Remove a manual move/ban afterwards (`pcs resource clear …`) so Pacemaker may place the resource freely again. Create or change resources only through `pacemaker/configure_multinode_resources.sh` (it deletes and recreates them), and read the resource ids from there; the demo's test (`tests/test_pacemaker_cluster_demo.py`) fails if the ids used by the script stop matching that file.
+
+### Notes and limits
+
+- **Tested:** the `crm_mon` XML parser (against a sample in the layout of `crm_mon --output-as=xml`), the rules for where resources should run, the pre-start health check that guards the two changing stages, the comparison of `systemd` states with Pacemaker's placement, option-injection protection for node names, error text that hides command output, argument handling, and both changing stages **against an in-process fake cluster**, including the restore path when the move never happens and when `unstandby` itself fails (`tests/test_pacemaker_cluster_demo.py`, no Pacemaker needed; it also checks that every resource id the script uses exists in `pacemaker/configure_multinode_resources.sh`). That tests the script's logic and its clean-up, but **the fake cluster is not Pacemaker**.
+- **Not tested against a real Pacemaker/Corosync cluster:** any stage's output against real `crm_mon` XML (attribute names are those of Pacemaker 2.1 as documented, but they differ between versions; if `parse_view` rejects your output or shows empty resources, compare `sudo crm_mon -1 -r --output-as=xml` with `parse_view()`), the `ssh` collection, the failover and ban timings, TLS on the VIP request, and every output sample above. Run it once on a test cluster and correct this note when you have.
+- A VIP request that hits the cluster during the move can fail; the demo reports the count but does not retry (a retry would hide the outage it is meant to show).
+- **No fencing is demonstrated.** `stonith-enabled=false`, so a node that is really dead or cut off is never fenced and a split-brain protection test is outside this demo (Scenarios 22–24 describe what happens). Standby is a clean, cooperative stop; a power failure behaves differently (longer detection time: the Corosync token timeout).
+- `ban` leaves a `cli-ban-…` constraint if the restore fails; `pcs constraint` shows it and `sudo pcs resource clear <clone>` removes it. If an earlier manual test left a constraint or fail count, the demo's pre-start check refuses with a message to run `sudo crm_resource -C`.
+- The demo uses `crm_mon` output of the local node, so run it on a node that is a cluster member; on a node that has lost quorum the result is the minority view.
+
+---
+
 
 ## Authentication Architecture
 

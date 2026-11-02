@@ -30,6 +30,7 @@ This project implements an enterprise-grade, high-availability, distributed inte
 - **Virtual IP (VIP)**: `${FLOWFIRST_VIP}` (Managed by Pacemaker across Mgmt Nodes 1–3)
 - **Extra core nodes (`extramgmtnode1`, `extramgmtnode2`, …)**: optional, none by default. Each is a *full* core node (Galera, RabbitMQ, ZooKeeper, Swift, HAProxy, Pacemaker, Processes 1–4), listed in `EXTRA_NODES` in `.env`; see [Scenario 76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-)
 - **Remote Node 1 (`remotenode1`)**: `${NODE4_IP}` (Dedicated Remote Worker running **`process5` only**; acts strictly as a lightweight client connecting to the RabbitMQ pool, ZooKeeper ensemble, and Swift storage with no local broker/database daemons)
+- **More remote nodes (`remotenode2`, `remotenode3`, …)**: optional, none by default. Each is another client-only Remote Worker (Process 5) that shares the Flow 3 and Flow 6 work with `remotenode1`; see [Scenario 77](#scenario-77-add-another-remote-node-remotenode2-remotenode3-)
 
 > 📐 **[View diagram: Multi-Node Cluster Architecture & Network Topology](docs/diagrams.md#1-multi-node-cluster-architecture--network-topology)**
 
@@ -247,7 +248,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [41](#scenario-41-per-queue-greenthread-independence--flow-1-blockage-does-not-stall-flow-2) | Per-Queue Greenthread Independence | Greenthreads | Slow one queue, confirm sibling greenthread unaffected |
 | [42](#scenario-42-greenthread-auto-restart-on-rabbitmq-consumer-failure) | Greenthread Auto-Restart on RMQ Failure | Greenthreads | Kill RMQ connection, greenthread reconnects automatically |
 | [43](#scenario-43-greenthread-metrics-reporter--throughput-monitoring) | Greenthread Metrics Reporter | Greenthreads | Read throughput counters from `/gt/status` and journal |
-| [44](#scenario-44-remote-node-1--process-5-end-to-end-pipeline-execution--database-validation) | Remote Node 1 / Remote Worker (Process 5) Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 1)→P2→P4, verify MariaDB audit trail & Swift object storage |
+| [44](#scenario-44-remote-node-1--remote-worker-process-5-end-to-end-pipeline-execution--database-validation) | Remote Node 1 / Remote Worker (Process 5) Pipeline Execution & DB Validation | Remote Worker | P1→P5 (Remote Node 1)→P2→P4, verify MariaDB audit trail & Swift object storage |
 | [45](#scenario-45-reading-the-mariadb-galera-error-log-across-scenarios) | Reading the MariaDB Galera Error Log | Galera | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 | [46](#scenario-46-reading-the-rabbitmq-broker-log-across-scenarios) | Reading the RabbitMQ Broker Log | RabbitMQ | Locate log, message phrasebook, per-node timeline, cross-node correlation |
 | [47](#scenario-47-reading-the-zookeeper-server--client-logs-across-scenarios) | Reading the ZooKeeper Server & Client Logs | ZooKeeper | Locate logs, server & kazoo phrasebook, election timeline, session expiry correlation |
@@ -280,6 +281,7 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [74](#scenario-74-haproxy-load-balancing-demo-across-nodes) | HAProxy Load-Balancing Demo Across Nodes | HAProxy | `scripts/haproxy_lb_demo.py`: VIP vs node ports, HAProxy's own backend state, round-robin on REST/MariaDB/RabbitMQ/Swift, live `watch` during a node outage |
 | [75](#scenario-75-pacemaker-cluster-demo-across-nodes) | Pacemaker Cluster Demo Across Nodes | Pacemaker | `scripts/pacemaker_cluster_demo.py`: quorum/DC, resource placement vs the real interfaces and systemd on every node, `failover` (VIP holder to standby) and `ban` (one pipeline instance) with automatic restore, live `watch` |
 | [76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-) | Add an Extra Core Node (`extramgmtnode1`, `extramgmtnode2`, …) | Cluster scaling | `EXTRA_NODES` in `.env`, `scripts/add_extra_node.sh` (10 resumable steps), ZooKeeper rolling restart, Galera join, RabbitMQ `join_cluster`, Swift ring expansion, HAProxy backends, Pacemaker `clone-max`, TLS certificates, verification, rollback
+| [77](#scenario-77-add-another-remote-node-remotenode2-remotenode3-) | Add Another Remote Node (`remotenode2`, `remotenode3`, …) | Cluster scaling | Client-only Remote Worker (Process 5) scale-out: `.env` push, TLS client certificate, `--remote` install, consumer and traffic-split checks, removal; no change to the core cluster |
 
 > **Which node do the demos (Scenarios 69–75) run on?** Log in to **mgmtnode1** and run them there; the few exceptions (stopping a service on mgmtnode3, starting `failover` from mgmtnode2/mgmtnode3, remotenode1 cannot run the Pacemaker demo) are listed in [Where to run the demos](#where-to-run-the-demos-scenarios-6975).
 
@@ -10097,7 +10099,7 @@ This scenario adds a **fourth full core node** next to `mgmtnode1`, `mgmtnode2` 
 | Processes 1–4 | yes | clones, `clone-max` becomes 4 |
 | Process 5 | **no** | stays on the remote worker `remotenode1` |
 
-`remotenode1` is **not** touched and is **not** an extra node: it remains the remote worker (Process 5 only). Names follow a fixed pattern so more nodes can be added later: the next ones are `extramgmtnode2`, `extramgmtnode3`, … (IDs never repeat: ZooKeeper `myid` 5, 6, …; Swift zones 5, 6, …). Repeat this scenario once per node.
+`remotenode1` is **not** touched and is **not** an extra node: it remains the remote worker (Process 5 only). To add more remote workers instead, see [Scenario 77](#scenario-77-add-another-remote-node-remotenode2-remotenode3-). Names follow a fixed pattern so more nodes can be added later: the next ones are `extramgmtnode2`, `extramgmtnode3`, … (IDs never repeat: ZooKeeper `myid` 5, 6, …; Swift zones 5, 6, …). Repeat this scenario once per node.
 
 **One setting drives everything** (blank by default, so nothing changes until you set it):
 
@@ -10409,6 +10411,243 @@ A removed node's ZooKeeper id and Swift zone must **not** be reused for a differ
 - Node removal is manual (the rollback table above); there is no script, on purpose.
 
 ---
+
+## Scenario 77: Add Another Remote Node (`remotenode2`, `remotenode3`, …)
+
+> **Status:** the two helper functions below (`push_env`, `install_cert_to`) and the reachability check were run on a workstation (macOS) against a throw-away CA and loopback listeners, with `ssh` and `sudo` stubbed. That showed: `push_env` changes exactly two lines of `.env` and leaves it mode 600; the certificate is issued and staged as `ca.crt`, `ca.crl`, `pipeline/pipeline.crt` and `pipeline/pipeline.key`; bad names and missing certificates are refused; the reachability check reports an open and a closed port correctly. The statements about Process 5 come from reading `src/application/process5.py`. **Nothing here was run on RHEL, against a real RabbitMQ or ZooKeeper, or with two workers consuming at once.** The SQL, `rabbitmqctl`, `zkCli` and `systemd` commands are unrun. Try it on a test cluster first and correct this note, as the [Production Rollout Run-Book](#production-rollout-run-book) asks for every procedure.
+
+### What this is, and what it is not
+
+A **remote node** runs **Remote Worker (Process 5) only** ([Scenario 44](#scenario-44-remote-node-1--remote-worker-process-5-end-to-end-pipeline-execution--database-validation)). It never accepts connections from the pipeline; it only connects out to RabbitMQ and ZooKeeper (`process5.py` imports neither the database nor the Swift module). Adding one is **scale-out**: RabbitMQ hands each message on `flow3_p1_to_p5` and `flow6_p3_to_p5` to one of the connected workers. Unlike Processes 2–4, Process 5 does **not** use ZooKeeper leader election, so every remote worker works at the same time.
+
+| Component | On the new remote node | Notes |
+|---|---|---|
+| Process 5 (`flowfirst-process5`) | **yes** | the only service |
+| Processes 1–4 | no | never run `install_services.sh` on it without `--remote` |
+| MariaDB, RabbitMQ, ZooKeeper, Swift servers, HAProxy, Pacemaker | no | client-only node |
+| Existing nodes | **unchanged** | no restart, no maintenance window, no change to `EXTRA_NODES` or `ADMIN_TRUSTED_PROXY_CNS` |
+| ZooKeeper ensemble | unchanged | a worker is a client session, not a voter, so the even-voters warning of [Scenario 76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-) does not apply |
+
+What does change: a new host, its `.env` (two lines differ from every other node), **one client certificate when TLS is on**, and optionally a Prometheus target.
+
+**Naming.** Use `remotenode<N>` with the next free number (`remotenode1` already exists, so the next is `remotenode2`, then `remotenode3`, …). Do not reuse a number. The name must be **unique**: it is the key of the worker's ZooKeeper registration and is recorded as `remote_node` in every message it handles. Unlike `EXTRA_NODES`, nothing in `.env` lists remote nodes, so no parser enforces the pattern; the two helpers below do.
+
+**No orchestrator script.** [Scenario 76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-) has one because a core node touches five clusters. Here the steps are short enough to run by hand, and `remotenode1` is hard-wired in the existing scripts (`NODE4_*` in `.env`, `issue_all.sh`, `deploy_secrets.sh`, `add_extra_node.sh`, `install_certs.sh --node 4`). The helpers below work around that without changing the scripts.
+
+### Prerequisites
+
+| # | Check | How |
+|---|---|---|
+| 1 | A RHEL 9.6 host with a **static IP** that can reach mgmtnode1–3 (and any extra core nodes) | `ip -4 addr` |
+| 2 | The user `flowadmin` with SSH key login **from mgmtnode1** and passwordless sudo (Phase 0 pre-step) | `ssh flowadmin@<ip> sudo true` from mgmtnode1 |
+| 3 | Clock in sync (certificates are time-bound, RabbitMQ heartbeats need it) | `chronyc tracking` |
+| 4 | A healthy cluster: `/health` answers, `rabbitmqctl cluster_status` shows every node running, ZooKeeper has a leader | Phases 1b, 2, 5 |
+| 5 | If any `TLS_*_ENABLED=true`: the CA host with `pki/` and the CA passphrase ([Scenario 63](#scenario-63-tls-everywhere--private-ca-mutual-tls-rest-api-and-encrypted-internal-traffic)) | `ls pki/ca/ca.crt` |
+| 6 | Outbound firewall from the new host to **every** core node: RabbitMQ `5672` (`5671` with TLS) and ZooKeeper `2181` (`2281` with TLS). Nothing inbound is needed, except `9105/tcp` for Prometheus when `METRICS_ENABLED=true` | step D checks it |
+
+The examples use `remotenode2` at `10.10.1.141`; replace both with yours.
+
+### Step A — Choose the name and address
+
+Pick the next free `remotenode<N>` and an IP that no other host has ever used. Write them down: every later step uses the same two values.
+
+### Step B — Prepare the new host (on `remotenode2`)
+
+Repeat Phase 0 (pre-step: the `flowadmin` user and its SSH key from mgmtnode1), Phase 0a and Phase 0b of the installation procedure:
+
+```bash
+sudo hostnamectl set-hostname remotenode2        # not needed by the code, but keeps logs and ssh unambiguous
+sudo dnf install -y chrony git python3 python3-pip && sudo systemctl enable --now chronyd && sudo chronyc makestep
+chronyc tracking | grep -E 'Leap status|System time'
+sudo git clone <repo-url> /opt/flowfirst && sudo chown -R "$USER":"$USER" /opt/flowfirst
+cd /opt/flowfirst && python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip && pip install --require-hashes -r requirements.txt
+git -C /opt/flowfirst rev-parse HEAD             # must equal the commit on mgmtnode1
+```
+
+Do **not** copy `src/config/.env.remotenode1` to the new host. It is a template for remotenode1 with placeholder secrets and the wrong `NODE_NAME`; step C sends the real `.env`.
+
+### Step C — Send `.env` (on mgmtnode1)
+
+Only `NODE_NAME` and `CURRENT_NODE_IP` differ per node; everything else, secrets included, is identical. Define this helper once on mgmtnode1. It reads the deployed `/opt/flowfirst/.env`, rewrites those two lines in the stream and writes the result on the new host with mode 600. No secret appears on a command line.
+
+```bash
+SSH_USER="${DEPLOY_SSH_USER:-flowadmin}"
+push_env() {   # push_env remotenode2 10.10.1.141
+    [[ "$1" =~ ^remotenode[0-9]+$ && "$2" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] \
+        || { echo "ERROR: need remotenode<N> and an IPv4 address" >&2; return 2; }
+    sudo sed "s|^NODE_NAME=.*|NODE_NAME=$1|; s|^CURRENT_NODE_IP=.*|CURRENT_NODE_IP=$2|" /opt/flowfirst/.env \
+        | ssh "${SSH_USER}@$2" 'umask 077; cat > /opt/flowfirst/.env && chmod 600 /opt/flowfirst/.env'
+}
+
+push_env remotenode2 10.10.1.141
+ssh flowadmin@10.10.1.141 "grep -E '^(NODE_NAME|CURRENT_NODE_IP)=' /opt/flowfirst/.env"    # shows only these two lines
+```
+
+`RABBITMQ_HOSTS`, `MARIADB_HOSTS` and `ZK_HOSTS` stay blank; `config.py` builds them from `NODE1_IP..NODE3_IP` and `EXTRA_NODES` when the process starts.
+
+### Step D — Check the network path (on `remotenode2`)
+
+This prints the exact broker and ZooKeeper addresses the worker will use, taken from its own `.env`, and tries each one. It uses the TLS ports automatically when the TLS switches are on.
+
+```bash
+cd /opt/flowfirst && .venv/bin/python - <<'PY'
+import socket
+from src.config import config as c
+for label, hosts in (("RabbitMQ", c.RABBITMQ_HOSTS), ("ZooKeeper", c.ZK_HOSTS)):
+    for hp in hosts.split(","):
+        h, p = hp.rsplit(":", 1)
+        try:
+            socket.create_connection((h, int(p)), timeout=3).close()
+            print("OK  ", label, hp)
+        except OSError as e:
+            print("FAIL", label, hp, type(e).__name__)
+PY
+```
+
+Every line must say `OK`. A `FAIL` is a firewall (on either side) or a wrong IP in `.env`; fix it before going on. This checks TCP only, not certificates.
+
+### Step E — Install the service (on `remotenode2`)
+
+```bash
+cd /opt/flowfirst
+sudo ./systemd/install_services.sh /opt/flowfirst --remote       # only flowfirst-process5.service; never run it without --remote here
+```
+
+This also creates the `flowuser` account. Do **not** start the service yet: with TLS on it would stop at start-up because its certificate is not there (step F).
+
+### Step F — TLS client certificate (only when a `TLS_*_ENABLED` switch is `true`)
+
+Skip this step when TLS is off everywhere. Run it **after step E**: the private key is owned by `flowuser`, and until that account exists `install_certs.sh` prints `NOTICE: user 'flowuser' does not exist yet` and leaves the key `root:root`, which the service cannot read. (If you see that notice, run step E, then run `install_cert_to` again.) Otherwise the worker needs its own client identity `remotenode2-pipeline`, signed by the FlowFirst CA. **On the CA/admin host:**
+
+```bash
+./security/issue_cert.sh --name remotenode2-pipeline --profile client --cn remotenode2-pipeline
+
+install_cert_to() {   # install_cert_to remotenode2 10.10.1.141 [--crl-only | --stage DIR]
+    local name="$1" ip="$2" f rc; shift 2
+    [[ "${name}" =~ ^remotenode[0-9]+$ && "${ip}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] \
+        || { echo "ERROR: need remotenode<N> and an IPv4 address" >&2; return 2; }
+    f="$(mktemp)"; printf 'NODE4_NAME=%s\nNODE4_IP=%s\n' "${name}" "${ip}" > "${f}"
+    FLOWFIRST_ENV_FILE="${f}" ./security/install_certs.sh --node 4 "$@"; rc=$?
+    rm -f "${f}"; return ${rc}
+}
+
+install_cert_to remotenode2 10.10.1.141 --stage /tmp/rn2     # review the tree first: no ssh, nothing sent
+install_cert_to remotenode2 10.10.1.141                       # copy it (ssh + sudo as PKI_SSH_USER, flowadmin if you set it)
+```
+
+The helper points `install_certs.sh` at a one-line environment file that says "node 4 is `remotenode2` at this IP", which makes the script stage that node's files instead of `remotenode1`'s. The new host receives only `ca.crt`, `ca.crl`, `pipeline/pipeline.crt` and `pipeline/pipeline.key` (the key mode 600, owned by `flowuser`); no server key ever reaches it. If you changed `TLS_DIR` or `PKI_SSH_USER`, export them in your shell first: the one-line file does not carry them.
+
+`security/issue_all.sh` does **not** issue this certificate (it only knows `remotenode1`), and its error text *"run security/issue_all.sh first"* is misleading here; the `issue_cert.sh` line above is the fix. `security/list_certs.sh` does list the new certificate, so your expiry cron job covers it automatically. Do **not** add `remotenode2-pipeline` to `ADMIN_TRUSTED_PROXY_CNS`: that list is for the HAProxy backend identity of core nodes.
+
+### Step G — Start and check (on `remotenode2`)
+
+```bash
+sudo systemctl enable --now flowfirst-process5
+systemctl is-active flowfirst-process5                            # active
+.venv/bin/python scripts/preflight_check.py                       # no FAIL; SKIP for the RabbitMQ policy and Swift lines is normal on a client-only node
+sudo journalctl -u flowfirst-process5 --since "2 minutes ago" --no-pager \
+    | grep -E "Starting Remote Worker|ZK service registered|RabbitMQ connected|greenthread started|not ready|ERROR"
+```
+
+Expected: `Starting Remote Worker (Process 5) on remotenode2`, `ZK service registered.`, two `RabbitMQ connected at …` lines and two `consumer greenthread started` lines (`flow3_p1_to_p5` and `flow6_p3_to_p5`). `RabbitMQ not ready (attempt n/20)` means the worker cannot reach a broker (step D).
+
+### Step H — Verify (on mgmtnode1)
+
+```bash
+cd /opt/flowfirst && set -a && source .env && set +a
+
+# 1. Both workers registered and healthy (the health entry refreshes about every 30 s; allow a minute).
+#    If AUTH_MODE / TLS_API_ENABLED are on, add the credentials or client certificate you normally use.
+curl -s http://${FLOWFIRST_VIP}:8080/zk/health | jq '.registered_workers.remote_worker, .pipeline_health.remote_worker'
+#    -> ["remotenode1","remotenode2"]   and a "state": "active" entry for each
+
+# 2. RabbitMQ shows one more consumer on each remote queue (GT_CONSUMERS_PER_QUEUE per worker, default 1).
+sudo rabbitmqctl list_queues name consumers | grep -E '^flow(3_p1|6_p3)_to_p5'
+#    -> flow3_p1_to_p5   2        flow6_p3_to_p5   2
+
+# 3. Traffic is shared. Send 20 Flow 3 messages, wait a few seconds, count per worker.
+for i in $(seq 9101 9120); do
+  curl -s -o /dev/null -X POST http://${FLOWFIRST_VIP}:8080/api/flow3 \
+       -H "Content-Type: application/json" -d "{\"item_id\": $i, \"remote_metric\": 64.0}"
+done
+sleep 5
+mariadb -h ${FLOWFIRST_VIP} -u ${MARIADB_USER} -p"${MARIADB_PASSWORD}" ${MARIADB_DB} -e "
+SELECT JSON_VALUE(raw_payload,'\$.remote_node') AS worker, COUNT(*) AS messages
+FROM processed_messages WHERE flow_id = 3 AND item_id BETWEEN 9101 AND 9120 GROUP BY worker;"
+```
+
+*Expected:* one row per worker and the counts add up to 20. The split is roughly even, not exactly 10/10: RabbitMQ gives the next message to any consumer with free prefetch (`GT_PREFETCH_COUNT`, default 1). If you send only a few messages, one fast worker can take them all; that does not mean the other is broken, so check step 2 first.
+
+### Adding `remotenode3`, `remotenode4`, …
+
+Repeat steps B to H. The only inputs are the name, the IP and (with TLS) the certificate:
+
+| Step | `remotenode2` | `remotenode3` |
+|---|---|---|
+| C | `push_env remotenode2 10.10.1.141` | `push_env remotenode3 10.10.1.142` |
+| F | `issue_cert.sh --name remotenode2-pipeline …` and `install_cert_to remotenode2 10.10.1.141` | `issue_cert.sh --name remotenode3-pipeline …` and `install_cert_to remotenode3 10.10.1.142` |
+| H | expect 2 consumers | expect 3 consumers |
+
+Each worker holds `2 × GT_CONSUMERS_PER_QUEUE` RabbitMQ connections (one per consumer greenthread) and one ZooKeeper session. Raising `GT_CONSUMERS_PER_QUEUE` on an existing worker is the alternative to a new host when the machine still has headroom ([Scenario 61](#scenario-61-scalability-test--thousands-of-concurrent-api-invocations-four-node-cluster)).
+
+### Keeping the remote nodes in step with the cluster
+
+Because the existing scripts only reach `remotenode1`, these jobs are manual for `remotenode2` and later:
+
+| When | What to do for each additional remote node |
+|---|---|
+| **Any change to `.env` on mgmtnode1** (secret rotation, a new `EXTRA_NODES` entry from [Scenario 76](#scenario-76-add-an-extra-core-node-extramgmtnode1-extramgmtnode2-), a new setting) | `push_env remotenodeN <ip>` from mgmtnode1, then `sudo systemctl restart flowfirst-process5` on that node. `deploy_secrets.sh` and `add_extra_node.sh` only update remotenode1. A worker with an old `EXTRA_NODES` keeps working but does not know the extra broker, and one with an old password cannot connect. |
+| **Certificate renewal** | `issue_cert.sh --name remotenodeN-pipeline … --force`, `install_cert_to remotenodeN <ip>`, restart `flowfirst-process5` |
+| **CRL refresh** (`refresh_crl.sh` or after a revocation) | `install_cert_to remotenodeN <ip> --crl-only`, then restart `flowfirst-process5` (Python reads the CRL at start). `install_certs.sh --crl-only` without the helper reaches remotenode1 only. |
+| **Code upgrade** | `git -C /opt/flowfirst pull --ff-only` on the node, then restart `flowfirst-process5`; keep all workers on the same commit |
+
+### Rollback and removing a remote node
+
+Removing a worker is safe for the pipeline: a message it had received but not acknowledged is redelivered by RabbitMQ to another worker, and the ZooKeeper dedup barrier in DB Updater (Process 4) skips a duplicate. Stop it gracefully so in-flight messages finish.
+
+```bash
+# On the node:
+sudo systemctl disable --now flowfirst-process5
+
+# On a core node: remove its health entry. Registrations are ephemeral and vanish with the session,
+# but the health znode is persistent and would stay in /zk/health for ever.
+/opt/zookeeper/bin/zkCli.sh -server 127.0.0.1:2181 delete /flowfirst/health/remote_worker/remotenode2
+
+# With TLS: revoke the identity, then distribute the new CRL (Scenario 63, section I)
+./security/revoke_cert.sh remotenode2-pipeline cessationOfOperation
+./security/install_certs.sh --crl-only                 # core nodes and remotenode1
+install_cert_to remotenode3 10.10.1.142 --crl-only      # every other remote node, then restart its flowfirst-process5
+```
+
+Also remove its Prometheus targets. If the host was compromised rather than retired, also rotate the RabbitMQ and MariaDB application passwords ([Scenario 63 H](#scenario-63-tls-everywhere--private-ca-mutual-tls-rest-api-and-encrypted-internal-traffic) explains why revocation alone is not enough). Do not reuse the name for a different machine.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `ERROR: need remotenode<N> and an IPv4 address` | the helper's guard: name must be exactly `remotenode<digits>`, IP a dotted IPv4. Nothing was sent |
+| `ERROR: Missing file …/remotenode2-pipeline.crt (run security/issue_all.sh first)` | step F: run `issue_cert.sh` for that name; `issue_all.sh` will not create it |
+| `NOTICE: user 'flowuser' does not exist yet` from `install_certs.sh` | step E was skipped: the key was left `root:root` and the service cannot read it. Run step E, then `install_cert_to` again |
+| `ERROR: ssh/sudo to … failed` from `install_certs.sh` | `flowadmin` key or passwordless sudo missing on the new host (Phase 0 pre-step), or set `PKI_SSH_USER` |
+| Service exits at start naming `RABBITMQ_PASSWORD` (or another secret) | the `.env` still holds placeholders such as `changeme-…`; redo step C from the deployed `.env` on mgmtnode1 |
+| Service exits with `file not found: …/pipeline/pipeline.crt (set TLS_CLIENT_CERT` | TLS is on but step F was not done on this node |
+| Log repeats `RabbitMQ not ready (attempt n/20)` | step D: firewall, wrong IP in `.env`, or a TLS switch that does not match the broker's listener |
+| `/zk/health` lists one worker although two run | both have the same `NODE_NAME` (the second registration overwrites the first); fix the name, restart |
+| Consumer count did not rise | the service is not running or cannot connect; read its journal. Counts are per consumer greenthread, so `GT_CONSUMERS_PER_QUEUE=2` doubles them |
+| One worker handles everything | send more than a handful of messages; then check step H.2. A worker that is up but idle usually points to a different `.env` (e.g. an old `RABBITMQ_HOSTS`) |
+| `/zk/health` still shows a removed worker | its health znode is persistent; delete it as shown under *Rollback* |
+
+### Notes and limits
+
+- **Not tested on a real cluster:** the `systemd` install, two workers consuming together, the SQL and `rabbitmqctl` checks, the `zkCli` delete, and everything TLS beyond the certificate files being issued and staged correctly. See the status block at the top for what was run.
+- **`remotenode1` stays special in the tooling.** `NODE4_NAME` / `NODE4_IP` in `.env`, `issue_all.sh`, `deploy_secrets.sh`, `add_extra_node.sh` and `install_certs.sh --node 4` know only that node, which is why this scenario uses `push_env` and `install_cert_to`. Making remote nodes a first-class setting (a `REMOTE_NODES` list like `EXTRA_NODES`, with a parser and tests) would remove the manual rows in the table above; it has not been built.
+- **Fixed labels in the payload.** `process5.py` writes `node_type: "remotenode1"`, Process 1 writes `status: "prepared_for_remotenode1"` and `target_node: "remotenode1"`. They are constants, not the real worker. To see which worker handled a message use `remote_node` (top level of `raw_payload`) or `processed_by` in the `process5_remote_transformed_and_reflected` history entry.
+- The demo scripts of Scenarios 69–75 do not know remote nodes (they talk to the core nodes only). `monitoring/prometheus.yml` lists `<remotenode1-ip>:9105` and `:9100` for `node_exporter`; add the same two targets with `node_group: remote` for each new node when `METRICS_ENABLED=true`.
+- Backups cover state, not nodes: nothing to change, and a remote worker holds no state.
+
+---
+
 
 
 ## Authentication Architecture

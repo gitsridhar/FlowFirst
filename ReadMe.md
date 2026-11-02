@@ -275,6 +275,8 @@ curl -s -X DELETE http://${FLOWFIRST_VIP}:8080/api/devices/aaaaaaaa-bbbb-cccc-dd
 | [70](#scenario-70-zookeeper-coordination-demo-across-nodes) | ZooKeeper Coordination Demo Across Nodes | ZooKeeper | `scripts/zk_coordination_demo.py`: leader election & failover, dynamic config watches, service registry, atomic dedup |
 | [71](#scenario-71-rabbitmq-queue-demo-across-nodes) | RabbitMQ Queue Demo Across Nodes | RabbitMQ | `scripts/rabbitmq_queue_demo.py`: work queue, competing consumers, fanout exchange, redelivery after a consumer crash |
 | [72](#scenario-72-greenthread-eventlet-demo-locally-and-across-nodes) | Greenthread (eventlet) Demo Locally and Across Nodes | Greenthreads | `scripts/greenthread_demo.py`: cooperative scheduling, many waits on one OS thread, `restart_on_error`, probing all nodes at once, a consumer + publisher greenthread per RabbitMQ node |
+| [73](#scenario-73-swift-object-storage-demo-across-nodes) | Swift Object Storage Demo Across Nodes | Swift | `scripts/swift_object_demo.py`: write through each proxy node, read from every node, container listing, object lifecycle, the `swift_storage.py` helpers via the VIP |
+
 
 > **Putting the production changes on a cluster:** see the [Production Rollout Run-Book](#production-rollout-run-book) at the end of this file (sample-password rotation, dead-letter policy, admin access, limits, TLS order, measurements, sign-off). Run `sudo python3 scripts/preflight_check.py` on each node first.
 
@@ -9440,6 +9442,182 @@ Rules that apply in this project (see `AGENTS.md`): `gt.monkey_patch()` first; o
 - eventlet is in maintenance mode upstream (it prints a deprecation notice on import). FlowFirst still depends on it; the notice is harmless but is the reason to treat any future migration (e.g. to `asyncio`) as a project of its own.
 
 ---
+
+## Scenario 73: Swift Object Storage Demo Across Nodes
+
+> **Goal:** show, with a small piece of code you can read, how to use OpenStack Swift object storage from several cluster nodes. The script is `scripts/swift_object_demo.py`. It opens one `python-swiftclient` connection **per Swift proxy** (node1, node2, node3; no REST API, no pipeline process), so you see exactly which node handles each write, read, listing and delete. It also calls the FlowFirst helpers in `src/swift/swift_storage.py` through the load-balanced VIP, exactly as DB Updater (Process 4) does. For the pipeline path see Scenarios 2, 44 and 50; for the cluster itself see Scenarios 52 to 58.
+>
+> **Runs on:** node1, node2, node3 (as `flowadmin` with the `.venv` active), or node4 / a workstation as a client (needs TCP 8888 to `NODE1_IP`..`NODE3_IP` for the proxies, TCP 8090 to the VIP for the `helpers` stage, and the same `.env`).
+
+### What it does
+
+| Stage | Pattern | What happens across the nodes | Code |
+|---|---|---|---|
+| 1 `status` | Connectivity & auth | Logs in (tempauth) to each proxy on its own and prints the container, object and byte totals of the account that proxy reports. | `stage_status()` |
+| 2 `write` | **Write anywhere, read everywhere** | One object is written **through each node** (the returned ETag is compared with the MD5 of the content), then every object is read back **through every node** (3 x 3 = 9 reads). Content and ETag must match. | `stage_write_read()`, `read_check()` |
+| 3 `list` | **Container listing** | An object is written through each node; the listing of the container (`prefix=list/`) obtained from **every** node must contain all three. | `stage_listing()` |
+| 4 `lifecycle` | **Object lifecycle** | `PUT` via node1, `POST` metadata (`x-object-meta-stage`) via node2, `HEAD` via node3 shows it, `DELETE` via node1, then `GET` via node2 and node3 answers `404`. | `stage_lifecycle()` |
+| 5 `helpers` | **The FlowFirst helpers** | `put_message_object()`, `get_message_object()`, `list_message_objects()` and `get_swift_status()` against the VIP (`SWIFT_AUTH_URL`), with the same JSON layout and `x-object-meta-*` headers the pipeline writes. Skipped when `SWIFT_ENABLED=false`. | `stage_helpers()` |
+
+Why every read is polled (`wait_for()`): Swift is **eventually consistent**. With three replicas a write succeeds once 2 of 3 are stored, and a listing is updated by the container server a moment later, so a read through another node may be a few milliseconds behind. The demo retries until `--timeout` (default 10 s) and prints how long it took. A failure therefore means "still wrong after 10 s", not "wrong once".
+
+Safety properties of the demo:
+
+- **Own container.** Everything goes into `flowfirst_demo_<run id>`. The pipeline container (`SWIFT_CONTAINER`, default `flowfirst_messages`) is never read, written or listed, and the stage code never uses its name.
+- **Self-cleaning.** Every object and then the container are deleted at the end of a run (`--keep` retains them). Unlike RabbitMQ queues, a Swift container has **no expiry**, so a run killed halfway leaves a small container behind; remove it with `cleanup --run-id <id>` (the id is printed at the start of every run).
+- **TLS and secrets.** `TLS_SWIFT_ENABLED=true` is honoured through `src.tls.tls.swift_kwargs()` and fails closed. `SWIFT_KEY` is never printed. Errors print only the exception type or the HTTP status (`HTTP 503`), never the URL, the host or the library's message.
+- **Connection per node.** tempauth builds the storage URL from the address the login arrived on, so a connection that logged in at `http://<node>:8888/auth/v1.0` keeps talking to that node's proxy. That is what makes "written via node1, read via node3" meaningful. The VIP address (`--nodes vip`) is load-balanced and therefore cannot show it.
+
+### Prerequisites
+
+- Swift running on nodes 1-3 (Phase 2b; Scenario 52 shows all three proxies healthy and the rings identical).
+- `.env` has `NODE1_IP`..`NODE3_IP`, `SWIFT_USER`, `SWIFT_KEY` and `SWIFT_AUTH_URL` (and optionally `TLS_SWIFT_ENABLED`, `SWIFT_PROXY_PORT` if you changed it from 8888).
+- The tempauth user from `.env` is the account admin (`.admin`), which is what allows creating containers.
+
+### A. Run the full demo
+
+```bash
+cd /opt/flowfirst && source .venv/bin/activate
+python3 scripts/swift_object_demo.py
+```
+
+Expected output shape (illustrative: the layout is real, the numbers will differ; this sample was composed from the code and the table layout matches a run against an in-process stand-in server, not a real Swift cluster):
+
+```text
+== FlowFirst Swift Object Storage Demo ==
+run id     : 3f9c1a7e
+proxies    : node1 (10.10.1.128:8888), node2 (10.10.1.129:8888), node3 (10.10.1.130:8888)
+client     : node1
+container  : flowfirst_demo_3f9c1a7e  (the pipeline container flowfirst_messages is not touched)
+tls mode   : OFF (plain HTTP)
+
+[1] Proxy nodes reachable one by one (tempauth login)
+    node   endpoint           status     login (ms)  containers  objects  bytes
+    -----  -----------------  ---------  ----------  ----------  -------  -------
+    node1  10.10.1.128:8888   reachable  14          1           1204     5321877
+    node2  10.10.1.129:8888   reachable  11          1           1204     5321877
+    node3  10.10.1.130:8888   reachable  12          1           1204     5321877
+
+[2] Write through every node, read back through every node
+    written via  read via  read (ms)  result
+    -----------  --------  ---------  -------------------------
+    node1        node1     9          PASS: same bytes and ETag
+    node1        node2     8          PASS: same bytes and ETag
+    node1        node3     8          PASS: same bytes and ETag
+    node2        node1     7          PASS: same bytes and ETag
+    ...
+
+[3] Container listing as seen by every node
+    listed via  objects  list (ms)  result
+    ----------  -------  ---------  ------------------------
+    node1       3/3      12         PASS: all objects listed
+    node2       3/3      11         PASS: all objects listed
+    node3       3/3      11         PASS: all objects listed
+
+[4] Object lifecycle, each step through a different node
+    step                 node   result
+    -------------------  -----  ----------------------------------
+    1. PUT object        node1  PASS: stored
+    2. POST metadata     node2  PASS: metadata set
+    3. HEAD metadata     node3  PASS: x-object-meta-stage=reviewed
+    4. DELETE object     node1  PASS: deleted
+    5. GET after delete  node2  PASS: 404 Not Found
+    6. GET after delete  node3  PASS: 404 Not Found
+
+[5] FlowFirst helpers (swift_storage.py) through the VIP
+    step  call                    result
+    ----  ----------------------  -------------------------------------
+    1     put_message_object()    PASS: stored as helpers/3f9c1a7e.json
+    2     get_message_object()    PASS: payload identical
+    3     list_message_objects()  PASS: object is in the listing
+    4     get_swift_status()      PASS: connected
+
+[6] Summary & Result
+    PASS: Swift object storage verified across cluster nodes.
+
+    Cleaned up 8 demo object(s) and container (use --keep to retain them).
+```
+
+The exit code is 0 on success, 1 if a stage failed, 2 for a usage error (bad `--nodes`, missing `SWIFT_USER`/`SWIFT_KEY`). The account totals in stage 1 are the same on every node because the account database is replicated; small differences right after a write are normal until the replicators and updaters catch up.
+
+### B. Run one stage
+
+```bash
+python3 scripts/swift_object_demo.py status
+python3 scripts/swift_object_demo.py write
+python3 scripts/swift_object_demo.py list
+python3 scripts/swift_object_demo.py lifecycle
+python3 scripts/swift_object_demo.py helpers
+python3 scripts/swift_object_demo.py status --nodes node1,node2,vip   # include the load-balanced address
+```
+
+`--nodes` accepts `node1`, `node2`, `node3`, `vip` (the address in `SWIFT_AUTH_URL`), `host[:port]`, or a full auth URL. The scheme (`http` or `https`) follows `TLS_SWIFT_ENABLED`.
+
+### C. Look at the objects while it runs
+
+```bash
+python3 scripts/swift_object_demo.py write --keep          # prints the run id
+set -a && source /opt/flowfirst/.env && set +a
+# Log in at node1 and list the demo container with plain curl (what python-swiftclient does underneath):
+TOKEN_HDRS=$(curl -s -D - -o /dev/null -H "X-Auth-User: ${SWIFT_USER}" -H "X-Auth-Key: ${SWIFT_KEY}" "http://${NODE1_IP}:8888/auth/v1.0")
+echo "${TOKEN_HDRS}" | grep -i '^x-storage-url'            # the storage URL points at node1
+# Where do the replicas of one object live? (run on any of node1-node3, Scenario 52)
+sudo swift-get-nodes /etc/swift/object.ring.gz AUTH_<account> flowfirst_demo_<run id> write/written-by-node1.json
+python3 scripts/swift_object_demo.py cleanup --run-id <run id>
+```
+
+`swift-get-nodes` prints three primary nodes, one per cluster node, which is the replica placement Scenario 52 verifies. Do not paste the token or `SWIFT_KEY` into tickets.
+
+### D. Prove it works with a node down
+
+Swift needs 2 of 3 replicas to accept a write, so the demo keeps working against the two remaining proxies (Scenario 53 explains the catch-up in detail). Stop the Swift proxy on node3 and run the demo against the other two nodes:
+
+```bash
+sudo systemctl stop openstack-swift-proxy                      # on node3
+python3 scripts/swift_object_demo.py run --nodes node1,node2   # PASS: writes still succeed on 2 of 3 replicas
+python3 scripts/swift_object_demo.py status                    # node3 shows "unreachable (...)", exit code 0 (2 of 3 up)
+sudo systemctl start openstack-swift-proxy                     # on node3
+```
+
+`status` reports success while a majority of the listed proxies answer, so one node down is still exit code 0 and all three down is exit code 1. Stopping only the *proxy* leaves the account, container and object servers on node3 running, so node3 still holds replicas; to stop replica storage as well, stop all four `openstack-swift-*` units (Scenario 53). If a `write` read-back fails for a few seconds right after a node returns, that is the replicator catching up; the demo waits for it up to `--timeout`.
+
+### How to use these patterns in your own code
+
+```python
+import json
+from src.swift.swift_storage import (
+    get_swift_connection, put_message_object, get_message_object, list_message_objects,
+)
+
+# 1. The FlowFirst helpers (preferred inside the pipeline). They return tuples, check [0] for success.
+ok, name = put_message_object({"message_id": "m1", "flow": 1, "item_id": 7})      # -> flow1/m1.json
+ok, data, headers = get_message_object("flow1/m1.json")
+ok, objects, err = list_message_objects(prefix="flow1/", limit=50)
+
+# 2. python-swiftclient directly, when you need a call the helpers do not wrap (HEAD, POST, DELETE).
+conn = get_swift_connection()                       # SWIFT_AUTH_URL / USER / KEY from .env, TLS aware, retries=3
+conn.put_container("my_container")                  # idempotent
+etag = conn.put_object("my_container", "a/b.json", contents=json.dumps({"x": 1}).encode(),
+                       content_type="application/json", headers={"x-object-meta-owner": "me"})
+meta = conn.head_object("my_container", "a/b.json")                 # metadata only, no body
+conn.post_object("my_container", "a/b.json", {"x-object-meta-owner": "you"})   # REPLACES all custom metadata
+headers, body = conn.get_object("my_container", "a/b.json")
+_, listing = conn.get_container("my_container", prefix="a/", full_listing=True)  # pages past the 10 000 limit
+conn.delete_object("my_container", "a/b.json")
+```
+
+Rules that apply in this project (see `AGENTS.md`): build the connection only through `get_swift_connection()` (it adds `swift_kwargs()`, so TLS and the client certificate are applied or the call fails closed; never pass `insecure=True`), keep the pipeline's object layout `flow<N>/<message_id>.json`, treat a Swift failure as **non-fatal** next to the MariaDB write (the helpers return `(False, ...)` instead of raising), and never put `SWIFT_KEY` or an exception message with a URL into a log line or a response body. `post_object` replaces all custom metadata of the object, so send the full set.
+
+### Notes and limits
+
+- **Tested:** target resolution, container naming (the demo container never equals the pipeline container), ETag calculation, error text that hides URLs and hosts, the polling helper, table rendering, argument handling, and the "proxy unreachable" path (`tests/test_swift_object_demo.py`, no Swift server needed). The full `run` was also executed on a workstation against a small in-process HTTP stand-in that speaks just enough of the Swift protocol (tempauth login, container and object `PUT`/`GET`/`HEAD`/`POST`/`DELETE`, listings with `marker` paging); that checks the script's logic, the exit codes and the clean-up, but it is **not** Swift. **Not tested against a real Swift cluster**: replication timing, the 2-of-3 write quorum, the storage URL returned by tempauth, and the output sample above have not been run end to end. Run it once on a test cluster and correct this note when you have.
+- The demo talks to each proxy directly and bypasses HAProxy (`:8090`) on purpose; real clients should use `SWIFT_AUTH_URL` (the VIP) via `get_swift_connection()`.
+- The `helpers` stage always goes through `SWIFT_AUTH_URL`, whatever `--nodes` says; it shows the pipeline path, not a node-specific one.
+- Objects are tiny (under 200 bytes), so the timings say nothing about throughput; Scenario 62 measures that.
+- The ETag equals the MD5 of the content only for ordinary objects. It is used here as an integrity check (MD5 is what Swift defines), not for anything security-related; large or segmented objects have a different ETag.
+
+---
+
 
 ## Authentication Architecture
 

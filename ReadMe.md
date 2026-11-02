@@ -10121,9 +10121,9 @@ With four core nodes, **ZooKeeper has 4 voters and needs 3 for quorum**, and Pac
 |---|---|---|
 | 1 | A RHEL 9.6 host with a **static IP** on the cluster network, same subnet as mgmtnode1–3 | `ip -4 addr` |
 | 2 | **Host name equals the node name**: RabbitMQ is named `rabbit@<short hostname>` | `sudo hostnamectl set-hostname extramgmtnode1` |
-| 3 | The user `flowadmin` with SSH key login **and passwordless sudo**, same as on mgmtnode1–3 (Phase 0) | `ssh flowadmin@<ip> sudo true` from mgmtnode1 |
+| 3 | The user `flowadmin` with SSH key login **from mgmtnode1** and passwordless sudo — identical setup to mgmtnode1–3 ([Phase 0 pre-step](#phase-0-pre-step--create-a-dedicated-admin-user)) | `ssh flowadmin@<ip> sudo true` from mgmtnode1 |
 | 4 | Clock in sync (RabbitMQ and Galera refuse or misbehave otherwise) | `sudo dnf install -y chrony && sudo systemctl enable --now chronyd && chronyc tracking` |
-| 5 | Same OS packages as the others: `git python3 python3-pip` | Phase 0b |
+| 5 | Same OS packages as the others: `git python3 python3-pip` | [Phase 0b](#phase-0b--clone-repo--python-environment-all-nodes) |
 | 6 | **Healthy existing cluster**: Galera `wsrep_cluster_size=3` Synced, ZooKeeper has a leader, RabbitMQ shows 3 running nodes, `pcs status` all Online | the verification commands of Phases 1, 1b, 2, 5 |
 | 7 | A recent backup (`scripts/backup_flowfirst.sh`) | [Backup](#production-rollout-run-book) |
 | 8 | A maintenance window. Existing nodes are changed **one at a time** (ZooKeeper restart, HAProxy reload) but the API stays up | — |
@@ -10167,18 +10167,94 @@ Check the value is accepted: `./scripts/add_extra_node.sh extramgmtnode1 --plan`
 
 ### Step B — Prepare the new host (on `extramgmtnode1`)
 
-Repeat Phase 0 / 0a / 0b / 1c of the installation procedure on the new host:
+This step mirrors what was done on mgmtnode1–3 during the original installation (Phases 0 pre-step, 0a, 0b, and 1c). The steps below are complete and self-contained; cross-reference the linked phases if you need more detail on any of them.
+
+**B.1 — Create the `flowadmin` user (cloud/hypervisor console as root)**
+
+The orchestrator scripts SSH between nodes as `flowadmin`; the account must exist before step C or anything remote will fail.
 
 ```bash
-sudo dnf install -y chrony git python3 python3-pip && sudo systemctl enable --now chronyd && sudo chronyc makestep
-sudo git clone <repo-url> /opt/flowfirst && sudo chown -R $USER:$USER /opt/flowfirst
+# On extramgmtnode1 console, as root — create the admin user and grant passwordless sudo
+useradd -m -s /bin/bash -c "FlowFirst admin" flowadmin
+usermod -aG wheel flowadmin
+echo "flowadmin ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/flowadmin
+chmod 440 /etc/sudoers.d/flowadmin
+install -d -m 700 -o flowadmin -g flowadmin /home/flowadmin/.ssh
+```
+
+**B.2 — Install the mgmtnode1 public key (console as root on `extramgmtnode1`)**
+
+The key was generated during the original cluster install ([Phase 0 pre-step](#phase-0-pre-step--create-a-dedicated-admin-user) Step 2). Retrieve it from mgmtnode1 and install it here:
+
+```bash
+# On mgmtnode1 — print the public key:
+cat /home/flowadmin/.ssh/id_ed25519.pub
+# Output: ssh-ed25519 AAAA...  flowadmin@flowfirst
+
+# On extramgmtnode1 console, as root — paste the public key line:
+PUBKEY="ssh-ed25519 AAAA...paste-full-line-here... flowadmin@flowfirst"
+echo "${PUBKEY}" >> /home/flowadmin/.ssh/authorized_keys
+chown flowadmin:flowadmin /home/flowadmin/.ssh/authorized_keys
+chmod 600 /home/flowadmin/.ssh/authorized_keys
+restorecon -R /home/flowadmin/.ssh
+```
+
+> **Shortcut (if you already have sudo on the new host as your own user):**
+> ```bash
+> # From mgmtnode1 as flowadmin — push the key without the console:
+> cat /home/flowadmin/.ssh/id_ed25519.pub | \
+>     ssh <your-user>@10.10.1.132 "sudo tee -a /home/flowadmin/.ssh/authorized_keys > /dev/null \
+>       && sudo chown flowadmin:flowadmin /home/flowadmin/.ssh/authorized_keys \
+>       && sudo chmod 600 /home/flowadmin/.ssh/authorized_keys \
+>       && sudo restorecon -R /home/flowadmin/.ssh"
+> ```
+
+**B.3 — Add the new host to `known_hosts` on mgmtnode1**
+
+SSH refuses to connect non-interactively to a host it has never seen. Run this once on mgmtnode1 as `flowadmin`:
+
+```bash
+# On mgmtnode1 as flowadmin:
+ssh-keyscan -H 10.10.1.132 >> ~/.ssh/known_hosts 2>/dev/null
+sort -u ~/.ssh/known_hosts -o ~/.ssh/known_hosts
+# Verify:
+ssh -o BatchMode=yes -o ConnectTimeout=5 flowadmin@10.10.1.132 "hostname"   # must print: extramgmtnode1
+```
+
+**B.4 — Set the hostname**
+
+RabbitMQ names itself `rabbit@<short hostname>`; this must match `NODE_NAME` exactly:
+
+```bash
+# On extramgmtnode1 as flowadmin:
+sudo hostnamectl set-hostname extramgmtnode1
+hostname    # verify: extramgmtnode1
+```
+
+**B.5 — Time sync, repo clone, Python environment, and file descriptor limit**
+
+```bash
+# On extramgmtnode1 as flowadmin:
+sudo dnf install -y chrony git python3 python3-pip
+sudo systemctl enable --now chronyd && sudo chronyc makestep
+chronyc tracking | grep -E 'Leap status|System time'
+
+sudo git clone <repo-url> /opt/flowfirst && sudo chown -R flowadmin:flowadmin /opt/flowfirst
 cd /opt/flowfirst && python3 -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip && pip install --require-hashes -r requirements.txt
+
+# File descriptor limit (Phase 1c) — required for 1000+ eventlet greenthreads:
 echo "flowuser soft nofile 65536" | sudo tee -a /etc/security/limits.d/flowfirst.conf
 echo "flowuser hard nofile 65536" | sudo tee -a /etc/security/limits.d/flowfirst.conf
 ```
 
-The repository must be at the **same commit** as on the other nodes (`git -C /opt/flowfirst rev-parse HEAD`). Step 1 of the orchestrator runs `git pull --ff-only` everywhere.
+The repository must be at the **same commit** as on the other nodes:
+
+```bash
+git -C /opt/flowfirst rev-parse HEAD   # compare with mgmtnode1
+```
+
+Step 1 of the orchestrator runs `git pull --ff-only` everywhere to keep them in sync.
 
 ### Step C — Distribute `.env`
 

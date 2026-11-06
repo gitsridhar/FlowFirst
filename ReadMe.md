@@ -425,17 +425,7 @@ done
 > | `Host key verification failed` | `ssh-keyscan` step above was skipped, or a node's host key changed | Re-run the `ssh-keyscan` loop above, then retry |
 > | `PubkeyAuthentication no` in sshd_config | A non-default sshd_config disables key auth | `sudo grep PubkeyAuthentication /etc/ssh/sshd_config` — if set to `no`, change to `yes` and `sudo systemctl reload sshd` |
 
-**Step 5 — From this point on, work as `flowadmin` and prefix install commands with `sudo`:**
-
-```bash
-# From the mgmtnode1 console (still as root):
-su - flowadmin
-
-# Or from a remote machine (key auth — no password):
-ssh -i /home/flowadmin/.ssh/id_ed25519 flowadmin@${NODE1_IP}
-
-# All subsequent phases run as flowadmin with sudo
-```
+**From this point on, stay logged in as `flowadmin` and prefix install commands with `sudo`.** All subsequent phases run as `flowadmin`. If you open a new session later, log in again with `su - flowadmin` from the mgmtnode1 console (as root), or from a remote machine with key auth (no password): `ssh -i /home/flowadmin/.ssh/id_ed25519 flowadmin@${NODE1_IP}`.
 
 **Set `PKI_SSH_USER` in `.env`** so `security/install_certs.sh` uses `flowadmin` when pushing certificates to nodes over SSH (Phase 6 / Scenario 63):
 

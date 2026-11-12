@@ -104,7 +104,13 @@ EOF
     fi
 fi
 
-# Detect WSREP provider library path if not explicitly configured
+# Detect WSREP provider library path if not configured, or if the configured
+# file does not exist on this node (e.g. a stale value left in .env).
+if [ -n "${MARIADB_GALERA_WSREP_PROVIDER}" ] && [ ! -f "${MARIADB_GALERA_WSREP_PROVIDER}" ]; then
+    echo "  WARNING: configured MARIADB_GALERA_WSREP_PROVIDER does not exist: ${MARIADB_GALERA_WSREP_PROVIDER}"
+    echo "           Auto-detecting the installed library instead (fix the value in .env)."
+    MARIADB_GALERA_WSREP_PROVIDER=""
+fi
 if [ -z "${MARIADB_GALERA_WSREP_PROVIDER}" ]; then
     if [ -f "/usr/lib64/galera-4/libgalera_smm.so" ]; then
         MARIADB_GALERA_WSREP_PROVIDER="/usr/lib64/galera-4/libgalera_smm.so"

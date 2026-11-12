@@ -106,12 +106,12 @@ fi
 
 # Detect WSREP provider library path if not explicitly configured
 if [ -z "${MARIADB_GALERA_WSREP_PROVIDER}" ]; then
-    if [ -f "/usr/lib64/galera-4/libgalera_smm.so" ]; then
-        MARIADB_GALERA_WSREP_PROVIDER="/usr/lib64/galera-4/libgalera_smm.so"
-    elif [ -f "/usr/lib64/galera/libgalera_smm.so" ]; then
+    if [ -f "/usr/lib64/galera/libgalera_smm.so" ]; then
         MARIADB_GALERA_WSREP_PROVIDER="/usr/lib64/galera/libgalera_smm.so"
-    else
+    elif [ -f "/usr/lib64/galera-4/libgalera_smm.so" ]; then
         MARIADB_GALERA_WSREP_PROVIDER="/usr/lib64/galera-4/libgalera_smm.so"
+    else
+        MARIADB_GALERA_WSREP_PROVIDER="/usr/lib64/galera/libgalera_smm.so"
     fi
 fi
 echo "  WSREP Provider:   ${MARIADB_GALERA_WSREP_PROVIDER}"

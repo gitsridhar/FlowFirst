@@ -48,6 +48,34 @@ NODE3_IP="$(_get NODE3_IP)"
 NODE4_IP="$(_get NODE4_IP)"
 SSH_USER="${DEPLOY_SSH_USER:-flowadmin}"
 
+# ---------------------------------------------------------------------------
+# SSH identity. The script is run with sudo, so ssh/scp execute as root and
+# would look in /root/.ssh (no key there) and fall back to a password prompt.
+# Use the key of the user who invoked sudo (normally flowadmin) instead.
+# Override with DEPLOY_SSH_KEY=<private key path>.
+# ---------------------------------------------------------------------------
+_home_of() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
+SSH_KEY="${DEPLOY_SSH_KEY:-}"
+KNOWN_HOSTS=""
+if [[ -z "${SSH_KEY}" ]]; then
+    for _u in "${SUDO_USER:-}" "${SSH_USER}"; do
+        [[ -n "${_u}" ]] || continue
+        _h="$(_home_of "${_u}")"
+        [[ -n "${_h}" && -f "${_h}/.ssh/id_ed25519" ]] || continue
+        SSH_KEY="${_h}/.ssh/id_ed25519"
+        [[ -f "${_h}/.ssh/known_hosts" ]] && KNOWN_HOSTS="${_h}/.ssh/known_hosts"
+        break
+    done
+fi
+if [[ -z "${SSH_KEY}" || ! -r "${SSH_KEY}" ]]; then
+    echo "ERROR: no readable SSH private key found for ${SSH_USER}."
+    echo "  Expected ~${SUDO_USER:-${SSH_USER}}/.ssh/id_ed25519 (Phase 0 pre-step), or set DEPLOY_SSH_KEY=<path>."
+    exit 1
+fi
+# BatchMode: fail with an error instead of ever prompting for a password.
+SSH_OPTS=(-i "${SSH_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes)
+[[ -n "${KNOWN_HOSTS}" ]] && SSH_OPTS+=(-o "UserKnownHostsFile=${KNOWN_HOSTS}")
+
 # Extra core nodes: the parser validates every entry before anything is pushed
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/extra_nodes_lib.sh"
@@ -96,11 +124,11 @@ for node_ip in "${TARGET_IPS[@]}"; do
     echo "  → ${nodename} (${node_ip})"
 
     # Copy the file
-    scp -q "${ENV_FILE}" "${SSH_USER}@${node_ip}:/opt/flowfirst/.env"
+    scp -q "${SSH_OPTS[@]}" "${ENV_FILE}" "${SSH_USER}@${node_ip}:/opt/flowfirst/.env"
 
     # Restore the two per-node lines — the scp above overwrote them with mgmtnode1's values
     # shellcheck disable=SC2087
-    ssh -T "${SSH_USER}@${node_ip}" <<REMOTE
+    ssh -T "${SSH_OPTS[@]}" "${SSH_USER}@${node_ip}" <<REMOTE
 set -e
 sed -i 's/^NODE_NAME=.*/NODE_NAME=${nodename}/' /opt/flowfirst/.env
 sed -i 's/^CURRENT_NODE_IP=.*/CURRENT_NODE_IP=${node_ip}/' /opt/flowfirst/.env
